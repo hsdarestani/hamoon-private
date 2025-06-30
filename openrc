@@ -1,0 +1,11 @@
+export OS_AUTH_URL=http://cloud.sc1.abraraz.com:5000
+export OS_INTERFACE=public
+export OS_IDENTITY_API_VERSION=3
+
+export OS_PROJECT_ID=eb70cfb3e83e4cb4a74201e817aa7cf3
+export OS_PROJECT_NAME="Account #1806"
+export OS_USER_DOMAIN_NAME="Default"
+export OS_PROJECT_DOMAIN_ID="default"
+
+export OS_USERNAME="hsbl2553_1"
+export OS_PASSWORD="JCM33IYv"
