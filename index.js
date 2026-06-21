@@ -1,635 +1,2778 @@
-require('dotenv').config({ path: __dirname + '/.env' });
+
+// Importing necessary modules
+require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
-const {
-  upsertUser,
-  getUserWallet,
-  debitUser,
-  creditUser, // Import new function
-  recordPurchase,
-  recordTestServer,
-  storeKeyPair,     // Import new function
-  getKeyPair,       // Import new function
-  deleteKeyPairFromDb // Import new function
-} = require('./db');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const cron = require('node-cron');
 
-// Telegram Bot Token
-const token = process.env.TELEGRAM_BOT_TOKEN;
-if (!token) {
-  console.error('TELEGRAM_BOT_TOKEN not set');
-  process.exit(1);
+// --- DEBUG WRAPPER ---
+const _send = sendMessage;
+sendMessage = function(chatId, text, options = {}) {
+  console.log('\n=======================');
+  console.log('SENDING TO:', chatId);
+  console.log('TEXT:', JSON.stringify(text));
+  console.log('OPTIONS:', JSON.stringify(options));
+  console.log('=======================\n');
+
+  return _send(chatId, text, options);
+};
+
+
+
+
+// Importing datacenter configurations
+//const datacenters = require('./datacenters');
+function ensureUserState(uid) {
+  if (!state[uid]) state[uid] = {};
+  if (!state[uid].cb) state[uid].cb = {};
 }
-const bot = new TelegramBot(token, { webHook: false });
-
-// Initialize bot with optional proxy
-//const bot = new TelegramBot(token, {
-  //polling: true,
-//  ...(process.env.HTTPS_PROXY && { request: { agent: new (require('https-proxy-agent'))(process.env.HTTPS_PROXY) } })
-//});
-
-// OpenStack Auth and URL helpers
-async function getToken() {
-  const body = {
-    auth: {
-      identity: {
-        methods: ['password'],
-        password: {
-          user: {
-            name: process.env.OS_USERNAME,
-            domain: { name: process.env.OS_USER_DOMAIN_NAME },
-            password: process.env.OS_PASSWORD
-          }
-        }
-      },
-      scope: {
-        project: {
-          id: process.env.OS_PROJECT_ID,
-          domain: { name: process.env.OS_PROJECT_DOMAIN_ID }
-        }
-      }
+// === Low-balance helpers ===
+async function getUserTopupTotal(userId) {
+  // مجموع همه شارژها (هیچ‌وقت کم نمی‌کنیم؛ فقط مقایسه)
+  const logs = await getWalletLogs(userId, null) || [];
+  // اگر لاگ‌تایپ “approved” داری ازش استفاده کن؛ وگرنه هر amount مثبت
+  let sum = 0;
+  for (const l of logs) {
+    const amt = Number(l.amount || 0);
+    const type = String(l.type || '').toLowerCase();
+    if (amt > 0 && (type === 'approved' || type === 'deposit' || type === 'charge' || !l.type)) {
+      sum += amt;
     }
-  };
-  try {
-    const r = await axios.post(`${process.env.OS_AUTH_URL}/v3/auth/tokens`, body, { headers: { 'Content-Type': 'application/json' } });
-    return r.headers['x-subject-token'];
-  } catch (error) {
-    console.error('Error getting OpenStack token:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to authenticate with OpenStack.');
   }
+  return Math.max(0, Math.floor(sum));
 }
 
-const computeUrl = () => process.env.OS_COMPUTE_URL || process.env.OS_AUTH_URL.replace(':5000', ':8774') + '/v2.1';
-const imageUrl = () => process.env.OS_IMAGE_URL || process.env.OS_AUTH_URL.replace(':5000', ':9292') + '/v2/images';
-
-// List flavors and images with labels
-async function listFlavors(tok) {
+async function getProjectCost(userId, dc, projectId, downloadOnly, pricePerGb) {
   try {
-    const r = await axios.get(`${computeUrl()}/flavors/detail`, { headers: { 'X-Auth-Token': tok } }); // Use /detail for more info if needed
-    return r.data.flavors
-      .filter(f => /^\d+-\d+-\d+$/.test(f.name)) // Filter flavors with specific naming convention
-      .map(f => {
-        const [cpu, ram, disk] = f.name.split('-').map(Number);
-        // Calculate price based on CPU, RAM, and Disk. Adjust coefficients as needed.
-        const price = (cpu * 10) + (ram * 5) + (disk * 0.1);
-        return { id: f.id, label: `${cpu} هسته، ${ram}GB رم، ${disk}GB SSD`, price: price };
-      });
-  } catch (error) {
-    console.error('Error listing flavors:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to retrieve server flavors.');
-  }
-}
+    const start = 0;
+    const end   = Math.floor(Date.now() / 1000);
+    const url   = `${dc.TRAFFIC_API_BASE_URL}project/${encodeURIComponent(projectId)}?start_time=${start}&end_time=${end}`;
 
-async function listImages(tok) {
-  try {
-    const r = await axios.get(imageUrl(), { headers: { 'X-Auth-Token': tok } });
-    // Filter for active images that are public or shared with the project
-    return r.data.images
-      .filter(i => i.status === 'active' && (i.visibility === 'public' || i.visibility === 'shared'))
-      .map(i => ({ id: i.id, label: i.name }));
-  } catch (error) {
-    console.error('Error listing images:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to retrieve images.');
-  }
-}
-
-// Key pair operations - NEW FUNCTIONS
-async function createKeyPair(tok, keyName) {
-  try {
-    const body = { keypair: { name: keyName, type: 'ssh' } };
-    const r = await axios.post(`${computeUrl()}/os-keypairs`, body, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
-    return r.data.keypair; // Returns name, public_key, private_key, fingerprint
-  } catch (error) {
-    console.error('Error creating key pair:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to create SSH key pair.');
-  }
-}
-
-async function deleteKeyPair(tok, keyName) {
-  try {
-    await axios.delete(`${computeUrl()}/os-keypairs/${keyName}`, { headers: { 'X-Auth-Token': tok } });
-    return true;
-  } catch (error) {
-    console.error('Error deleting key pair:', error.response ? error.response.data : error.message);
-    // Do not throw error if key pair doesn't exist, just log it.
-    return false;
-  }
-}
-
-// Server ops - MODIFIED createServer to include key_name
-async function createServer(tok, name, flavorRef, imageRef, key_name, meta = {}) {
-  const body = {
-    server: {
-      name,
-      flavorRef,
-      imageRef,
-      networks: [{ uuid: process.env.OS_NETWORK_ID }],
-      metadata: meta,
-      key_name: key_name // Include the key name
-      // You can also add user_data here for cloud-init scripts, e.g., to set a root password
-      // user_data: Buffer.from('#cloud-config\npassword: YOUR_ROOT_PASSWORD\nchpasswd: { expire: False }').toString('base64')
-    }
-  };
-  try {
-    const r = await axios.post(`${computeUrl()}/servers`, body, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
-    return r.data.server;
-  } catch (error) {
-    console.error('Error creating server:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to create server.');
-  }
-}
-
-async function getServer(tok, id) {
-  try {
-    const r = await axios.get(`${computeUrl()}/servers/${id}`, { headers: { 'X-Auth-Token': tok } });
-    return r.data.server;
-  } catch (error) {
-    console.error('Error getting server:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to retrieve server details.');
-  }
-}
-
-async function suspendServer(tok, id) {
-  try {
-    await axios.post(`${computeUrl()}/servers/${id}/action`, { 'os-suspend': null }, { headers: { 'X-Auth-Token': tok } });
-    return true;
-  } catch (error) {
-    console.error('Error suspending server:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to suspend server.');
-  }
-}
-
-async function startServer(tok, id) {
-  try {
-    await axios.post(`${computeUrl()}/servers/${id}/action`, { 'os-start': null }, { headers: { 'X-Auth-Token': tok } });
-    return true;
-  } catch (error) {
-    console.error('Error starting server:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to start server.');
-  }
-}
-
-async function deleteServer(tok, id) {
-  try {
-    await axios.delete(`${computeUrl()}/servers/${id}`, { headers: { 'X-Auth-Token': tok } });
-    return true;
-  } catch (error) {
-    console.error('Error deleting server:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to delete server.');
-  }
-}
-
-async function listServers(tok) {
-  try {
-    const r = await axios.get(`${computeUrl()}/servers/detail`, { headers: { 'X-Auth-Token': tok } });
-    return r.data.servers;
-  } catch (error) {
-    console.error('Error listing servers:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to list servers.');
-  }
-}
-
-
-// State and menus
-const CHANNEL = 'hamooncloud';
-const state = {}; // To manage multi-step conversations
-const mainMenu = { reply_markup: { resize_keyboard: true, keyboard: [['🆓 تست رایگان'], ['🛒 خرید سرور', '💰 افزایش اعتبار'], ['⚙️ مدیریت سرورها'], ['📞 پشتیبانی']] } };
-
-// Helper to send messages and handle errors
-async function sendMessage(chatId, text, options) {
-  try {
-    await bot.sendMessage(chatId, text, options);
-  } catch (error) {
-    console.error(`Error sending message to ${chatId}:`, error.message);
-  }
-}
-
-// /start
-bot.onText(/\/start/, async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  try {
-    const m = await bot.getChatMember(`@${CHANNEL}`, u);
-    if (['left', 'kicked'].includes(m.status)) throw 0;
-  } catch (e) {
-    return sendMessage(ch, `🌐 لطفاً در کانال @${CHANNEL} عضو شوید.`, { reply_markup: { inline_keyboard: [[{ text: '➡️ عضویت', url: `https://t.me/${CHANNEL}` }]] } });
-  }
-  state[u] = { step: 'WAIT_CONTACT' };
-  sendMessage(ch, '📲 شماره خود را ارسال کنید:', { reply_markup: { keyboard: [[{ text: 'ارسال شماره', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true } });
-});
-
-bot.on('contact', async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  if (state[u]?.step !== 'WAIT_CONTACT' || msg.contact.user_id !== u) {
-    return sendMessage(ch, '⚠️ شماره ارسال شده متعلق به شما نیست یا در انتظار شماره شما نیستم.');
-  }
-  await upsertUser({ telegram_id: u, phone: msg.contact.phone_number, step: 'READY' });
-  state[u] = { step: 'READY' };
-  sendMessage(ch, '✅ ثبت شد!', mainMenu);
-});
-
-bot.on('message', msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  // Handle messages when expecting contact
-  if (state[u]?.step === 'WAIT_CONTACT' && !msg.contact) {
-    sendMessage(ch, '⚠️ لطفا با دکمه "ارسال شماره" اقدام به ارسال شماره خود کنید.');
-    return;
-  }
-
-  // Handle messages for "Buy Server" flow
-  if (state[u]?.step === 'WAIT_SERVER_NAME' && msg.text) {
-    handleServerNameInput(u, ch, msg.text);
-    return;
-  }
-
-  // Handle messages for "Increase Credit" flow
-  if (state[u]?.step === 'WAIT_DEPOSIT_AMOUNT' && msg.text) {
-    handleDepositAmountInput(u, ch, msg.text);
-    return;
-  }
-});
-
-
-// Free test
-bot.onText(/🆓 تست رایگان/, async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  try {
-    if (await recordTestServer(u)) {
-      return sendMessage(ch, '❌ تست رایگان قبلا توسط شما استفاده شده است.');
-    }
-    sendMessage(ch, '🚀 در حال ساخت سرور تست رایگان شما... لطفا صبر کنید.');
-
-    const tok = await getToken();
-    const imgs = await listImages(tok);
-    // Use a specific flavor for free test, e.g., the smallest one or a predefined ID
-    // Ensure this flavor ID exists in your OpenStack environment
-    const testFlavorId = process.env.OS_TEST_FLAVOR_ID || '1264712d-50b7-4323-ac5c-c4f942518f57'; // Example ID
-    const img = imgs[0]; // Take the first available image, or specify one
-    if (!img) {
-      throw new Error('No images available for test server.');
+    const controller = new AbortController();
+    const tmo = setTimeout(() => controller.abort(), 15000);
+    const resp = await fetch(url, { headers: { Authorization: dc.TRAFFIC_API_KEY }, signal: controller.signal });
+    clearTimeout(tmo);
+    if (!resp.ok) {
+      console.error(`[getProjectCost] Traffic API error for project ${projectId}: ${resp.status} ${resp.statusText}`);
+      return { gb: 0, cost: 0 };
     }
 
-    const keyName = `test-key-${u}-${crypto.randomBytes(4).toString('hex')}`;
-    const keyPair = await createKeyPair(tok, keyName);
+    const data = await resp.json();
+    const rx = Number(data?.received_gb || 0);
+    const tx = Number(data?.transmitted_gb || 0);
 
-    const name = 'test-' + crypto.randomBytes(3).toString('hex');
-    const srv = await createServer(tok, name, testFlavorId, img.id, keyName, { user: String(u), type: 'test' });
+    const billableGb = downloadOnly ? rx : (rx + tx);
+    const cost = billableGb * pricePerGb;
 
-    // Store key pair in DB
-    await storeKeyPair(u, srv.id, keyName, keyPair.private_key);
-
-    await recordTestServer(u, srv.id);
-
-    // Fetch flavor label
-    const fl = (await listFlavors(tok)).find(x => x.id === testFlavorId);
-    // Wait for server to get an IP address
-    let serverDetails = await getServer(tok, srv.id);
-    let ipAddress = null;
-    let attempts = 0;
-    while (!ipAddress && attempts < 10) { // Try up to 10 times with delay
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-      serverDetails = await getServer(tok, srv.id);
-      if (serverDetails.addresses && Object.values(serverDetails.addresses).length > 0) {
-        const network = Object.values(serverDetails.addresses)[0];
-        if (network.length > 0 && network[0].addr) {
-          ipAddress = network[0].addr;
-        }
-      }
-      attempts++;
-    }
-
-    if (!ipAddress) {
-      throw new Error('Could not get IP address for the test server.');
-    }
-
-    const details = `✅ سرور تست رایگان شما ساخته شد:\n` +
-      `🔹 نام: ${srv.name}\n` +
-      `🔹 IP: ${ipAddress}\n` +
-      `🔹 Flavor: ${fl ? fl.label : 'N/A'}\n` +
-      `🔹 سیستم عامل: ${img.label}\n\n` +
-      `🔑 کلید SSH خصوصی شما: \n\`\`\`\n${keyPair.private_key}\n\`\`\`\n` +
-      `برای اتصال از طریق SSH:\n\`ssh -i ${keyName}.pem ubuntu@${ipAddress}\``; // Assuming 'ubuntu' user for common images
-
-    sendMessage(ch, details, {
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '▶️ شروع', callback_data: `A_start_${srv.id}` },
-          { text: '⏸️ تعلیق', callback_data: `A_suspend_${srv.id}` }
-        ]]
-      },
-      parse_mode: 'Markdown'
-    });
-
-    // Schedule suspension after 1 hour (3600 seconds)
-    setTimeout(async () => {
-      try {
-        const t = await getToken();
-        await suspendServer(t, srv.id);
-        sendMessage(ch, `⏸️ سرور تست ${srv.name} شما به طور خودکار معلق شد.`);
-      } catch (suspendError) {
-        console.error(`Error suspending test server ${srv.id}:`, suspendError.message);
-        sendMessage(ch, `⚠️ خطا در تعلیق خودکار سرور تست ${srv.name}. لطفا به صورت دستی اقدام کنید.`);
-      }
-    }, 3600 * 1000); // 1 hour in milliseconds
-
-  } catch (e) {
-    console.error('Error in free test creation:', e);
-    sendMessage(ch, `❌ خطا در ساخت سرور تست رایگان: ${e.message || 'خطای ناشناخته'}`);
-  }
-});
-
-// Buy Server Flow - NEW FEATURE
-bot.onText(/🛒 خرید سرور/, async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  try {
-    const tok = await getToken();
-    const flavors = await listFlavors(tok);
-    if (!flavors.length) {
-      return sendMessage(ch, '🚫 در حال حاضر هیچ نوع سروری برای خرید موجود نیست.');
-    }
-
-    state[u] = { step: 'SELECT_FLAVOR', flavors: flavors };
-    const flavorKeyboard = flavors.map(f => [{ text: `${f.label} (${f.price} تومان)`, callback_data: `FLAVOR_${f.id}` }]);
-    sendMessage(ch, 'انتخاب نوع سرور:', { reply_markup: { inline_keyboard: flavorKeyboard } });
-  } catch (e) {
-    console.error('Error initiating buy server:', e);
-    sendMessage(ch, `❌ خطا در شروع فرآیند خرید سرور: ${e.message || 'خطای ناشناخته'}`);
-  }
-});
-
-// Increase Credit Flow - NEW FEATURE
-bot.onText(/💰 افزایش اعتبار/, async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
-  state[u] = { step: 'WAIT_DEPOSIT_AMOUNT' };
-  sendMessage(ch, 'لطفا مبلغ مورد نظر برای افزایش اعتبار را به تومان وارد کنید (مثال: 10000):');
-});
-
-async function handleDepositAmountInput(u, ch, amountText) {
-  const amount = parseFloat(amountText);
-  if (isNaN(amount) || amount <= 0) {
-    sendMessage(ch, '⚠️ مبلغ وارد شده نامعتبر است. لطفا یک عدد مثبت وارد کنید.');
-    return;
-  }
-  try {
-    await creditUser(u, amount);
-    const currentBalance = await getUserWallet(u);
-    sendMessage(ch, `✅ ${amount} تومان به اعتبار شما اضافه شد. موجودی فعلی: ${currentBalance} تومان.`, mainMenu);
-  } catch (e) {
-    console.error('Error crediting user:', e);
-    sendMessage(ch, `❌ خطا در افزایش اعتبار: ${e.message || 'خطای ناشناخته'}`);
-  } finally {
-    state[u] = { step: 'READY' }; // Reset state
+    return { gb: billableGb, cost: Math.floor(cost) };
+  } catch (err) {
+    console.error(`[getProjectCost] Fatal error for project ${projectId}:`, err.message);
+    return { gb: 0, cost: 0 };
   }
 }
 
 
-// Callback query handler for buy server and manage server actions
-bot.on('callback_query', async q => {
-  const d = q.data, u = q.from.id, ch = q.message.chat.id;
-  await bot.answerCallbackQuery(q.id); // Acknowledge the callback query
+async function getUserProjectTrafficCost(userId) {
+  const projects = getUserProjects(String(userId)) || [];
+  if (!projects.length) return { gb: 0, cost: 0 };
 
-  // Handle Buy Server Flow Callbacks
-  if (d.startsWith('FLAVOR_')) {
-    const flavorId = d.slice(7);
-    const selectedFlavor = state[u]?.flavors?.find(f => f.id === flavorId);
-    if (!selectedFlavor) {
-      return sendMessage(ch, '⚠️ نوع سرور انتخاب شده نامعتبر است. لطفا دوباره تلاش کنید.');
-    }
-    state[u].selectedFlavor = selectedFlavor;
+  const userDCs = getUserEffectiveDCs(String(userId)); // شامل TRAFFIC_API_BASE_URL/KEY
+  let totalGb = 0;
+  let totalCost = 0;
+
+  for (const proj of projects) {
+    // کلید DC مؤثر (پروژه‌محور)
+    const alias = proj.alias || proj.auth?.OS_PROJECT_ID || `u_${userId}`;
+    const dc =
+      userDCs[`${proj.dcKey}__${alias}`] ||
+      userDCs[proj.dcKey] ||
+      baseDatacenters[proj.dcKey];
+
+    if (!dc || !dc.TRAFFIC_API_BASE_URL) continue;
+
+    const projectId = proj.auth?.OS_PROJECT_ID || proj.projectId;
+    if (!projectId) continue;
+
+    const start = 0; // از ابتدای زمان
+    const end   = Math.floor(Date.now() / 1000);
+    const url   = `${dc.TRAFFIC_API_BASE_URL}project/${encodeURIComponent(projectId)}?start_time=${start}&end_time=${end}`;
 
     try {
-      const tok = await getToken();
-      const images = await listImages(tok);
-      if (!images.length) {
-        return sendMessage(ch, '🚫 در حال حاضر هیچ سیستم عاملی برای نصب موجود نیست.');
-      }
-      state[u].images = images;
-      state[u].step = 'SELECT_IMAGE';
-      const imageKeyboard = images.map(img => [{ text: img.label, callback_data: `IMAGE_${img.id}` }]);
-      sendMessage(ch, 'انتخاب سیستم عامل:', { reply_markup: { inline_keyboard: imageKeyboard } });
-    } catch (e) {
-      console.error('Error listing images for buy server:', e);
-      sendMessage(ch, `❌ خطا در دریافت لیست سیستم عامل‌ها: ${e.message || 'خطای ناشناخته'}`);
-      state[u] = { step: 'READY' }; // Reset state
-    }
+      const controller = new AbortController();
+      const tmo = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch(url, { headers: { Authorization: dc.TRAFFIC_API_KEY }, signal: controller.signal });
+      clearTimeout(tmo);
+      if (!resp.ok) continue;
 
-  } else if (d.startsWith('IMAGE_')) {
-    const imageId = d.slice(6);
-    const selectedImage = state[u]?.images?.find(img => img.id === imageId);
-    if (!selectedImage) {
-      return sendMessage(ch, '⚠️ سیستم عامل انتخاب شده نامعتبر است. لطفا دوباره تلاش کنید.');
-    }
-    state[u].selectedImage = selectedImage;
-    state[u].step = 'WAIT_SERVER_NAME';
-    sendMessage(ch, 'لطفا یک نام برای سرور خود وارد کنید (مثال: my-web-server):');
+      const data = await resp.json();
 
-  } else if (d === 'CONFIRM_PURCHASE') {
-    const { selectedFlavor, selectedImage, serverName } = state[u];
-    if (!selectedFlavor || !selectedImage || !serverName) {
-      sendMessage(ch, '⚠️ اطلاعات خرید ناقص است. لطفا دوباره از ابتدا شروع کنید.');
-      state[u] = { step: 'READY' };
-      return;
-    }
-
-    try {
-      const userBalance = await getUserWallet(u);
-      if (userBalance < selectedFlavor.price) {
-        sendMessage(ch, `❌ موجودی شما کافی نیست. (موجودی: ${userBalance} تومان، هزینه: ${selectedFlavor.price} تومان) \nلطفا ابتدا اعتبار خود را افزایش دهید.`, mainMenu);
-        state[u] = { step: 'READY' };
-        return;
-      }
-
-      sendMessage(ch, '🚀 در حال ساخت سرور شما... لطفا صبر کنید.');
-      const tok = await getToken();
-
-      const keyName = `user-${u}-server-${crypto.randomBytes(4).toString('hex')}`;
-      const keyPair = await createKeyPair(tok, keyName);
-
-      const srv = await createServer(tok, serverName, selectedFlavor.id, selectedImage.id, keyName, { user: String(u), type: 'purchased' });
-
-      // Store key pair in DB
-      await storeKeyPair(u, srv.id, keyName, keyPair.private_key);
-
-      await debitUser(u, selectedFlavor.price);
-      await recordPurchase(u, srv.id, selectedFlavor.price, 'monthly'); // Assuming monthly for now
-
-      // Wait for server to get an IP address
-      let serverDetails = await getServer(tok, srv.id);
-      let ipAddress = null;
-      let attempts = 0;
-      while (!ipAddress && attempts < 10) { // Try up to 10 times with delay
-        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-        serverDetails = await getServer(tok, srv.id);
-        if (serverDetails.addresses && Object.values(serverDetails.addresses).length > 0) {
-          const network = Object.values(serverDetails.addresses)[0];
-          if (network.length > 0 && network[0].addr) {
-            ipAddress = network[0].addr;
-          }
+      // ✅ جمع RX/TX برای فرمت { servers: { id: { receive, transmit } } } هم پشتیبانی بشه
+      let rx = 0, tx = 0;
+      if (data && data.servers && typeof data.servers === 'object') {
+        for (const s of Object.values(data.servers)) {
+          rx += Number(s?.receive || 0);
+          tx += Number(s?.transmit || 0);
         }
-        attempts++;
-      }
-
-      if (!ipAddress) {
-        throw new Error('Could not get IP address for the new server.');
-      }
-
-      const details = `✅ سرور شما با موفقیت ساخته شد:\n` +
-        `🔹 نام: ${srv.name}\n` +
-        `🔹 IP: ${ipAddress}\n` +
-        `🔹 Flavor: ${selectedFlavor.label}\n` +
-        `🔹 سیستم عامل: ${selectedImage.label}\n\n` +
-        `🔑 کلید SSH خصوصی شما: \n\`\`\`\n${keyPair.private_key}\n\`\`\`\n` +
-        `برای اتصال از طریق SSH:\n\`ssh -i ${keyName}.pem ubuntu@${ipAddress}\``; // Assuming 'ubuntu' user
-
-      sendMessage(ch, details, { parse_mode: 'Markdown' });
-      sendMessage(ch, 'موجودی جدید شما: ' + (userBalance - selectedFlavor.price) + ' تومان.', mainMenu);
-      state[u] = { step: 'READY' }; // Reset state
-
-    } catch (e) {
-      console.error('Error during server purchase:', e);
-      sendMessage(ch, `❌ خطا در فرآیند خرید سرور: ${e.message || 'خطای ناشناخته'}`);
-      state[u] = { step: 'READY' }; // Reset state
-    }
-
-  } else if (d === 'CANCEL_PURCHASE') {
-    sendMessage(ch, '🚫 فرآیند خرید سرور لغو شد.', mainMenu);
-    state[u] = { step: 'READY' }; // Reset state
-  }
-
-  // Handle Manage Servers Callbacks
-  else if (d.startsWith('M_')) {
-    const id = d.slice(2);
-    try {
-      const tok = await getToken();
-      const srv = await getServer(tok, id);
-      const fl = (await listFlavors(tok)).find(f => f.id === srv.flavor.id);
-      const img = (await listImages(tok)).find(i => i.id === srv.image.id);
-      const ip = Object.values(srv.addresses)[0][0].addr;
-      const keyPairInfo = await getKeyPair(srv.id); // Get key pair from DB
-
-      let info = `📍 نام: ${srv.name}\n🌐 IP: ${ip}\n🔹 Flavor: ${fl.label}\n🔹 سیستم عامل: ${img.label}\n📈 وضعیت: ${srv.status}`;
-      if (keyPairInfo && keyPairInfo.private_key) {
-        info += `\n\n🔑 کلید SSH خصوصی شما: \n\`\`\`\n${keyPairInfo.private_key}\n\`\`\`\n`;
-        info += `برای اتصال از طریق SSH:\n\`ssh -i ${keyPairInfo.key_name}.pem ubuntu@${ip}\``;
-      }
-
-      sendMessage(ch, info, {
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '▶️ شروع', callback_data: `A_start_${id}` },
-            { text: '⏸️ تعلیق', callback_data: `A_suspend_${id}` },
-            { text: '❌ حذف', callback_data: `A_delete_${id}` }
-          ]]
-        },
-        parse_mode: 'Markdown'
-      });
-    } catch (e) {
-      console.error('Error getting server details for management:', e);
-      sendMessage(ch, `❌ خطا در دریافت جزئیات سرور: ${e.message || 'خطای ناشناخته'}`);
-    }
-  } else if (d.startsWith('A_')) {
-    const [_, act, id] = d.split('_');
-    try {
-      const tok = await getToken();
-      let success = false;
-      let actionText = '';
-      switch (act) {
-        case 'start':
-          success = await startServer(tok, id);
-          actionText = 'شروع';
-          break;
-        case 'suspend':
-          success = await suspendServer(tok, id);
-          actionText = 'تعلیق';
-          break;
-        case 'delete':
-          success = await deleteServer(tok, id);
-          actionText = 'حذف';
-          // Also delete key pair from OpenStack and DB
-          if (success) {
-            const keyPairInfo = await getKeyPair(id);
-            if (keyPairInfo) {
-              await deleteKeyPair(tok, keyPairInfo.key_name);
-              await deleteKeyPairFromDb(id);
-            }
-          }
-          break;
-        default:
-          sendMessage(ch, '⚠️ عملیات نامعتبر.');
-          return;
-      }
-      if (success) {
-        sendMessage(ch, `✅ عملیات ${actionText} برای سرور با موفقیت ارسال شد.`);
       } else {
-        sendMessage(ch, `❌ خطا در انجام عملیات ${actionText} برای سرور.`);
+        rx = Number(data?.received_gb || 0);
+        tx = Number(data?.transmitted_gb || 0);
       }
+
+      const dlOnly = !!proj.downloadOnly;
+      const billableGb = dlOnly ? rx : (rx + tx);
+      const price = Number(proj.pricePerGbToman ?? DEFAULT_PRICE_PER_GB);
+
+      totalGb   += billableGb;
+      totalCost += billableGb * price;
     } catch (e) {
-      console.error(`Error performing action ${act} on server ${id}:`, e);
-      sendMessage(ch, `❌ خطا در انجام عملیات ${act} برای سرور: ${e.message || 'خطای ناشناخته'}`);
+      console.error('[getUserProjectTrafficCost] fetch error for', projectId, e.message);
     }
   }
+
+  return { gb: totalGb, cost: Math.floor(totalCost) };
+}
+
+
+
+
+async function hasRecentLowBalanceAlert(userId, hours = 24) {
+  const logs = await getWalletLogs(userId, 100) || [];
+  const since = Date.now() - hours * 3600 * 1000;
+  return logs.some(l =>
+    String(l.type || '').toLowerCase() === 'low_balance_alert' &&
+    new Date(l.timestamp).getTime() >= since
+  );
+}
+
+async function sendLowBalanceAlertIfNeeded(userId, chatId, remainingToman, reason) {
+  // reason: توضیح کوتاه (مثل «active server» یا «project usage»)
+  const already = await hasRecentLowBalanceAlert(userId, 24);
+  if (already) return;
+
+  await recordWalletLog(userId, 0, `Low balance alert (<100k) — ${reason}; remaining=${remainingToman}`, 'low_balance_alert');
+  await sendMessage(chatId, `⚠️ موجودی قابل‌استفاده شما برای ترافیک به کمتر از ۱۰۰٬۰۰۰ تومان رسیده.\n` +
+                            `برای جلوگیری از اختلال، لطفاً «💰 افزایش اعتبار» را انجام دهید.`);
+}
+function makeShortCb(uid, payload) {
+  ensureUserState(uid);
+  const token = 'C' + crypto.randomBytes(3).toString('hex'); // مثل C8f3a1b
+  state[uid].cb[token] = payload;
+  return token;
+}
+
+function readShortCb(uid, token) {
+  return state[uid]?.cb?.[token] || null;
+}
+
+
+ const baseDatacenters = require('./datacenters');
+ //const userProjectsMap = require('./user_projects');
+const { getUserProjects } = require('./user_projects');
+
+
+function getUserEffectiveDCs(userId) {
+  const list = getUserProjects(String(userId)) || []; // ← از تابع خودت
+
+  // اگر پروژه اختصاصی تعریف شده، فقط همون‌ها
+  if (list.length > 0) {
+    const out = {};
+    for (const proj of list) {
+      const base = baseDatacenters[proj.dcKey];
+      if (!base) continue;
+
+      const isOpenStack =
+        !!base.OS_AUTH_URL || base.provider === 'openstack' || base.apiType === 'openstack';
+      if (!isOpenStack) continue;
+
+      // alias اگر ندادی، از PROJECT_ID می‌سازیم تا یکتا باشد
+      const alias = proj.alias || proj.auth?.OS_PROJECT_ID || `u_${userId}`;
+      const vKey  = `${proj.dcKey}__${alias}`;
+
+      out[vKey] = {
+        ...base,
+        key: vKey,
+        name: proj.label || `${base.name} / ${alias}`,
+
+        // نگاشت auth → overrides
+        OS_AUTH_URL:          proj.auth?.OS_AUTH_URL          ?? base.OS_AUTH_URL,
+        OS_PROJECT_ID:        proj.auth?.OS_PROJECT_ID        ?? base.OS_PROJECT_ID,
+        OS_USER_DOMAIN_NAME:  proj.auth?.OS_USER_DOMAIN_NAME  ?? base.OS_USER_DOMAIN_NAME,
+        OS_PROJECT_DOMAIN_ID: proj.auth?.OS_PROJECT_DOMAIN_ID ?? base.OS_PROJECT_DOMAIN_ID,
+        OS_USERNAME:          proj.auth?.OS_USERNAME          ?? base.OS_USERNAME,
+        OS_PASSWORD:          proj.auth?.OS_PASSWORD          ?? base.OS_PASSWORD,
+        OS_NETWORK_ID:        proj.auth?.OS_NETWORK_ID        ?? base.OS_NETWORK_ID,
+
+        // اگر برای ترافیک چیزی خواستی override کنی:
+        TRAFFIC_API_BASE_URL: proj.auth?.TRAFFIC_API_BASE_URL ?? base.TRAFFIC_API_BASE_URL,
+        TRAFFIC_API_KEY:      proj.auth?.TRAFFIC_API_KEY      ?? base.TRAFFIC_API_KEY,
+
+        apiType: base.apiType || 'openstack',
+        __baseKey: proj.dcKey,
+        __alias: alias,
+
+        // خیلی مهم
+        sharedProject: false,
+      };
+    }
+    return out;
+  }
+
+  // بدون پروژه اختصاصی → DCهای پایه با فیلتر متادیتا
+  const out = {};
+  for (const key of Object.keys(baseDatacenters)) {
+    const base = baseDatacenters[key];
+    out[key] = { ...base, key, sharedProject: true };
+  }
+  return out;
+}
+
+
+const prices = require('./prices');
+function mdCodeBlock(s = '') {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function htmlEscape(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function htmlCodeBlock(s) {
+  return `<pre><code>${htmlEscape(s)}</code></pre>`;
+}
+
+// API IMPORTS
+//const openstackApi = require('./openstack-api');
+const openstackApi = require('./cloud-api'); // روتینگ بین OpenStack و Hetzner
+
+// Importing database utility functions
+const {
+    upsertUser,
+    getUser,
+    getUserWallet,
+    debitUser,
+    creditUser,
+    recordPurchase,
+    hasUsedFreeTestServer,
+    recordTestServer,
+    storeKeyPair,
+    getKeyPair,
+    deleteKeyPairFromDb,
+    recordWalletLog,
+    getWalletLogs,
+    getAllPurchases,
+    updatePurchaseStatus,
+    getPurchaseByServerId,
+    deleteTestServer,
+    updatePurchaseOsLabel,
+    updatePurchaseBilling,
+    updatePurchaseFreeTraffic,
+    updatePurchaseCycle
+} = require('./db');
+
+// Environment variables
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const SUPPORT_ID = parseInt(process.env.SUPPORT_ID || '0');
+const SUPPORT_USERNAME = process.env.SUPPORT_USERNAME || 'Support';
+const CHANNEL_USERNAME = 'HamoonCloud';
+const CHANNEL_LINK = 'https://t.me/HamoonCloud';
+
+if (!token) {
+    console.error('TELEGRAM_BOT_TOKEN is not set. Exiting.');
+    process.exit(1);
+}
+
+const bot = new TelegramBot(token, { polling: true });
+
+// Global state to manage user interactions and admin actions
+const state = {};
+const adminState = { impersonating: null };
+let orderCounter = 10000;
+
+// Main menu keyboard layout
+const mainMenu = {
+    reply_markup: {
+        resize_keyboard: true,
+        keyboard: [
+            ['🆓 تست رایگان'],
+            ['🛒 خرید سرور', '💰 افزایش اعتبار'],
+            ['👛 کیف پول'],
+            ['⚙️ مدیریت سرورها'],
+            ['📞 پشتیبانی']
+        ]
+    }
+};
+
+// --- Billing Configuration ---
+const DEFAULT_PRICE_PER_GB = 500;
+const DEFAULT_DOWNLOAD_ONLY = 0;
+const HOURS_IN_CYCLE = {
+    hourly: 1,
+    daily: 24,
+    weekly: 168,
+    monthly: 720
+};
+
+// --- Helper Functions ---
+function logServerEvent(eventDetails) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${JSON.stringify(eventDetails)}\n`;
+    fs.appendFile(path.join(__dirname, 'server_events.log'), logEntry, (err) => {
+        if (err) console.error('Failed to write to server_events.log:', err);
+    });
+}
+
+function escapeMarkdownV2(text) {
+  if (!text) return '';
+  text = String(text);
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+}
+
+
+
+
+function formatRemainingTime(lastBilledAt, duration) {
+    const now = new Date();
+    const lastBilledDate = new Date(lastBilledAt);
+    const cycleHours = HOURS_IN_CYCLE[duration];
+    const expiryDate = new Date(lastBilledDate.getTime() + cycleHours * 60 * 60 * 1000);
+
+    const diffMs = expiryDate - now;
+    if (diffMs <= 0) return "پایان یافته";
+
+    const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+    let result = '';
+    if (days > 0) result += `${days} روز و `;
+    if (hours > 0) result += `${hours} ساعت و `;
+    result += `${minutes} دقیقه`;
+    return result;
+}
+
+async function sendMessage(chatId, text, options) {
+    try {
+        return await bot.sendMessage(chatId, text, options);
+    } catch (error) {
+        console.error(`Error sending message to ${chatId}:`, error.message);
+        if (error.response && error.response.body) {
+             console.error('Telegram API Error Body:', error.response.body);
+        }
+        return null;
+    }
+}
+
+async function isUserChannelMember(userId) {
+    try {
+        const chatMember = await bot.getChatMember(`@${CHANNEL_USERNAME}`, userId);
+        const status = chatMember.status;
+        return ['member', 'administrator', 'creator'].includes(status);
+    } catch (error) {
+        if (error.response && error.response.body.description.includes('user not found')) {
+            return false;
+        }
+        console.error(`Error checking channel membership for user ${userId}:`, error.message);
+        return false;
+    }
+}
+
+async function showMainMenu(chatId, effectiveUserId) {
+    const targetUserId = effectiveUserId || String(chatId);
+    state[targetUserId] = { step: 'READY' };
+    await upsertUser({ telegram_id: targetUserId, step: 'READY' });
+let message = '☁️ به HamoonCloud خوش آمدید';
+if (adminState.impersonating) {
+  message = `*شما در نقش کاربر ${escapeMarkdownV2(adminState.impersonating)} هستید.*\n\n${escapeMarkdownV2(message)}`;
+}
+sendMessage(chatId, escapeMarkdownV2(message), { ...mainMenu, parse_mode: 'MarkdownV2' });
+
+
+}
+
+
+function showDatacenterSelection(chatId, actionPrefix, userId) {
+  const dcs = getUserEffectiveDCs(userId);
+// const keyboard = Object.keys(dcs).map(key => {
+ //  return [{ text: dcs[key].name, callback_data: `${actionPrefix}_${key}` }];
+//  });
+ const keys = Object.keys(dcs).filter(key => {
+   // فقط موقع تست، فیلتر کن
+   if (actionPrefix !== 'DC_TEST') return true;
+   // اگر allowTest=false بود، حذفش کن
+   if (dcs[key]?.allowTest === false) return false;
+   // اگر کلید پروژه‌دار بود مثل "hetzner__<alias>"، بیس‌کی رو در بیار
+   const baseKey = dcs[key].__baseKey || key.split('__')[0] || key;
+  // احتیاط: هرچی بیس‌کی آلمان باشه، حذف
+   if (baseKey === 'hetzner') return false;
+  return true;
+ });
+const keyboard = keys.map(key => ([
+  { text: dcs[key].name, callback_data: `${actionPrefix}_${key}` }
+ ]));
+
+    keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+
+    sendMessage(chatId, '🔹 لطفاً دیتاسنتر مورد نظر خود را انتخاب کنید:', {
+        reply_markup: { inline_keyboard: keyboard }
+    });
+}
+
+// --- Admin Impersonation Commands ---
+bot.onText(/\/impersonate (\d+)/, async (msg, match) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    const targetUserId = match[1];
+    const userExists = await getUser(targetUserId);
+    if (!userExists) {
+        return sendMessage(msg.chat.id, `کاربری با آیدی ${targetUserId} یافت نشد.`);
+    }
+    adminState.impersonating = targetUserId;
+    sendMessage(msg.chat.id, `✅ شما اکنون در نقش کاربر ${targetUserId} هستید. برای خروج /impersonate_end را ارسال کنید.`);
+    showMainMenu(msg.chat.id, targetUserId);
 });
 
-// Handler for server name input
-async function handleServerNameInput(u, ch, serverName) {
-  state[u].serverName = serverName;
-  state[u].step = 'CONFIRM_PURCHASE'; // Set step to confirmation
+bot.onText(/\/impersonate_end/, async (msg) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    adminState.impersonating = null;
+    sendMessage(msg.chat.id, '✅ شما از نقش کاربر خارج شدید.');
+    showMainMenu(msg.chat.id);
+});
 
-  const { selectedFlavor, selectedImage } = state[u];
-  if (!selectedFlavor || !selectedImage) {
-    sendMessage(ch, '⚠️ اطلاعات خرید ناقص است. لطفا دوباره از ابتدا شروع کنید.');
-    state[u] = { step: 'READY' };
-    return;
+// --- Bot Command Handlers ---
+
+bot.on('message', async (msg) => {
+    const adminId = String(msg.from.id);
+    const isImpersonating = adminId === String(SUPPORT_ID) && adminState.impersonating;
+
+    const effectiveUserId = isImpersonating ? adminState.impersonating : String(msg.from.id);
+    const effectiveChatId = msg.chat.id;
+
+    const text = msg.text || '';
+
+    if (text.startsWith('/')) {
+        if (text.startsWith('/start')) {
+            let dbUser = await getUser(effectiveUserId);
+            if (!dbUser) {
+                await upsertUser({ telegram_id: effectiveUserId, phone: null, step: 'READY' });
+                dbUser = await getUser(effectiveUserId);
+            } else {
+                await upsertUser({ telegram_id: effectiveUserId, step: 'READY' });
+            }
+
+            const isMember = await isUserChannelMember(effectiveUserId);
+            if (!isMember) {
+                return sendMessage(effectiveChatId, `⚠️ برای استفاده از ربات، ابتدا باید عضو کانال ما شوید: ${escapeMarkdownV2(CHANNEL_LINK)}\nپس از عضویت، دوباره /start را ارسال کنید\\.`, {
+                    parse_mode: 'MarkdownV2',
+                    reply_markup: { inline_keyboard: [[{ text: 'عضویت در کانال', url: CHANNEL_LINK }]] }
+                });
+            }
+            if (!isImpersonating && (!dbUser || !dbUser.phone)) {
+    // 👇 اضافه کن:
+    const exemptUsers = ['5794972968']; // آیدی‌هایی که نیاز به وریفای ندارن
+    if (exemptUsers.includes(effectiveUserId)) {
+        await upsertUser({ telegram_id: effectiveUserId, phone: 'EXEMPT', step: 'READY' });
+        return showMainMenu(effectiveChatId, effectiveUserId);
+    }
+
+    // حالت عادی
+    state[effectiveUserId] = { step: 'WAIT_CONTACT' };
+    return sendMessage(effectiveChatId, '📞 برای ادامه، لطفاً شماره تلفن خود را از طریق دکمه زیر به اشتراک بگذارید', {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { keyboard: [[{ text: 'اشتراک گذاری شماره تلفن', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true }
+    });
+}
+
+            showMainMenu(effectiveChatId, effectiveUserId);
+        }
+        return;
+    }
+
+    if (msg.contact) {
+        if (state[effectiveUserId]?.step !== 'WAIT_CONTACT' || String(msg.contact.user_id) !== effectiveUserId) {
+            return sendMessage(effectiveChatId, '⚠️ شماره نامعتبر');
+        }
+        await upsertUser({ telegram_id: effectiveUserId, phone: msg.contact.phone_number, step: 'READY' });
+        showMainMenu(effectiveChatId, effectiveUserId);
+        return;
+    }
+
+    switch (text) {
+        case '🆓 تست رایگان':
+            const isMemberTest = await isUserChannelMember(effectiveUserId);
+            const dbUserTest = await getUser(effectiveUserId);
+            if (!isMemberTest || !dbUserTest || (!dbUserTest.phone && !isImpersonating)) {
+                return sendMessage(effectiveChatId, '⚠️ لطفاً ابتدا احراز هویت و عضویت در کانال را تکمیل کنید\\. /start', { parse_mode: 'MarkdownV2' });
+            }
+            state[effectiveUserId] = { step: 'SELECT_DATACENTER_TEST' };
+            showDatacenterSelection(effectiveChatId, 'DC_TEST',effectiveUserId);
+            break;
+        case '🛒 خرید سرور':
+            const isMemberBuy = await isUserChannelMember(effectiveUserId);
+            const dbUserBuy = await getUser(effectiveUserId);
+            if (!isMemberBuy || !dbUserBuy || (!dbUserBuy.phone && !isImpersonating)) {
+                return sendMessage(effectiveChatId, '⚠️ لطفاً ابتدا احراز هویت و عضویت در کانال را تکمیل کنید\\. /start', { parse_mode: 'MarkdownV2' });
+            }
+            state[effectiveUserId] = { step: 'SELECT_DATACENTER_BUY' };
+            showDatacenterSelection(effectiveChatId, 'DC_BUY',effectiveUserId);
+            break;
+        case '💰 افزایش اعتبار':
+            const isMemberDeposit = await isUserChannelMember(effectiveUserId);
+            const dbUserDeposit = await getUser(effectiveUserId);
+             if (!isMemberDeposit || !dbUserDeposit || (!dbUserDeposit.phone && !isImpersonating)) {
+                return sendMessage(effectiveChatId, '⚠️ لطفاً ابتدا احراز هویت و عضویت در کانال را تکمیل کنید\\. /start', { parse_mode: 'MarkdownV2' });
+            }
+            state[effectiveUserId] = { step: 'WAIT_DEPOSIT' };
+            sendMessage(effectiveChatId, '💵 مبلغ را وارد کنید (تومان):');
+            break;
+
+
+case '👛 کیف پول': {
+  const logs = await getWalletLogs(effectiveUserId, 10);
+
+  const history = logs.map(l => {
+    const amountValue = parseFloat(l.amount);
+    const descriptionValue = String(l.description);
+    const timestamp = new Date(l.timestamp).toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' });
+    return `${escapeMarkdownV2(timestamp)} \\| ${amountValue > 0 ? '\\+' : ''}${escapeMarkdownV2(amountValue.toFixed(2))} — ${escapeMarkdownV2(descriptionValue)}`;
+  }).join('\n') || 'بدون سابقه';
+
+  const userProjects = getUserProjects(String(effectiveUserId)) || [];
+  let messageText = '';
+
+  if (userProjects.length > 0) {
+    const topupsTotal = await getUserTopupTotal(effectiveUserId);
+    const { cost: globalCost } = await getUserProjectTrafficCost(effectiveUserId);
+    const remainingTotal = Math.max(0, topupsTotal - globalCost);
+
+    messageText =
+      `💰 موجودی: ${escapeMarkdownV2(remainingTotal.toFixed(0))} تومان\n\n` +
+      `📜 سابقه \\(۱۰ مورد اخیر\\):\n${history}`;
+  } else {
+    // کاربر عادی (بدون پروژه)
+    const balance = await getUserWallet(effectiveUserId);
+    messageText =
+      `💰 موجودی: ${escapeMarkdownV2(balance.toFixed(0))} تومان\n\n` +
+      `📜 سابقه \\(۱۰ مورد اخیر\\):\n${history}`;
   }
 
-  const confirmationMessage = `تایید خرید سرور:\n` +
-    `🔹 نام سرور: ${serverName}\n` +
-    `🔹 نوع سرور: ${selectedFlavor.label}\n` +
-    `🔹 سیستم عامل: ${selectedImage.label}\n` +
-    `💰 هزینه: ${selectedFlavor.price} تومان\n\n` +
-    `آیا از خرید خود مطمئن هستید؟`;
-
-  sendMessage(ch, confirmationMessage, {
+  sendMessage(effectiveChatId, messageText, {
+    parse_mode: 'MarkdownV2',
     reply_markup: {
-      inline_keyboard: [[
-        { text: '✅ تایید و خرید', callback_data: 'CONFIRM_PURCHASE' },
-        { text: '❌ لغو', callback_data: 'CANCEL_PURCHASE' }
-      ]]
+      inline_keyboard: [
+        [{ text: '⬇️ دانلود سابقه کامل (CSV)', callback_data: 'DOWNLOAD_WALLET_HISTORY' }]
+      ]
     }
+  });
+  break;
+}
+
+
+
+
+
+        case '⚙️ مدیریت سرورها':
+           // sendMessage(effectiveChatId, 'در حال دریافت لیست سرورها از تمام دیتاسنترها...');
+            //const datacenterKeys = Object.keys(datacenters);
+ sendMessage(effectiveChatId, 'در حال دریافت لیست سرورها از دیتاسنترهای شما...');
+  const projects = getUserProjects(String(effectiveUserId)) || [];
+  if (projects.length > 0) {
+    const keyboard = projects.map(p => ([
+      { text: `📂 ${p.label || p.dcKey}`, callback_data: makeShortCb(effectiveUserId, { action: 'OPEN_PROJECT', projectId: p.auth?.OS_PROJECT_ID, dcKey: `${p.dcKey}__${p.alias || p.auth?.OS_PROJECT_ID || 'u_' + effectiveUserId}`}) }
+    ]));
+    return sendMessage(effectiveChatId, '📂 لطفاً یک پروژه انتخاب کنید:', { reply_markup: { inline_keyboard: keyboard } });
+  }
+ const userDCs = getUserEffectiveDCs(effectiveUserId);
+ const datacenterKeys = Object.keys(userDCs);
+  console.log('[MANAGE] effectiveUserId =', effectiveUserId, ' impersonating =', isImpersonating);
+  console.log('[MANAGE] DC keys =', Object.keys(userDCs));
+ const promises = datacenterKeys.map(dcKey => {
+               // const dcConfig = datacenters[dcKey];
+const dcConfig = userDCs[dcKey];
+console.log('[MANAGE] begin DC', dcKey, 'name =', dcConfig?.name);
+ return openstackApi.getToken(dcConfig)
+                    .then(tok =>
+
+ {
+        console.log('[MANAGE] token for', dcKey, tok ? 'OK' : 'NULL');
+        return openstackApi.listServers(dcConfig, tok);
+      })
+                    .then(allServersInDC =>
+
+{
+  console.log('[MANAGE] raw servers count in', dcKey, '=', Array.isArray(allServersInDC) ? allServersInDC.length : 'NOT_ARRAY');
+
+     const isShared = dcConfig.sharedProject === true; // از مرحله 1
+      const filtered = isShared
+         ? allServersInDC.filter(s => s.metadata?.user === effectiveUserId)
+         : allServersInDC; // پروژه اختصاصی کاربر → همه
+ console.log('[MANAGE] filtered servers in', dcKey, '=', filtered.length, ' (sharedProject=', isShared, ')');
+return filtered.map(s => ({ ...s, datacenter: dcKey }));
+ }                  )
+                    .catch(error => {
+                    //    console.error(`Could not fetch servers from ${dcConfig.name}: ${error.message}`);
+console.error(`Could not fetch servers from ${dcConfig?.name || dcKey}: ${error.message}`);
+  return [];
+                    });
+            });
+
+            const results = await Promise.all(promises);
+            const userServers = results.flat();
+  console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);
+
+            if (userServers.length === 0) {
+                return sendMessage(effectiveChatId, 'شما هیچ سروری ندارید.');
+            }
+
+ensureUserState(effectiveUserId);
+
+const keyboard = userServers.map(s => {
+  const token = makeShortCb(effectiveUserId, {
+    action: 'M',
+    dcKey: s.datacenter,
+    serverId: s.id,
+  });
+  return [
+    { text: `${s.name} (${userDCs[s.datacenter]?.name || s.datacenter})`, callback_data: token }
+  ];
+});
+
+
+            sendMessage(effectiveChatId, 'سرورهای شما:', { reply_markup: { inline_keyboard: keyboard } });
+            break;
+        case '📞 پشتیبانی':
+            sendMessage(effectiveChatId, `✉️ برای پشتیبانی با \\@${escapeMarkdownV2(SUPPORT_USERNAME)} در تماس باشید\\.`, { parse_mode: 'MarkdownV2'});
+            break;
+
+
+default:
+    if (state[effectiveUserId]?.step === 'WAIT_DEPOSIT' && /^\d+$/.test(text)) {
+const amount = parseInt(text);
+const originalAmount = amount;                        // مبلغ اصلی
+const payableToman = Math.ceil(originalAmount * 1.1); // مبلغ با ۱۰٪ مالیات
+const payableRial  = payableToman * 10;
+
+if (originalAmount < 100) {
+  return sendMessage(effectiveChatId, 'حداقل مبلغ شارژ 100 تومان است.');
+}
+await sendMessage(
+    effectiveChatId,
+    `💵 مبلغ شارژ انتخابی شما: ${originalAmount} تومان\n` +
+    `📌 مالیات (۱۰٪): ${payableToman - originalAmount} تومان\n` +
+    `💳 مبلغ قابل پرداخت: ${payableToman} تومان`
+);
+        const orderId = ++orderCounter;
+        state[effectiveUserId] = { step: 'READY' };
+        try {
+            const axios = require('axios');
+const res = await axios.post('https://gateway.zibal.ir/v1/request', {
+    merchant: "68985f4ba45c72000bcfd5a2",
+    amount: payableRial,
+    callbackUrl: "https://pay.hamooncloud.ir/zibal/callback",
+    orderId: `${effectiveUserId}-${orderId}-${originalAmount}`, // ← مبلغ اصلی را در orderId قرار بده
+    description: "شارژ کیف پول (با مالیات)"
+});
+
+
+            if (res.data.result !== 100) {
+                return sendMessage(effectiveChatId, "❌ خطا در ایجاد تراکنش: " + res.data.message);
+            }
+
+            const trackId = res.data.trackId;
+            const payUrl = `https://gateway.zibal.ir/start/${trackId}`;
+            sendMessage(
+                effectiveChatId,
+                `برای پرداخت روی لینک زیر کلیک کنید:\n${payUrl}`
+            );
+        } catch (e) {
+            console.error("Zibal error:", e.message);
+            sendMessage(effectiveChatId, "❌ خطا در ارتباط با درگاه زیبال.");
+        }
+    }
+    break;
+
+    }
+});
+
+// --- REBUILD & RESET PASSWORD & CYCLE CHANGE HANDLERS ---
+// کمک‌تابع کوتاه‌ساز callback_data (زیر 64 بایت می‌ماند)
+// CC_<dcKey>_<serverId>_<cycle>
+function makeCycleCb(dcKey, serverId, cycle) {
+  return `CC_${dcKey}_${serverId}_${cycle}`;
+}
+
+async function handleChangeCycleAsk(chatId, serverId, dcConfig, messageId) {
+  try {
+    const purchase = await getPurchaseByServerId(serverId);
+    if (!purchase) {
+      return bot.editMessageText('❌ اطلاعات خرید این سرور یافت نشد.', { chat_id: chatId, message_id: messageId });
+    }
+
+    const availableCycles = Object.keys(HOURS_IN_CYCLE).filter(c => c !== purchase.duration);
+    const keyboard = availableCycles.map(cycle => ([
+      { text: cycle, callback_data: makeCycleCb(dcConfig.key, serverId, cycle) }
+    ]));
+    keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+
+    bot.editMessageText(
+      `دوره فعلی: *${escapeMarkdownV2(purchase.duration)}*\n\nلطفاً دوره جدید را انتخاب کنید:`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: keyboard }
+      }
+    );
+  } catch (e) {
+    console.error(`Change Cycle Ask Error: ${e.message}`);
+    sendMessage(chatId, `❌ خطایی در نمایش دوره‌ها رخ داد.`);
+  }
+}
+
+async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
+  const keyboard = [
+    [{ text: '✅ تأیید ریست پسورد', callback_data: makeShortCb(userId, { action: 'RESETPW', dcKey: dcConfig.key, serverId }) }],
+    [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
+  ];
+  await bot.sendMessage(chatId, `آیا مطمئن هستید می‌خواهید پسورد سرور ${serverId} ریست شود؟`, {
+    reply_markup: { inline_keyboard: keyboard }
+  });
+}
+async function handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId) {
+  try {
+
+    const isHetzner = (dcConfig?.apiType === 'hetzner') || (dcConfig?.provider === 'hetzner');
+const isAfra = (dcConfig?.provider === 'afracloud');
+    // OpenStack: پسورد را خودمان ست می‌کنیم.
+    // Hetzner: API خودش پسورد جدید را تولید و در root_password برمی‌گرداند.
+    const tok = await openstackApi.getToken(dcConfig);
+
+    let actualPass = null;
+if (isAfra) {
+  const actualPass = await openstackApi.resetServerPassword(dcConfig, tok, serverId);
+
+  return bot.editMessageText(
+    `✅ رمز فعلی/دریافتی سرور:\n${htmlCodeBlock(actualPass || 'رمزی برنگشت')}`,
+    {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'HTML'
+    }
+  );
+}
+    if (isHetzner) {
+      actualPass = await openstackApi.resetServerPassword(dcConfig, tok, serverId);
+    } else {
+      const newPass = crypto.randomBytes(6).toString('hex');
+      await openstackApi.resetServerPassword(dcConfig, tok, serverId, newPass);
+      actualPass = newPass;
+    }
+
+    const passText = actualPass ? htmlCodeBlock(actualPass) : '<code>(no password returned)</code>';
+    await bot.editMessageText(
+      `✅ پسورد سرور ${htmlEscape(serverId)} ریست شد.\n<b>رمز جدید:</b>\n${passText}`,
+      {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'HTML'
+      }
+    );
+  } catch (e) {
+    await bot.editMessageText(`❌ خطا در ریست پسورد: ${e.message}`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
+  }
+}
+
+
+
+async function handleChangeCycleConfirm(chatId, userId, serverId, dcConfig, newCycle, messageId) {
+bot.editMessageText('⏳ در حال محاسبه و تغییر دوره پرداخت\\.\u200C\\.\u200C\\.', { // \u200C برای جلوگیری از چسبندگی احتمالی
+  chat_id: chatId,
+  message_id: messageId,
+  reply_markup: null,
+  parse_mode: 'MarkdownV2'
+}).catch(()=>{});
+
+  try {
+    const purchase   = await getPurchaseByServerId(serverId);
+    const userWallet = await getUserWallet(userId);
+
+    // اگر خرید نبود
+    if (!purchase) {
+      return sendMessage(chatId, '❌ اطلاعات خرید سرور یافت نشد. لطفاً با پشتیبانی تماس بگیرید.');
+    }
+
+    // ۱) زمان سپری‌شده از سیکل فعلی
+    const now            = new Date();
+    const lastBilledDate = new Date(purchase.last_billed_at || purchase.created_at || now);
+    const elapsedHours   = Math.max(0, (now - lastBilledDate) / (3600 * 1000));
+
+    // ۲) اعتبار زمان استفاده‌نشده در سیکل فعلی (بر اساس نرخ ساعتی ثبت‌شده در purchase.amount)
+    const currentCycleHours  = HOURS_IN_CYCLE[purchase.duration];
+    if (!currentCycleHours) {
+      return sendMessage(chatId, `❌ سیکل فعلی نامعتبر است: ${escapeMarkdownV2(String(purchase.duration))}`);
+    }
+    const hourlyPrice        = Number(purchase.amount) || 0; // نرخ ساعتی فعلی
+    const unusedHours        = Math.max(0, currentCycleHours - elapsedHours);
+    const creditForUnusedTime= unusedHours * hourlyPrice;
+
+    // ۳) هزینه سیکل جدید (باز هم با همان نرخ ساعتی)
+    const targetCycleHours   = HOURS_IN_CYCLE[newCycle];
+    if (!targetCycleHours) {
+      return sendMessage(chatId, `❌ سیکل انتخابی نامعتبر است: ${escapeMarkdownV2(String(newCycle))}`);
+    }
+    const newCyclePrice      = hourlyPrice * targetCycleHours;
+
+    // ۴) مابه‌التفاوت
+    const difference         = newCyclePrice - creditForUnusedTime;
+
+    if (difference > 0) {
+      if (userWallet < difference) {
+        const required = Math.ceil(difference - userWallet);
+        return sendMessage(
+          chatId,
+          `❌ موجودی کافی نیست. برای تغییر دوره به ${escapeMarkdownV2(newCycle)}، شما به ${escapeMarkdownV2(difference.toFixed(0))} تومان نیاز دارید.\n` +
+          `لطفاً حداقل ${escapeMarkdownV2(required)} تومان کیف پول خود را شارژ کنید.`,
+          { parse_mode: 'MarkdownV2' }
+        );
+      }
+      await debitUser(userId, difference);
+      await recordWalletLog(userId, -difference, `تغییر دوره سرور ${purchase.server_name} به ${newCycle}`, 'upgrade');
+    } else {
+      const refund = Math.abs(difference);
+      await creditUser(userId, refund);
+      await recordWalletLog(userId, refund, `اعتبار بازگشتی از تغییر دوره سرور ${purchase.server_name} به ${newCycle}`, 'downgrade');
+    }
+
+    // ۵) به‌روزرسانی دیتابیس
+    await updatePurchaseCycle(serverId, newCycle);
+    const newBalance = await getUserWallet(userId);
+
+    sendMessage(
+      chatId,
+      `✅ دوره پرداخت سرور *${escapeMarkdownV2(purchase.server_name)}* با موفقیت به *${escapeMarkdownV2(newCycle)}* تغییر یافت.\n` +
+      `موجودی جدید شما: ${escapeMarkdownV2(Number(newBalance).toFixed(0))} تومان.`,
+      { parse_mode: 'MarkdownV2' }
+    );
+
+  } catch (e) {
+    console.error(`Change Cycle Confirm Error for ${serverId}:`, e);
+    sendMessage(chatId, `❌ عملیات تغییر دوره با خطا مواجه شد: ${escapeMarkdownV2(String(e.message))}`, { parse_mode: 'MarkdownV2' });
+  }
+}
+async function handleSnapshotAsk(chatId, userId, serverId, dcConfig) {
+  const keyboard = [
+    [{ text: '✅ تایید Snapshot', callback_data: makeShortCb(userId, { action: 'SNAPSHOT', dcKey: dcConfig.key, serverId }) }],
+    [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
+  ];
+  await bot.sendMessage(chatId, `آیا مطمئن هستید می‌خواهید از سرور ${serverId} اسنپ‌شات بگیرید؟`, {
+    reply_markup: { inline_keyboard: keyboard }
   });
 }
 
-
-// Manage servers
-bot.onText(/⚙️ مدیریت سرورها/, async msg => {
-  const u = msg.from.id, ch = msg.chat.id;
+async function handleSnapshotConfirm(chatId, userId, serverId, dcConfig, messageId) {
   try {
-    const tok = await getToken();
-    const all = await listServers(tok);
-    const mine = all.filter(s => s.metadata && s.metadata.user === String(u)); // Filter by user metadata
-    if (!mine.length) {
-      return sendMessage(ch, '🚫 شما هیچ سروری ندارید.');
-    }
-    const kb = mine.map(s => [{ text: s.name, callback_data: `M_${s.id}` }]);
-    sendMessage(ch, '📋 سرور خود را انتخاب کنید:', { reply_markup: { inline_keyboard: kb } });
+    const tok = await openstackApi.getToken(dcConfig);
+    const snapName = `snap-${userId}-${Date.now()}`;
+
+    await bot.editMessageText(`⏳ در حال ایجاد Snapshot برای سرور ${serverId}...`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
+
+    await openstackApi.createSnapshot(dcConfig, tok, serverId, snapName, userId);
+
+    await bot.editMessageText(`✅ درخواست ساخت Snapshot با نام \`${snapName}\` ارسال شد.\nممکن است ساخت آن چند دقیقه طول بکشد.`, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    });
   } catch (e) {
-    console.error('Error listing servers for management:', e);
-    sendMessage(ch, `❌ خطا در دریافت لیست سرورها: ${e.message || 'خطای ناشناخته'}`);
+    await bot.editMessageText(`❌ خطا در ایجاد Snapshot: ${e.message}`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
+  }
+}
+
+async function handleBuildFromSnapshot(chatId, userId, dcConfig) {
+  try {
+    const tok = await openstackApi.getToken(dcConfig);
+    const snaps = await openstackApi.listSnapshots(dcConfig, tok, userId);
+
+    if (!snaps.length) {
+      return sendMessage(chatId, 'هیچ Snapshotی برای شما یافت نشد.');
+    }
+
+    const keyboard = snaps.map(s => ([{
+      text: s.name || s.id,
+      callback_data: makeShortCb(userId, {
+        action: 'BUILD_SNAPSHOT_CONFIRM',
+        dcKey: dcConfig.key,
+        snapshotId: s.id
+      })
+    }]));
+
+    keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+
+    await sendMessage(chatId, '🧩 یکی از Snapshotهای خود را برای ساخت سرور جدید انتخاب کنید:', {
+      reply_markup: { inline_keyboard: keyboard }
+    });
+  } catch (e) {
+    console.error('listSnapshots error:', e.message);
+    sendMessage(chatId, '❌ خطا در دریافت لیست Snapshotها.');
+  }
+}
+
+
+
+
+async function handleBuildSnapshotConfirm(chatId, userId, dcConfig, snapshotId, messageId) {
+  try {
+    const tok = await openstackApi.getToken(dcConfig);
+    const srvName = `from-snap-${Date.now()}`;
+
+    await bot.editMessageText(`🚀 در حال ساخت سرور از Snapshot ${snapshotId}...`, {
+      chat_id: chatId,
+      message_id: messageId
+    });
+
+    const flavor = dcConfig.flavors?.[0];
+    if (!flavor) throw new Error("هیچ پلنی در این دیتاسنتر تعریف نشده است.");
+
+    // ✅ اینجا keyName رو null کن چون از snapshot می‌سازیم
+    const srv = await openstackApi.createServer(
+      dcConfig,
+      tok,
+      srvName,
+      flavor.id,
+      snapshotId,
+      null, // ✅ دیگه network ID نیست
+      { user: userId, fromSnapshot: true },
+      flavor.disk,
+      "volume"
+    );
+
+    await sendMessage(chatId, `✅ سرور جدید با نام \`${srvName}\` از Snapshot ساخته شد.`, {
+      parse_mode: "Markdown"
+    });
+  } catch (e) {
+    console.error("❌ handleBuildSnapshotConfirm error:", e.message);
+    await sendMessage(chatId, `❌ خطا در ساخت سرور از Snapshot: ${e.message}`);
+  }
+}
+
+
+
+
+
+
+
+// --- Main Callback Query Handler ---
+bot.on('callback_query', async q => {
+  await bot.answerCallbackQuery(q.id);
+
+  const adminId = String(q.from.id);
+  const isImpersonating = adminId === String(SUPPORT_ID) && adminState.impersonating;
+
+  const effectiveUserId = isImpersonating ? adminState.impersonating : String(q.from.id);
+  const effectiveChatId = q.message.chat.id;
+
+  const data = q.data;
+
+  const payload = readShortCb(effectiveUserId, data);
+if (payload && payload.action === 'PROJECT_SUM') {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  return getProjectTrafficSummary(effectiveChatId, effectiveUserId, dc, payload.projectId);
+}
+
+
+
+
+
+ if (payload) {
+    switch (payload.action) {
+         case 'OPEN_PROJECT': {
+      const { dcKey, projectId } = payload;
+      const allDCs = getUserEffectiveDCs(effectiveUserId);
+
+      // 🔹 دیتاسنتر رو هم با کلید ترکیبی هم با baseKey پیدا کن
+      const dc =
+        allDCs[dcKey] ||
+        Object.values(allDCs).find(d =>
+          d.OS_PROJECT_ID === projectId &&
+          (d.__baseKey === dcKey || d.key.split('__')[0] === dcKey)
+        );
+
+      if (!dc) {
+        return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+      }
+
+      let servers = [];
+      try {
+        const tok = await openstackApi.getToken(dc);
+        const all = await openstackApi.listServers(dc, tok);
+        servers = all || [];
+      } catch (e) {
+        console.error("OPEN_PROJECT error", e.message);
+      }
+
+      const keyboard = [
+        [{
+          text: "📊 مشاهده کل ترافیک پروژه",
+          callback_data: makeShortCb(effectiveUserId, {
+            action: 'PROJECT_SUM',
+            dcKey,
+            projectId
+          })
+        }]
+      ];
+
+      servers.forEach(s => {
+        keyboard.push([{
+          text: `🖥 ${s.name}`,
+          callback_data: makeShortCb(effectiveUserId, {
+            action: 'M',
+            dcKey,
+            serverId: s.id
+          })
+        }]);
+      });
+
+      return sendMessage(
+        effectiveChatId,
+        `🖥 سرورهای پروژه ${escapeMarkdownV2(projectId)}:`,
+        { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: keyboard } }
+      );
+    }
+case 'GET_TRAFFIC_RAW': {
+  const cfg = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!cfg) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  return getTrafficInfoRaw(effectiveChatId, payload.serverId, cfg);
+}
+      case 'M': {
+        const { dcKey, serverId } = payload;
+        const manageDcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
+        if (!manageDcConfig) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleServerManagement(effectiveChatId, effectiveUserId, serverId, manageDcConfig);
+      }
+      case 'GET_KEY':
+        return getPrivateKey(effectiveChatId, payload.serverId);
+case 'SELECT_IMAGE': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  return handleImageSelection(
+    effectiveChatId,
+    effectiveUserId,
+    q.message.message_id,
+    payload.imageId,
+    dc
+  );
+}
+      case 'GET_TRAFFIC': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return getTrafficInfo(effectiveChatId, payload.serverId, dc);
+      }
+
+      case 'ASK_RESETPW': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleResetPasswordAsk(effectiveChatId,effectiveUserId, payload.serverId, dc);
+      }
+
+      case 'CHANGECYCLE_ASK': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleChangeCycleAsk(effectiveChatId, payload.serverId, dc, q.message.message_id);
+      }
+
+      case 'REBUILD_ASK': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleRebuildAsk(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id);
+      }
+
+      case 'ASK_DELETE': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return askForDeletionConfirmation(effectiveChatId, payload.serverId, dc);
+      }
+case 'RESETPW': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  return handleResetPasswordConfirm(effectiveChatId, payload.serverId, dc, q.message.message_id);
+}
+case 'SNAPSHOT_ASK': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  console.log('>>> SNAPSHOT_ASK triggered');
+  return handleSnapshotAsk(
+    effectiveChatId,
+    effectiveUserId,
+    payload.serverId,
+    dc
+  );
+}
+
+case 'SNAPSHOT': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  console.log('>>> SNAPSHOT confirm');
+  return handleSnapshotConfirm(
+    effectiveChatId,
+    effectiveUserId,
+    payload.serverId,
+    dc,
+    q.message.message_id
+  );
+}
+
+case 'BUILD_FROM_SNAPSHOT': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  console.log('>>> BUILD_FROM_SNAPSHOT triggered');
+  return handleBuildFromSnapshot(effectiveChatId, effectiveUserId, dc);
+}
+
+case 'BUILD_SNAPSHOT_CONFIRM': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  console.log('>>> BUILD_SNAPSHOT_CONFIRM triggered');
+  return handleBuildSnapshotConfirm(
+    effectiveChatId,
+    effectiveUserId,
+    dc,
+    payload.snapshotId,
+    q.message.message_id
+  );
+}
+
+default:
+  console.log('[WARN] Unhandled payload action:', payload.action);
+  return;
+
+   }
+    return; // ⛔️ خیلی مهم: دیگه به مسیر قدیمی نرو
+  }
+  const [action, ...params] = data.split('_');
+
+  if (action === 'DC') {
+    const flowType = params[0];
+    const dcKey = params[1];
+   // const dcConfig = datacenters[dcKey];
+const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
+
+    if (!dcConfig) return sendMessage(effectiveChatId, "❌ دیتاسنتر نامعتبر.");
+    state[effectiveUserId] = { ...state[effectiveUserId], selectedDatacenterConfig: dcConfig, messageId: q.message.message_id };
+
+    if (flowType === 'TEST') {
+      bot.deleteMessage(effectiveChatId, q.message.message_id).catch(()=>{});
+      handleFreeTrialRequest(effectiveChatId, effectiveUserId, dcConfig);
+    } else if (flowType === 'BUY') {
+      state[effectiveUserId].step = 'SELECT_BILLING_CYCLE';
+      const keyboard = Object.keys(HOURS_IN_CYCLE).map(cycle => ([
+        { text: cycle.charAt(0).toUpperCase() + cycle.slice(1), callback_data: `CYCLE_${cycle}` }
+      ]));
+      keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+      bot.editMessageText('🔹 سیکل پرداخت را انتخاب کنید:', {
+        chat_id: effectiveChatId,
+        message_id: q.message.message_id,
+        reply_markup: { inline_keyboard: keyboard }
+      });
+    }
+    return;
+  }
+
+  if (action === 'CANCEL') {
+    if (q.message) {
+      bot.deleteMessage(effectiveChatId, q.message.message_id).catch(() => {});
+    }
+    return showMainMenu(effectiveChatId, effectiveUserId);
+  }
+
+  if (action === 'DOWNLOAD') {
+    if (params[0] === 'WALLET' && params[1] === 'HISTORY') {
+      handleDownloadWalletHistory(effectiveChatId, effectiveUserId);
+    }
+    return;
+  }
+
+  const dcConfigFromState = state[effectiveUserId]?.selectedDatacenterConfig;
+  // ← فقط «CC» را به این لیست اضافه کردیم
+  const actionRequiresDcInState = !['M', 'ASK', 'CONFIRM', 'GET', 'REBUILD', 'RESETPW', 'CHANGECYCLE', 'CC'].includes(action);
+
+  if (actionRequiresDcInState && !dcConfigFromState) {
+     return sendMessage(effectiveChatId, "خطا: انتخاب دیتاسنتر منقضی شده است. لطفاً دوباره شروع کنید.");
+  }
+
+  switch (action) {
+
+    case 'CYCLE':
+      handleCycleSelection(effectiveChatId, effectiveUserId, q.message.message_id, params[0], dcConfigFromState);
+      break;
+    case 'FLAVOR':
+      handleFlavorSelection(effectiveChatId, effectiveUserId, q.message.message_id, params[0], dcConfigFromState);
+      break;
+    case 'IMAGE':
+      handleImageSelection(effectiveChatId, effectiveUserId, q.message.message_id, params[0], dcConfigFromState);
+      break;
+    case 'CONFIRM':
+      if (params[0] === 'PURCHASE') {
+        handlePurchaseConfirmation(effectiveChatId, effectiveUserId, q.message.message_id, dcConfigFromState);
+      } else if (params[0] === 'DELETE') {
+        const deleteDcKey = params[1];
+        const serverIdToDelete = params[2];
+      //  const deleteDcConfig = datacenters[deleteDcKey];
+const deleteDcConfig = getUserEffectiveDCs(effectiveUserId)[deleteDcKey];
+ handleServerDeletion(effectiveChatId, effectiveUserId, serverIdToDelete, deleteDcConfig);
+      }
+      break;
+    case 'M': {
+      const manageDcKey = params[0];
+      const serverIdToManage = params[1];
+     // const manageDcConfig = datacenters[manageDcKey];
+const manageDcConfig = getUserEffectiveDCs(effectiveUserId)[manageDcKey];
+handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manageDcConfig);
+      break;
+    }
+    case 'ASK': {
+      const askAction = params[0];
+      const askDcKey = params[1];
+      const serverIdToAsk = params[2];
+      const askDcConfig = getUserEffectiveDCs(effectiveUserId)[askDcKey];
+      if (askAction === 'DELETE') {
+        askForDeletionConfirmation(effectiveChatId, serverIdToAsk, askDcConfig);
+      } else if (askAction === 'RESETPW') {
+        handleResetPasswordAsk(effectiveChatId,effectiveUserId, serverIdToAsk, askDcConfig);
+      }
+      break;
+    }
+    case 'GET': {
+      const getType = params[0];
+      const getDcKey = params[1];
+      const serverIdForGet = params[2];
+      const getDcConfig =  getUserEffectiveDCs(effectiveUserId)[getDcKey];
+      if (getType === 'KEY') {
+        getPrivateKey(effectiveChatId, serverIdForGet);
+      } else if (getType === 'TRAFFIC') {
+        getTrafficInfo(effectiveChatId, serverIdForGet, getDcConfig);
+      }
+      break;
+    }
+    case 'REBUILD': {
+      const rebuildAction = params[0];
+      if (rebuildAction === 'ASK') {
+        const rebuildDcKey = params[1];
+        const serverIdToRebuild = params[2];
+        const rebuildDcConfig = getUserEffectiveDCs(effectiveUserId)[rebuildDcKey];
+        handleRebuildAsk(effectiveChatId, effectiveUserId, serverIdToRebuild, rebuildDcConfig, q.message.message_id);
+      } else if (rebuildAction === 'IMG') {
+        const imageId = params[1];
+        const { serverId, dcConfig: rebuildDcConfigFromState } = state[effectiveUserId]?.rebuildInfo || {};
+        if (!serverId || !rebuildDcConfigFromState) {
+          return sendMessage(effectiveChatId, '❌ خطایی رخ داد، لطفاً دوباره از منوی مدیریت سرورها تلاش کنید.');
+        }
+        handleRebuildConfirm(effectiveChatId, effectiveUserId, serverId, imageId, rebuildDcConfigFromState, q.message.message_id);
+      }
+      break;
+    }
+    case 'RESETPW': {
+      const resetPwDcKey = params[0];
+      const serverIdToReset = params[1];
+      const resetPwDcConfig = getUserEffectiveDCs(effectiveUserId)[resetPwDcKey];
+      handleResetPasswordConfirm(effectiveChatId, serverIdToReset, resetPwDcConfig, q.message.message_id);
+      break;
+    }
+    case 'CHANGECYCLE': {
+      const changeAction = params[0];
+      const dcKey = params[1];
+      const serverId = params[2];
+   //   const dcConfig = datacenters[dcKey];
+const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
+
+ if (changeAction === 'ASK') {
+        handleChangeCycleAsk(effectiveChatId, serverId, dcConfig, q.message.message_id);
+      } else if (changeAction === 'CONFIRM') {
+        const newCycle = params[3];
+        handleChangeCycleConfirm(effectiveChatId, effectiveUserId, serverId, dcConfig, newCycle, q.message.message_id);
+      }
+      break;
+    }
+
+
+
+
+    // ← الگوی جدید کوتاه برای تغییر سیکل
+    case 'CC': {
+      const ccDcKey    = params[0];
+      const ccServerId = params[1];
+      const ccCycle    = params[2];
+      const ccDcConfig = getUserEffectiveDCs(effectiveUserId)[ccDcKey];
+      if (!ccDcConfig) {
+        return sendMessage(effectiveChatId, "❌ دیتاسنتر نامعتبر.");
+      }
+      return handleChangeCycleConfirm(
+        effectiveChatId,
+        effectiveUserId,
+        ccServerId,
+        ccDcConfig,
+        ccCycle,
+        q.message.message_id
+      );
+    }
   }
 });
 
-// Support
-bot.onText(/📞 پشتیبانی/, msg => sendMessage(msg.chat.id, '✉️ @HamoonCloudSupport'));
 
-// Fallback for unrecognized messages
-bot.on('message', msg => {
-  const ch = msg.chat.id, txt = msg.text || '';
-  const recognizedCommands = ['🆓 تست رایگان', '🛒 خرید سرور', '💰 افزایش اعتبار', '⚙️ مدیریت سرورها', '📞 پشتیبانی'];
-  if (!recognizedCommands.includes(txt) && !msg.contact && !state[msg.from.id]?.step) {
-    sendMessage(ch, '❓ لطفاً از منو انتخاب کنید.', mainMenu);
+// --- ADMIN COMMANDS ---
+bot.onText(/\/credit (\d+) (\d+) (\d+)/, async (msg, match) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    const [, userId, amount, orderId] = match;
+    await creditUser(userId, parseInt(amount));
+    await recordWalletLog(userId, parseInt(amount), `تایید سفارش #${orderId}`, 'approved');
+    const newBalance = await getUserWallet(userId);
+    sendMessage(msg.chat.id, `✅ کاربر ${userId} شارژ شد. موجودی جدید: ${newBalance} تومان`);
+    sendMessage(parseInt(userId), `✅ سفارش \\#${orderId} شما تایید شد. موجودی جدید: ${newBalance} تومان`);
+});
+bot.onText(/\/debit (\d+) (\d+) (.+)/, async (msg, match) => {
+  if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+  const [, userId, amount, reason] = match;
+
+  await debitUser(userId, parseInt(amount));
+  await recordWalletLog(userId, -parseInt(amount), `کسر دستی: ${reason}`, 'manual_debit');
+
+  const newBalance = await getUserWallet(userId);
+  await sendMessage(msg.chat.id, `✅ از کیف پول کاربر ${userId} مبلغ ${amount} تومان کسر شد. موجودی جدید: ${newBalance}`);
+  await sendMessage(parseInt(userId), `⚠️ مبلغ ${amount} تومان بابت "${reason}" از کیف پول شما کسر شد. موجودی جدید: ${newBalance} تومان`);
+});
+
+bot.onText(/\/run_billing/, async (msg) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    sendMessage(msg.chat.id, '⚙️ فرآیند صورتحساب به صورت دستی آغاز شد.');
+    await runHourlyBilling();
+    sendMessage(msg.chat.id, '✅ فرآیند صورتحساب به پایان رسید.');
+});
+
+bot.onText(/\/create_purchase (\d+) (.+?) (\w+) (.+?) (.+?) (\w+)/, async (msg, match) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+
+    try {
+        const [, userId, serverId, dcKey, serverName, flavorId, cycle] = match;
+
+       // const dcConfig = datacenters[dcKey];
+const dcConfig = getUserEffectiveDCs(userId)[dcKey];
+
+if (!dcConfig) {
+            return sendMessage(msg.chat.id, `❌ دیتاسنتر نامعتبر: ${dcKey}`);
+        }
+
+        const flavor = dcConfig.flavors.find(f => f.id === flavorId);
+        if (!flavor) {
+            return sendMessage(msg.chat.id, `❌ پلن نامعتبر: ${flavorId}`);
+        }
+
+        if (!HOURS_IN_CYCLE[cycle]) {
+            return sendMessage(msg.chat.id, `❌ دوره پرداخت نامعتبر: ${cycle}`);
+        }
+
+        const hourlyPrice = Math.round(flavor.monthly_price * (prices.hourlyFactorFromMonthly || (1 / 720)));
+
+        const tok = await openstackApi.getToken(dcConfig);
+        const srv = await openstackApi.getServer(dcConfig, tok, serverId);
+        const osLabel = srv.image?.name || 'Unknown OS';
+
+        await recordPurchase(
+            userId,
+            serverId,
+            dcKey,
+            serverName,
+            flavorId,
+            hourlyPrice,
+            cycle,
+            DEFAULT_PRICE_PER_GB,
+            DEFAULT_DOWNLOAD_ONLY,
+            srv.id,
+            'volume',
+            osLabel
+        );
+
+        sendMessage(msg.chat.id, `✅ رکورد خرید برای کاربر ${userId} و سرور ${serverName} با موفقیت ایجاد شد.`);
+    } catch (e) {
+        console.error("Error creating manual purchase:", e);
+        sendMessage(msg.chat.id, `❌ خطا در ایجاد رکورد خرید: ${e.message}`);
+    }
+});
+
+bot.onText(/\/set_billing (.+?) (\d+) (0|1)/, async (msg, match) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    try {
+        const [, serverId, pricePerGb, downloadOnly] = match;
+        await updatePurchaseBilling(serverId, parseInt(pricePerGb), parseInt(downloadOnly));
+        sendMessage(msg.chat.id, `✅ تنظیمات صورتحساب برای سرور ${serverId} به‌روزرسانی شد.`);
+    } catch (e) {
+        console.error("Error setting billing:", e);
+        sendMessage(msg.chat.id, `❌ خطا در تنظیم صورتحساب: ${e.message}`);
+    }
+});
+
+bot.onText(/\/set_traffic (.+?) (\w+) (\d+)/, async (msg, match) => {
+    if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+    try {
+        const [, serverId, cycle, amountGb] = match;
+        if (!['hourly', 'daily', 'weekly', 'monthly'].includes(cycle)) {
+            return sendMessage(msg.chat.id, '❌ دوره پرداخت نامعتبر است. فقط از hourly, daily, weekly, monthly استفاده کنید.');
+        }
+        await updatePurchaseFreeTraffic(serverId, cycle, parseInt(amountGb));
+        sendMessage(msg.chat.id, `✅ ترافیک رایگان برای سرور ${serverId} به‌روزرسانی شد.`);
+    } catch (e) {
+        console.error("Error setting free traffic:", e);
+        sendMessage(msg.chat.id, `❌ خطا در تنظیم ترافیک رایگان: ${e.message}`);
+    }
+});
+
+
+// --- Handler Functions for each step ---
+// index.js
+bot.onText(/\/set_topup_base (\d+) (\d+)/, async (msg, m) => {
+  if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+  const [, userId, amount] = m;
+  await recordWalletLog(userId, Number(amount), 'Topup baseline set', 'topup_baseline');
+  sendMessage(msg.chat.id, `✅ baseline ${amount} برای ${userId} ثبت شد.`);
+});
+
+async function getUserTopupTotal(userId) {
+  const logs = await getWalletLogs(userId, null) || [];
+  let baseline = 0, deposits = 0;
+  for (const l of logs) {
+    const amt  = Number(l.amount || 0);
+    const type = String(l.type || '').toLowerCase();
+    if (type === 'topup_baseline') baseline += amt;
+    if (amt > 0 && (type === 'approved' || type === 'deposit')) deposits += amt;
+  }
+  return Math.max(0, Math.floor(baseline + deposits));
+}
+
+async function handleFreeTrialRequest(chatId, userId, dcConfig) {
+    sendMessage(chatId, `🚀 در حال بررسی و ساخت سرور تست در دیتاسنتر ${dcConfig.name}...`);
+
+    const hasUsed = await hasUsedFreeTestServer(userId, dcConfig.key);
+    if (hasUsed) {
+        return sendMessage(chatId, `❌ شما قبلاً از سرور تست رایگان در دیتاسنتر ${dcConfig.name} استفاده کرده‌اید.`);
+    }
+
+    try {
+        const tok = await openstackApi.getToken(dcConfig);
+        const flavorId = dcConfig.OS_TEST_FLAVOR_ID;
+        const imageId = dcConfig.OS_TEST_IMAGE_ID;
+
+        const allFlavors = await openstackApi.listFlavors(dcConfig);
+        const allImages = await openstackApi.listImages(dcConfig, tok);
+
+        const flavor = allFlavors.find(f => f.id === flavorId);
+        const image = allImages.find(i => i.id === imageId);
+
+        if (!flavor || !image) {
+            return sendMessage(chatId, "❌ پلن یا ایمیج تست برای این دیتاسنتر تعریف نشده است.");
+        }
+
+        const keyName = `test-${userId}-${crypto.randomBytes(4).toString('hex')}`;
+        const kp = await openstackApi.createKeyPair(dcConfig, tok, keyName);
+        const testServerName = `Test-${dcConfig.key.substring(0, 3).toUpperCase()}-${crypto.randomBytes(2).toString('hex')}`;
+
+        const srv = await openstackApi.createServer(dcConfig, tok, testServerName, flavor.id, image.id, keyName, { user: userId, type: 'test', datacenter: dcConfig.key }, flavor.disk, 'image');
+
+        const rawPrivateKey = String(kp.private_key || '')
+            .replace(/-----BEGIN RSA PRIVATE KEY-----/g, '')
+            .replace(/-----END RSA PRIVATE KEY-----/g, '')
+            .trim();
+
+        await storeKeyPair(userId, srv.id, keyName, rawPrivateKey);
+        await recordTestServer(userId, dcConfig.key, srv.id, null);
+
+        let ip = await pollForIp(dcConfig, tok, srv.id);
+        let rootPassword = srv.adminPass;
+
+
+        const privateKeyText = `-----BEGIN RSA PRIVATE KEY-----\n${rawPrivateKey}\n-----END RSA PRIVATE KEY-----`;
+
+        const messageText = `✅ سرور تست شما در ${dcConfig.name} ساخته شد\\!\n` +
+            `🔹 نام: ${escapeMarkdownV2(testServerName)}\n` +
+            (ip ? `🔹 IP: \`${escapeMarkdownV2(ip)}\`\n` : '🔹 IP: در حال تخصیص...\n') +
+            `🔹 مشخصات: ${escapeMarkdownV2(flavor.label)}\n` +
+            `🔹 سیستم عامل: ${escapeMarkdownV2(image.label)}\n\n` +
+            (rootPassword ? `🔑 **رمز عبور روت:**\n\`\`\`\n${escapeMarkdownV2(rootPassword)}\n\`\`\`\n\n` : '') +
+            `🔑 **کلید خصوصی شما \\(برای اتصال SSH\\):**\n\`\`\`\n${escapeMarkdownV2(privateKeyText)}\n\`\`\``;
+
+
+        sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: `ASK_DELETE_${dcConfig.key}_${srv.id}` }]] } });
+        logServerEvent({ type: 'test_server_created', server_id: srv.id, user_id: userId, datacenter: dcConfig.key });
+
+    } catch (e) {
+        console.error(`Free Trial Error in ${dcConfig.name}:`, e);
+        sendMessage(chatId, `❌ خطا در ساخت سرور تست: ${escapeMarkdownV2(e.message)}`);
+    }
+}
+
+async function handleCycleSelection(chatId, userId, messageId, selectedCycle, dcConfig) {
+    state[userId].selectedCycle = selectedCycle;
+    state[userId].step = 'SELECT_FLAVOR';
+
+    const flavors = await openstackApi.listFlavors(dcConfig);
+    const keyboard = flavors.map(f => {
+        const totalCyclePrice = Math.round(f.price * HOURS_IN_CYCLE[selectedCycle]);
+        return [{ text: `${f.label} — ${totalCyclePrice} تومان`, callback_data: `FLAVOR_${f.id}` }];
+    });
+    keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+    bot.editMessageText('🔹 نوع سرور را انتخاب کنید:', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleFlavorSelection(chatId, userId, messageId, selectedFlavorId, dcConfig) {
+  try {
+    const flavors = await openstackApi.listFlavors(dcConfig);
+    const selectedFlavor = flavors.find(f => f.id === selectedFlavorId);
+    if (!selectedFlavor) return sendMessage(chatId, '❌ پلن نامعتبر.');
+
+    state[userId].selectedFlavor = selectedFlavor;
+    state[userId].step = 'SELECT_IMAGE';
+
+    const tok = await openstackApi.getToken(dcConfig);
+
+    // 📸 گرفتن همزمان ایمیج‌ها و اسنپ‌شات‌ها
+    console.log(`🟢 [handleFlavorSelection] Fetching images & snapshots for ${dcConfig.name}`);
+    const [images, snapshots] = await Promise.all([
+      openstackApi.listImages(dcConfig, tok).catch(err => {
+        console.error(`⚠️ [${dcConfig.name}] listImages error:`, err.message);
+        return [];
+      }),
+      openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
+        console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);
+        return [];
+      })
+    ]);
+
+    console.log(`🟡 [DEBUG] ${dcConfig.name}: ${images.length} base images, ${snapshots.length} snap   shots received`);
+
+    // ✅ ادغام داده‌ها در یک لیست
+    const allImages = [
+      ...images.map(i => ({ id: i.id, label: i.label || i.name || i.id, type: 'image' })),
+      ...snapshots
+        .filter(s => s.status === 'active' || !s.status) // فقط فعال‌ها
+        .map(s => ({ id: s.id, label: `📸 Snapshot: ${s.name || s.id}`, type: 'snapshot' }))
+    ];
+
+    console.log(`🟡 [DEBUG] Combined image+snapshot list → ${allImages.length} items total`);
+    allImages.forEach(i => console.log(`   → ${i.type}: ${i.label} (${i.id})`));
+
+    // 🧩 ساخت منوی انتخاب
+    const isAfra = dcConfig.provider === 'afracloud';
+const visibleImages = allImages.slice(0, 20);
+
+console.log('🧩 [IMAGE_MENU] visibleImages =', visibleImages.map(i => i.label));
+const keyboard = visibleImages.map(i => ([{
+  text: String(i.label).substring(0, 45),
+  callback_data: makeShortCb(userId, {
+    action: 'SELECT_IMAGE',
+    imageId: i.id,
+    dcKey: dcConfig.key
+  })
+}]));
+
+keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+
+try {
+  await bot.editMessageText('🔹 سیستم عامل یا Snapshot را انتخاب کنید:', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: keyboard }
+  });
+} catch (e) {
+  console.error('❌ edit image menu failed:', e.response?.body || e.message);
+  await sendMessage(chatId, '🔹 سیستم عامل یا Snapshot را انتخاب کنید:', {
+    reply_markup: { inline_keyboard: keyboard }
+  });
+}
+    console.log(`✅ [handleFlavorSelection] ${allImages.length} images/snapshots shown for ${dcConfig.name}`);
+  } catch (err) {
+    console.error('❌ handleFlavorSelection error:', err);
+    sendMessage(chatId, '❌ خطایی در بارگذاری سیستم‌عامل‌ها و Snapshotها رخ داد.');
+  }
+}
+
+
+
+
+async function handleImageSelection(chatId, userId, messageId, selectedImageId, dcConfig) {
+  try {
+    console.log(`🟢 [handleImageSelection] Triggered for user ${userId} in ${dcConfig.name}`);
+    const tok = await openstackApi.getToken(dcConfig);
+
+    // دریافت ایمیج‌ها و اسنپ‌شات‌های مخصوص همین کاربر
+    const [images, snapshots] = await Promise.all([
+      openstackApi.listImages(dcConfig, tok).catch(err => {
+        console.error(`⚠️ [${dcConfig.name}] listImages error:`, err.message);
+        return [];
+      }),
+      openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
+        console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);
+        return [];
+      })
+    ]);
+
+    console.log(`🟡 [DEBUG] ${dcConfig.name}: ${images.length} base images, ${snapshots.length} snap   shots for user ${userId}`);
+
+    // ادغام و استانداردسازی داده‌ها
+    const allImages = [
+      ...images.map(i => ({
+        id: i.id,
+        label: i.label || i.name || i.id,
+        type: 'image'
+      })),
+      ...snapshots
+        .filter(s => s.status === 'active')
+        .map(s => ({
+          id: s.id,
+          label: `📸 Snapshot: ${s.name || s.id}`,
+          type: 'snapshot'
+        }))
+    ];
+
+    console.log(`🟡 [DEBUG] Combined image+snapshot list → ${allImages.length} items total`);
+    allImages.forEach(i => console.log(`   → ${i.type}: ${i.label} (${i.id})`));
+
+    const selectedImage = allImages.find(i => i.id === selectedImageId);
+    if (!selectedImage) {
+      console.warn(`❌ [WARN] No image/snapshot found with id: ${selectedImageId}`);
+      return sendMessage(chatId, '❌ سیستم‌عامل یا Snapshot نامعتبر است.');
+    }
+
+    // ذخیره در state
+    state[userId].selectedImage = selectedImage;
+    state[userId].step = 'CONFIRM_PURCHASE';
+
+    const { selectedFlavor, selectedCycle } = state[userId];
+    const finalPrice = Math.round(selectedFlavor.price * HOURS_IN_CYCLE[selectedCycle]);
+    state[userId].finalPrice = finalPrice;
+
+    const messageText =
+      `لطفاً موارد زیر را تأیید کنید:\n` +
+      `🔹 دیتاسنتر: ${escapeMarkdownV2(dcConfig.name)}\n` +
+      `🔹 پلن: ${escapeMarkdownV2(selectedFlavor.label)}\n` +
+      `🔹 سیستم‌عامل / Snapshot: ${escapeMarkdownV2(selectedImage.label)}\n` +
+      `🔹 سیکل پرداخت: ${escapeMarkdownV2(selectedCycle)}\n` +
+      `🔹 هزینه دوره: ${escapeMarkdownV2(finalPrice)} تومان\n`;
+
+    await bot.editMessageText(messageText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'MarkdownV2',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ تایید نهایی', callback_data: 'CONFIRM_PURCHASE' },
+            { text: '❌ لغو', callback_data: 'CANCEL' }
+          ]
+        ]
+      }
+    });
+
+    console.log(`✅ [handleImageSelection] Confirm screen shown for ${selectedImage.label}`);
+  } catch (err) {
+    console.error('❌ handleImageSelection error:', err);
+    sendMessage(chatId, '❌ خطایی در بارگذاری سیستم‌عامل‌ها یا Snapshotها رخ داد.');
+  }
+}
+
+
+
+
+async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
+  bot.editMessageText('🚀 در حال ساخت سرور شما...', {
+    chat_id: chatId,
+    message_id: messageId
+  }).catch(() => {});
+
+  try {
+    const { selectedFlavor, selectedImage, selectedCycle, finalPrice } = state[userId];
+if (!dcConfig) {
+  dcConfig = state[userId]?.selectedDatacenterConfig;
+}
+
+if (!dcConfig) {
+  return sendMessage(chatId, '❌ دیتاسنتر از state پیدا نشد. دوباره خرید را شروع کنید.');
+}
+
+console.log('[PURCHASE]', {
+  dcKey: dcConfig.key,
+  provider: dcConfig.provider,
+  apiType: dcConfig.apiType,
+  selectedFlavor,
+  selectedImage,
+  selectedCycle,
+  finalPrice
+});    
+const balance = await getUserWallet(userId);
+
+    if (balance < finalPrice) {
+      return sendMessage(
+        chatId,
+        `❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${finalPrice} تومان`,
+        mainMenu
+      );
+    }
+
+    const serverName = `Srv-${dcConfig.key.substring(0, 3).toUpperCase()}-${crypto.randomBytes(3).toString('hex')}`;
+    let srv, rawPrivateKey = null, rootPassword = null;
+const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';
+const isAfra = dcConfig.provider === 'afracloud' || dcConfig.apiType === 'afracloud';
+
+if (!isHetzner) {
+      const tok = await openstackApi.getToken(dcConfig);
+
+let keyName = null;
+let kp = null;
+
+if (!isAfra) {
+  keyName = `user-${userId}-${crypto.randomBytes(4).toString('hex')}`;
+  kp = await openstackApi.createKeyPair(dcConfig, tok, keyName);
+}
+      const isSnapshot = selectedImage.type === 'snapshot';
+
+      srv = await openstackApi.createServer(
+        dcConfig,
+        tok,
+        serverName,
+        selectedFlavor.id,
+        selectedImage.id,
+        keyName,
+        { user: userId, type: 'purchased', datacenter: dcConfig.key },
+        selectedFlavor.disk,
+        'volume',
+        isSnapshot // ✅ اگر Snapshot باشد، از Glance image بوت می‌کند
+      );
+
+
+rawPrivateKey = kp?.private_key ? String(kp.private_key || '')
+  .replace(/-----BEGIN RSA PRIVATE KEY-----/g, '')
+  .replace(/-----END RSA PRIVATE KEY-----/g, '')
+  .trim() : null;
+
+rootPassword = srv.adminPass;
+
+
+
+
+} else {
+      // مسیر Hetzner (بدون تغییر)
+      const passwordOnly = !!dcConfig.HETZNER_PASSWORD_ONLY;
+      let keyId = null;
+      if (!passwordOnly) {
+        const kp = await openstackApi.createKeyPair(dcConfig, null, `user-${userId}`);
+        keyId = kp.key_id || null;
+      }
+
+      const userData = `#cloud-config
+ssh_pwauth: true
+disable_root: false
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hamoon.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+runcmd:
+  - systemctl reload ssh || systemctl restart ssh
+`;
+
+      const serverType = selectedFlavor?.hetzner_type || selectedFlavor?.id;
+      const imageParam = selectedImage?.name || selectedImage?.id;
+      const location = dcConfig.HETZNER_LOCATION || 'nbg1';
+
+      srv = await openstackApi.createServer(dcConfig, null, {
+        name: serverName,
+        serverType,
+        image: imageParam,
+        location,
+        key_id: passwordOnly ? null : keyId,
+        userLabel: userId,
+        user_data: userData
+      });
+
+      rootPassword = await openstackApi.resetServerPassword(dcConfig, null, srv.id);
+    }
+
+    // ثبت خرید
+    await debitUser(userId, finalPrice);
+    await recordPurchase(
+      userId,
+      srv.id,
+      dcConfig.key,
+      serverName,
+      selectedFlavor.id,
+      selectedFlavor.price,
+      selectedCycle,
+      DEFAULT_PRICE_PER_GB,
+      DEFAULT_DOWNLOAD_ONLY,
+      srv.id,
+      'volume',
+      selectedImage.label
+    );
+    await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${dcConfig.name})`, 'purchase');
+
+    // گرفتن IP
+    let ip = null;
+    if (dcConfig.apiType === 'hetzner') {
+      ip = srv.public_net?.ipv4?.ip || null;
+    } else {
+      const tok = await openstackApi.getToken(dcConfig);
+      ip = await pollForIp(dcConfig, tok, srv.id);
+    }
+
+    const privateKeyText = rawPrivateKey
+      ? `-----BEGIN RSA PRIVATE KEY-----\n${rawPrivateKey}\n-----END RSA PRIVATE KEY-----`
+      : null;
+
+    let msgHtml = [
+      `✅ سرور شما در ${htmlEscape(dcConfig.name)} با موفقیت ساخته شد!`,
+      `🔹 نام: ${htmlEscape(serverName)}`,
+      ip ? `🔹 IP: <code>${htmlEscape(ip)}</code>` : '🔹 IP: در حال تخصیص...'
+    ].join('\n');
+
+    if (rootPassword) {
+      msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword);
+    }
+    if (privateKeyText) {
+      msgHtml += '\n' + `🔑 <b>کلید خصوصی شما (SSH):</b>\n` + htmlCodeBlock(privateKeyText);
+    }
+
+    sendMessage(chatId, msgHtml, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '⚙️ مدیریت سرور', callback_data: `M_${dcConfig.key}_${srv.id}` }]] }
+    });
+
+    logServerEvent({
+      type: 'server_created',
+      server_id: srv.id,
+      user_id: userId,
+      datacenter: dcConfig.key,
+      password_provided: !!rootPassword
+    });
+  } catch (e) {
+    console.error(`Purchase Error in ${dcConfig.name}:`, e);
+    sendMessage(chatId, `❌ خطا در خرید سرور: ${escapeMarkdownV2(e.message)}`, mainMenu);
+  } finally {
+    if (state[userId]) {
+      state[userId].step = 'READY';
+    }
+  }
+}
+
+
+async function handleServerManagement(chatId, userId, serverId, dcConfig) {
+  try {
+    // 👇 حتماً باید قبل از ساخت callback ها اجرا بشه
+    ensureUserState(userId);
+
+    const tok = await openstackApi.getToken(dcConfig);
+    const srv = await openstackApi.getServer(dcConfig, tok, serverId);
+    const purchase = await getPurchaseByServerId(serverId);
+
+    // --- IP Extraction ---
+    let ip = '–';
+    for (const net in srv.addresses) {
+      const ipv4 = srv.addresses[net].find(a => a.version === 4);
+      if (ipv4) ip = ipv4.addr;
+    }
+
+    // --- Info Preparation ---
+    const osLabel = purchase?.os_label || srv.image?.name || 'N/A';
+    const isHetzner = dcConfig.apiType === 'hetzner';
+    const isProjectUser = dcConfig.sharedProject === false;
+
+    let messageText =
+      `*مدیریت سرور: ${escapeMarkdownV2(srv.name)}*\n` +
+      `دیتاسنتر: ${escapeMarkdownV2(dcConfig.name)}\n` +
+      `IP: ${escapeMarkdownV2(ip)}\n` +
+      `وضعیت: ${escapeMarkdownV2(srv.status)}\n` +
+      `سیستم عامل: ${escapeMarkdownV2(osLabel)}\n`;
+
+    const isProjectDC = dcConfig.sharedProject === false;
+    let keyboard = [];
+
+    // --- برای کاربران پروژه‌محور (project-based) ---
+    if (isProjectUser) {
+      if (!isHetzner) {
+        keyboard.push([
+          {
+            text: '📈 ترافیک کل پروژه + باقیمانده',
+            callback_data: makeShortCb(userId, {
+              action: 'PROJECT_SUM',
+              dcKey: dcConfig.key,
+              projectId: dcConfig.OS_PROJECT_ID
+            })
+          }
+        ]);
+
+        const trafficAction = isProjectDC ? 'GET_TRAFFIC_RAW' : 'GET_TRAFFIC';
+        keyboard.push([
+          {
+            text: '📊 مشاهده ترافیک',
+            callback_data: makeShortCb(userId, {
+              action: trafficAction,
+              dcKey: dcConfig.key,
+              serverId: srv.id
+            })
+          }
+        ]);
+      }
+
+      keyboard.push([
+        {
+          text: '🔑 ریست پسورد',
+          callback_data: makeShortCb(userId, {
+            action: 'ASK_RESETPW',
+            dcKey: dcConfig.key,
+            serverId: srv.id
+          })
+        }
+      ]);
+
+      keyboard.push([
+        {
+          text: '🔄 ریبیلد سرور',
+          callback_data: makeShortCb(userId, {
+            action: 'REBUILD_ASK',
+            dcKey: dcConfig.key,
+            serverId: srv.id
+          })
+        }
+      ]);
+
+      // ✅ Snapshot برای کاربران پروژه‌محور
+      keyboard.push([
+        {
+          text: '📸 Snapshot',
+          callback_data: makeShortCb(userId, {
+            action: 'SNAPSHOT_ASK',
+            dcKey: dcConfig.key,
+            serverId: srv.id
+          })
+        }
+      ]);
+
+    }
+
+    // --- برای کاربران معمولی (با رکورد خرید) ---
+    else {
+               keyboard.push([
+          {
+            text: '🔑 ریست پسورد',
+            callback_data: makeShortCb(userId, {
+              action: 'ASK_RESETPW',
+              dcKey: dcConfig.key,
+              serverId: srv.id
+            })
+          }
+        ]);
+      if (!isHetzner) {
+
+
+        keyboard.push([
+          {
+            text: '🔑 دریافت کلید خصوصی',
+            callback_data: `GET_KEY_${dcConfig.key}_${srv.id}`
+          }
+        ]);
+
+        // ✅ Snapshot
+        keyboard.push([
+          {
+            text: '📸 Snapshot',
+            callback_data: makeShortCb(userId, {
+              action: 'SNAPSHOT_ASK',
+              dcKey: dcConfig.key,
+              serverId: srv.id
+            })
+          }
+        ]);
+
+      }
+
+      if (purchase) {
+        if (!isHetzner) {
+          keyboard.push([
+            {
+              text: '📊 مشاهده ترافیک',
+              callback_data: `GET_TRAFFIC_${dcConfig.key}_${srv.id}`
+            }
+          ]);
+        }
+        keyboard.push([
+          {
+            text: '🔄 تغییر دوره پرداخت',
+            callback_data: `CHANGECYCLE_ASK_${dcConfig.key}_${srv.id}`
+          }
+        ]);
+        keyboard.push([
+          {
+            text: '🔄 ریبیلد سرور',
+            callback_data: `REBUILD_ASK_${dcConfig.key}_${srv.id}`
+          }
+        ]);
+      }
+
+      keyboard.push([
+        {
+          text: '❌ حذف سرور',
+          callback_data: `ASK_DELETE_${dcConfig.key}_${srv.id}`
+        }
+      ]);
+    }
+
+    // --- ارسال پیام مدیریت سرور ---
+    await sendMessage(chatId, messageText, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: { inline_keyboard: keyboard }
+    });
+
+    // 🧩 لاگ دیباگ (برای اطمینان از ساخت callback)
+    console.log('[handleServerManagement] Buttons created for user', userId, 'DC:', dcConfig.key, 'srv:', srv.id);
+
+  } catch (e) {
+    console.error(`Manage Server Error for ${serverId} in ${dcConfig.name}:`, e);
+    sendMessage(chatId, `❌ خطا در دریافت اطلاعات سرور: ${escapeMarkdownV2(e.message)}`);
+  }
+}
+
+
+
+
+async function getProjectTrafficSummary(chatId, userId, dcConfig, projectId) {
+  try {
+    if (!dcConfig?.TRAFFIC_API_BASE_URL) {
+      return sendMessage(chatId, '📊 سرویس ترافیک برای این دیتاسنتر فعال نیست.');
+    }
+
+    const baseKey = dcConfig.__baseKey || (dcConfig.key?.split('__')[0]) || dcConfig.key;
+
+    const endTs   = Math.floor(Date.now() / 1000);
+    const startTs = 0;
+
+    const url = `${dcConfig.TRAFFIC_API_BASE_URL}project/${encodeURIComponent(projectId)}?start_time=${startTs}&end_time=${endTs}`;
+    const headers = { Authorization: dcConfig.TRAFFIC_API_KEY };
+
+    const controller = new AbortController();
+    const tmo = setTimeout(() => controller.abort(), 15000);
+    const resp = await fetch(url, { headers, signal: controller.signal });
+    clearTimeout(tmo);
+
+    if (!resp?.ok) {
+      const txt = await resp.text().catch(() => '(no body)');
+      console.error('[TrafficAPI error body]', txt);
+      return sendMessage(chatId, `❌ خطا در دریافت ترافیک پروژه: ${resp.status} ${resp.statusText}`);
+    }
+
+    const data = await resp.json().catch(() => ({}));
+
+    let rx = 0, tx = 0;
+    if (data && data.servers && typeof data.servers === 'object') {
+      for (const s of Object.values(data.servers)) {
+        rx += Number(s?.receive || 0);
+        tx += Number(s?.transmit || 0);
+      }
+    } else {
+      rx = Number(data?.received_gb || 0);
+      tx = Number(data?.transmitted_gb || 0);
+    }
+
+    const projects = getUserProjects(String(userId)) || [];
+    const proj = projects.find(p =>
+      p.dcKey === baseKey &&
+      (p.auth?.OS_PROJECT_ID === projectId || p.projectId === projectId)
+    );
+
+    const pricePerGb   = Number(proj?.pricePerGbToman ?? DEFAULT_PRICE_PER_GB);
+    const downloadOnly = !!proj?.downloadOnly;
+
+    const billableGb = downloadOnly ? rx : (rx + tx);
+    const totalCost  = Math.floor(billableGb * pricePerGb);
+
+    // 👇 اینجا تفکیک کردیم
+    const topupsTotal         = await getUserTopupTotal(userId);
+    const { cost: globalCost } = await getUserProjectTrafficCost(userId);
+    const remainingTotal      = Math.max(0, topupsTotal - globalCost);
+
+    const msgHtml =
+      `📈 <b>ترافیک کل پروژه</b>\n` +
+      `پروژه: <code>${htmlEscape(projectId)}</code>\n\n` +
+      `📥 RX: ${htmlEscape(rx.toFixed(2))} GB\n` +
+      `📤 TX: ${htmlEscape(tx.toFixed(2))} GB\n` +
+      `📉 قابل محاسبه: ${htmlEscape(billableGb.toFixed(2))} GB` +
+      (downloadOnly ? ` <i>(دانلود فقط)</i>` : ``) + `\n` +
+      `💵 قیمت/GB: ${htmlEscape(pricePerGb.toString())} تومان\n` +
+      `💰 مجموع مصرف ریالی (این پروژه): ${htmlEscape(totalCost.toString())} تومان\n` +
+      `🟢 شارژ کل ثبت‌شده: ${htmlEscape(topupsTotal.toString())} تومان\n\n` +
+      `🌐 باقی‌مانده کل اعتبار همه پروژه‌ها: ${htmlEscape(remainingTotal.toString())} تومان`;
+
+    return sendMessage(chatId, msgHtml, { parse_mode: 'HTML' });
+
+  } catch (err) {
+    console.error('[ProjectTrafficSummary fatal]', err?.response?.data || err?.message || err);
+    return sendMessage(chatId, '❌ خطا در دریافت خلاصه ترافیک پروژه.');
+  }
+}
+
+
+
+
+async function askForDeletionConfirmation(chatId, serverId, dcConfig) {
+    const purchase = await getPurchaseByServerId(serverId);
+    const serverName = purchase?.server_name || serverId;
+    const messageText = `⚠️ آیا از حذف سرور *${escapeMarkdownV2(serverName)}* در دیتاسنتر *${escapeMarkdownV2(dcConfig.name)}* مطمئن هستید؟\nاین عملیات غیرقابل بازگشت است\\.`;
+    const keyboard = [
+        [{ text: '✅ بله، حذف کن', callback_data: `CONFIRM_DELETE_${dcConfig.key}_${serverId}` }],
+        [{ text: ' خیر', callback_data: 'CANCEL' }]
+    ];
+    sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleServerDeletion(chatId, userId, serverId, dcConfig) {
+    sendMessage(chatId, `🗑️ در حال حذف سرور از ${dcConfig.name}...`);
+    try {
+        const tok = await openstackApi.getToken(dcConfig);
+        const purchase = await getPurchaseByServerId(serverId);
+        const isTestServer = !purchase;
+
+        await openstackApi.deleteServer(dcConfig, tok, serverId).catch(e => {
+            if (e.response?.status !== 404) throw e;
+            console.warn(`Server ${serverId} not found on OpenStack ${dcConfig.name}, proceeding with DB cleanup.`);
+        });
+const isHetzner = dcConfig.apiType === 'hetzner';
+        const kp = await getKeyPair(serverId);
+        if (!isHetzner && kp) {
+            await openstackApi.deleteKeyPair(dcConfig, tok, kp.key_name).catch(e => console.warn(`Could not delete keypair ${kp.key_name} from ${dcConfig.name}: ${e.message}`));
+            await deleteKeyPairFromDb(serverId);
+        }else {
+  // Hetzner: پرایوت‌کی‌ای نزد ما نیست که پاک شود
+  await deleteKeyPairFromDb(serverId).catch(()=>{});
+}
+
+        if (isTestServer) {
+            await deleteTestServer(serverId);
+        } else {
+            await updatePurchaseStatus(serverId, 'deleted');
+        }
+
+        sendMessage(chatId, '✅ سرور با موفقیت حذف شد.');
+        logServerEvent({ type: 'server_deleted', server_id: serverId, user_id: userId, datacenter: dcConfig.key });
+    } catch (e) {
+        console.error(`Deletion Error for ${serverId} in ${dcConfig.name}:`, e);
+        sendMessage(chatId, `❌ خطا در حذف سرور: ${escapeMarkdownV2(e.message)}`);
+    }
+}
+
+async function getPrivateKey(chatId, serverId) {
+
+
+const p  = await getPurchaseByServerId(serverId);
+if (!p) return sendMessage(chatId, '❌ رکورد خرید یافت نشد.');
+
+const dcs = getUserEffectiveDCs(String(p.telegram_id));
+const dc  = dcs?.[p.datacenter];
+
+if (dc?.apiType === 'hetzner') {
+  return sendMessage(chatId, 'در Hetzner کلید خصوصی نزد ما ذخیره نمی‌شود. باید با همان SSH key عمومی که موقع ساخت معرفی کرده‌اید وصل شوید.');
+}
+
+    const keyPair = await getKeyPair(serverId);
+    if (keyPair && keyPair.private_key) {
+        const rawKey = String(keyPair.private_key)
+            .replace(/-----BEGIN RSA PRIVATE KEY-----/g, '')
+            .replace(/-----END RSA PRIVATE KEY-----/g, '')
+            .trim();
+
+        const fullKey = `-----BEGIN RSA PRIVATE KEY-----\n${rawKey}\n-----END RSA PRIVATE KEY-----`;
+        const serverName = (await getPurchaseByServerId(serverId))?.server_name || serverId;
+        sendMessage(chatId, `🔑 کلید خصوصی سرور ${escapeMarkdownV2(serverName)}:\n\`\`\`\n${escapeMarkdownV2(fullKey)}\n\`\`\``, { parse_mode: 'MarkdownV2' });
+    } else {
+        sendMessage(chatId, '❌ کلید خصوصی برای این سرور یافت نشد.');
+    }
+}
+
+async function getTrafficInfoRaw(chatId, serverId, dcConfig) {
+  try {
+    if (dcConfig.apiType === 'hetzner') {
+      return sendMessage(chatId, '📊 ترافیک برای Hetzner در این ربات پشتیبانی نشده است.');
+    }
+    if (!dcConfig.TRAFFIC_API_BASE_URL) {
+      return sendMessage(chatId, '📊 سرویس ترافیک برای این دیتاسنتر فعال نیست.');
+    }
+
+    const tok = await openstackApi.getToken(dcConfig);
+    const srv = await openstackApi.getServer(dcConfig, tok, serverId);
+
+    // تاریخ شروع = زمان ساخت سرور، با fallback امن
+    let sinceIso = (srv && (srv.created || srv['created_at'])) || null;
+
+    // اگر به هر دلیلی تاریخ معتبر نبود، fallback به “الان”
+    let sinceDate = sinceIso ? new Date(sinceIso) : new Date();
+    if (isNaN(sinceDate.getTime())) sinceDate = new Date();
+
+    const startTimeUnix = Math.floor(sinceDate.getTime() / 1000);
+    const endTimeUnix = Math.floor(Date.now() / 1000);
+
+    // ===== Helper: fetch traffic for a given window =====
+    async function fetchTrafficWindow(startUnix, endUnix) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const apiUrl =
+        `${dcConfig.TRAFFIC_API_BASE_URL}${encodeURIComponent(serverId)}` +
+        `?start_time=${startUnix}&end_time=${endUnix}`;
+
+      const resp = await fetch(apiUrl, {
+        headers: { Authorization: dcConfig.TRAFFIC_API_KEY },
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(`Traffic API ${resp.status} ${resp.statusText} ${body ? `| ${body.slice(0, 200)}` : ''}`.trim());
+      }
+
+      const data = await resp.json();
+      const rx = Number(data?.received_gb || 0);
+      const tx = Number(data?.transmitted_gb || 0);
+      return { rx, tx };
+    }
+
+    // ===== Only for Tebyan: split calculation due to outage window =====
+    // این شرط را مطابق کانفیگ خودت تنظیم کن:
+    const isTebyan = (dcConfig.key === 'tebyan') || (dcConfig.provider === 'tebyan') || (dcConfig.apiType === 'tebyan');
+
+    // بازه حذف‌شده (اختلال): 25 Dec 00:00:00Z تا 27 Dec 00:00:00Z
+    const CUT_START_UNIX = Math.floor(Date.parse('2025-12-25T00:00:00Z') / 1000);
+    const CUT_END_UNIX   = Math.floor(Date.parse('2025-12-27T00:00:00Z') / 1000);
+
+    let rxTotal = 0;
+    let txTotal = 0;
+
+    let details = [];
+
+    if (isTebyan) {
+      // Window A: from server created time -> start of cut (25 Dec)
+      const aStart = startTimeUnix;
+      const aEnd   = Math.min(endTimeUnix, CUT_START_UNIX);
+
+      if (aStart < aEnd) {
+        const a = await fetchTrafficWindow(aStart, aEnd);
+        rxTotal += a.rx;
+        txTotal += a.tx;
+        details.push({ label: 'بازه ۱', rx: a.rx, tx: a.tx });
+      } else {
+        details.push({ label: 'بازه ۱', rx: 0, tx: 0 });
+      }
+
+      // Window B: from end of cut (27 Dec) -> now
+      const bStart = Math.max(startTimeUnix, CUT_END_UNIX);
+      const bEnd   = endTimeUnix;
+
+      if (bStart < bEnd) {
+        const b = await fetchTrafficWindow(bStart, bEnd);
+        rxTotal += b.rx;
+        txTotal += b.tx;
+        details.push({ label: 'بازه ۲', rx: b.rx, tx: b.tx });
+      } else {
+        details.push({ label: 'بازه ۲', rx: 0, tx: 0 });
+      }
+    } else {
+      // Default behavior: single window
+      const one = await fetchTrafficWindow(startTimeUnix, endTimeUnix);
+      rxTotal = one.rx;
+      txTotal = one.tx;
+    }
+
+    const total = rxTotal + txTotal;
+    const name = srv?.name || serverId;
+
+    let msg =
+      `📊 *ترافیک مصرفی*\n` +
+      `سرور: *${escapeMarkdownV2(name)}*\n\n`;
+
+    if (isTebyan) {
+      msg +=
+        `🔧 *محاسبه دو‌تکه (فقط تبیان)*\n` +
+        `حذف بازه اختلال: 2025\\-12\\-25 00:00Z تا 2025\\-12\\-27 00:00Z\n\n`;
+
+      // جزئیات هر بازه
+      for (const d of details) {
+        const dTotal = d.rx + d.tx;
+        msg +=
+          `• *${escapeMarkdownV2(d.label)}*\n` +
+          `  📥 ${escapeMarkdownV2(d.rx.toFixed(2))} GB\n` +
+          `  📤 ${escapeMarkdownV2(d.tx.toFixed(2))} GB\n` +
+          `  📉 ${escapeMarkdownV2(dTotal.toFixed(2))} GB\n\n`;
+      }
+    } else {
+      msg += `از ابتدای ساخت\n\n`;
+    }
+
+    msg +=
+      `✅ *جمع کل*\n` +
+      `📥 دانلود: ${escapeMarkdownV2(rxTotal.toFixed(2))} GB\n` +
+      `📤 آپلود: ${escapeMarkdownV2(txTotal.toFixed(2))} GB\n` +
+      `📉 مجموع: ${escapeMarkdownV2(total.toFixed(2))} GB`;
+
+    return sendMessage(chatId, msg, { parse_mode: 'MarkdownV2' });
+  } catch (e) {
+    console.error('[GET_TRAFFIC_RAW]', e);
+    return sendMessage(chatId, `❌ خطا: ${escapeMarkdownV2(String(e.message))}`, { parse_mode: 'MarkdownV2' });
+  }
+}
+
+
+
+async function getTrafficInfo(chatId, serverId, dcConfig) {
+  sendMessage(chatId, `📊 در حال دریافت اطلاعات ترافیک از ${dcConfig.name}...`);
+  try {
+    const purchase = await getPurchaseByServerId(serverId);
+    if (!purchase) {
+      return sendMessage(chatId, 'اطلاعات خرید یافت نشد. این ممکن است یک سرور تست باشد.');
+    }
+
+    const now = new Date();
+    const trafficData = await calculateTrafficCost(purchase, purchase.created_at, now, dcConfig);
+
+    const n = (v) => Number(v ?? 0);
+    const fmt = (v) => escapeMarkdownV2(n(v).toFixed(2));
+
+    const received = n(trafficData?.received_gb);
+    const transmitted = n(trafficData?.transmitted_gb);
+    const totalRaw = n(trafficData?.totalRawTrafficGb ?? (received + transmitted));
+    const free = n(trafficData?.totalFreeTrafficForPeriod);
+    const billableAfterFree = Math.max(0, n(trafficData?.billableTraffic ?? totalRaw) - free);
+
+    const messageText =
+      `📊 *ترافیک مصرفی سرور ${escapeMarkdownV2(purchase.server_name)}*\n` +
+      `_\\(از زمان ساخت\\)_\n\n` +
+      `📥 *دانلود \\(دریافتی\\):* ${fmt(received)} GB\n` +
+      `📤 *آپلود \\(ارسالی\\):* ${fmt(transmitted)} GB\n` +
+      `📉 *مجموع:* ${fmt(totalRaw)} GB\n\n` +
+      `*اطلاعات صورتحساب:*\n` +
+      `🎁 ترافیک رایگان دوره \\(${escapeMarkdownV2(purchase.duration)}\\): ${fmt(free)} GB\n` +
+      `💰 ترافیک قابل محاسبه: ${fmt(billableAfterFree)} GB`;
+
+    sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', disable_web_page_preview: true });
+  } catch (e) {
+    console.error(`Get Traffic Error for ${serverId} in ${dcConfig.name}:`, e);
+    sendMessage(
+      chatId,
+      `❌ خطا در دریافت اطلاعات ترافیک: ${escapeMarkdownV2(String(e.message))}`,
+      { parse_mode: 'MarkdownV2' }
+    );
+  }
+}
+
+
+async function handleDownloadWalletHistory(chatId, userId) {
+    sendMessage(chatId, '⏳ در حال آماده‌سازی سابقه کیف پول شما...');
+    try {
+        const allLogs = await getWalletLogs(userId, null);
+        if (!allLogs || allLogs.length === 0) {
+            return sendMessage(chatId, '❌ سابقه کیف پول شما خالی است.');
+        }
+
+        const csvHeader = 'تاریخ,نوع,مبلغ,توضیحات\n';
+        const csvRows = allLogs.map(log => {
+            const timestamp = new Date(log.timestamp).toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' });
+            const type = log.type || 'N/A';
+            const amount = parseFloat(log.amount).toFixed(2);
+            const description = log.description ? `"${log.description.replace(/"/g, '""')}"` : '';
+            return [timestamp, type, amount, description].join(',');
+        }).join('\n');
+
+        const csvContent = csvHeader + csvRows;
+        const fileName = `wallet_history_${userId}.csv`;
+
+        bot.sendDocument(chatId, Buffer.from(csvContent, 'utf8'), {
+            caption: `✅ سابقه کامل کیف پول شما.`,
+            filename: fileName
+        }, { contentType: 'text/csv' });
+
+    } catch (e) {
+        console.error('Error generating wallet history CSV:', e);
+        sendMessage(chatId, `❌ خطا در ایجاد فایل سابقه: ${escapeMarkdownV2(e.message)}`);
+    }
+}
+
+
+async function pollForIp(dcConfig, tok, serverId, retries = 24, delay = 5000) {
+    for (let i = 0; i < retries; i++) {
+        await new Promise(r => setTimeout(r, delay));
+        try {
+            const sd = await openstackApi.getServer(dcConfig, tok, serverId);
+            for (const net in sd.addresses) {
+                const ipv4 = sd.addresses[net].find(a => a.version === 4);
+                if (ipv4) return ipv4.addr;
+            }
+        } catch (e) {
+            console.warn(`Polling for IP for server ${serverId} failed on attempt ${i+1}: ${e.message}`);
+        }
+    }
+    return null;
+}
+
+// --- Hourly Billing ---
+async function calculateTrafficCost(purchase, periodStart, periodEnd, dcConfig) {
+  const { server_id, duration } = purchase || {};
+if (!dcConfig || dcConfig.apiType === 'hetzner' || !dcConfig.TRAFFIC_API_BASE_URL) {
+  return {
+    received_gb: 0,
+    transmitted_gb: 0,
+    totalRawTrafficGb: 0,
+    billableTraffic: 0,
+    totalFreeTrafficForPeriod: 0
+  };
+}
+
+  if (!dcConfig || !dcConfig.TRAFFIC_API_BASE_URL) {
+    console.error(`TRAFFIC_API_BASE_URL is not defined for datacenter: ${purchase?.datacenter}`);
+    return {
+      received_gb: 0,
+      transmitted_gb: 0,
+      totalRawTrafficGb: 0,
+      billableTraffic: 0,
+      totalFreeTrafficForPeriod: 0
+    };
+  }
+
+  const startTimeUnix = Math.floor(new Date(periodStart).getTime() / 1000);
+  const endTimeUnix = Math.floor(new Date(periodEnd).getTime() / 1000);
+
+  let received_gb = 0;
+  let transmitted_gb = 0;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    const apiUrl = `${dcConfig.TRAFFIC_API_BASE_URL}${encodeURIComponent(server_id)}?start_time=${startTimeUnix}&end_time=${endTimeUnix}`;
+    const response = await fetch(apiUrl, {
+      headers: { Authorization: dcConfig.TRAFFIC_API_KEY },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.error(`Traffic API failed for ${server_id} in ${dcConfig.name}: ${response.status} ${response.statusText}`);
+    } else {
+      const trafficData = await response.json();
+      received_gb = Number(trafficData?.received_gb) || 0;
+      transmitted_gb = Number(trafficData?.transmitted_gb) || 0;
+    }
+  } catch (e) {
+    console.error(`Error in calculateTrafficCost for ${server_id}:`, e);
+    return {
+      received_gb: 0,
+      transmitted_gb: 0,
+      totalRawTrafficGb: 0,
+      billableTraffic: 0,
+      totalFreeTrafficForPeriod: 0
+    };
+  }
+
+  const totalRawTrafficGb = Number(received_gb) + Number(transmitted_gb);
+
+  // اگر دانلود-تنها باشد، فقط received محاسبه می‌شود
+  const isDownloadOnly = purchase?.download_only == 1 || purchase?.download_only === true || purchase?.download_only === '1';
+  const billableTraffic = isDownloadOnly ? Number(received_gb) : totalRawTrafficGb;
+
+  // سهمیه رایگان دوره (fallback به free_traffic_gb)
+  const freeTrafficGb = Number(purchase?.[`free_traffic_${duration}_gb`]) || Number(purchase?.free_traffic_gb) || 0;
+
+  return {
+    received_gb: Number(received_gb) || 0,
+    transmitted_gb: Number(transmitted_gb) || 0,
+    totalRawTrafficGb,
+    billableTraffic,
+    totalFreeTrafficForPeriod: freeTrafficGb
+  };
+}
+
+const DEFAULT_MIN_ALERT_TOMAN = 100000;
+
+async function runHourlyBilling() {
+  console.log('--- Starting hourly billing process ---');
+  const allPurchases = await getAllPurchases();
+
+  // ✅ گردآوری یوزرهای کاندید
+  const usersWithPurchases = new Map(); // userId -> { hasActive: bool, chatId: userId }
+  for (const p of allPurchases) {
+    const uid = String(p.telegram_id);
+    if (!usersWithPurchases.has(uid)) usersWithPurchases.set(uid, { hasActive: false, chatId: uid });
+    if (p.status === 'active') usersWithPurchases.get(uid).hasActive = true;
+  }
+  // 🔔 هشدار کمبود موجودی برای کاربران عادی (بدون پروژه)
+  for (const [uid, meta] of usersWithPurchases) {
+    const userId = String(uid);
+
+    const projects = getUserProjects(userId) || [];
+    if (projects.length > 0) continue; // فقط کاربران غیرپروژه‌ای
+
+    // فقط اگر کاربر سرور active دارد هشدار بده
+    if (!meta.hasActive) continue;
+
+    const minAlert = DEFAULT_MIN_ALERT_TOMAN; // یا از تنظیمات/یوزر بخوان
+    const balance = await getUserWallet(userId);
+
+    if (balance < minAlert) {
+      await sendLowBalanceAlertIfNeeded(
+        userId,
+        Number(userId),                 // chatId
+        Math.max(0, Math.floor(balance)),
+        `active server (wallet-based)`
+      );
+    }
+  }
+
+  // ✅ اضافه کردن کاربران پروژه‌محور (ممکنه خریدی نداشته باشن)
+  const { getAllProjectUserIds } = require('./user_projects');
+  for (const uid of getAllProjectUserIds()) {
+    if (!usersWithPurchases.has(uid)) usersWithPurchases.set(uid, { hasActive: false, chatId: uid });
+  }
+
+  // 🔔 هشدار کمبود اعتبار پروژه‌ها
+  for (const [uid, meta] of usersWithPurchases) {
+    const userId = String(uid);
+    const projects = getUserProjects(userId) || [];
+    if (!projects.length) continue;
+
+    const topupsTotal = await getUserTopupTotal(userId);
+    const effectiveDCs = getUserEffectiveDCs(userId);
+
+    for (const proj of projects) {
+      const alias = proj.alias || proj.auth?.OS_PROJECT_ID || `u_${userId}`;
+      const dc =
+        effectiveDCs[`${proj.dcKey}__${alias}`] ||
+        effectiveDCs[proj.dcKey];
+      if (!dc || !dc.TRAFFIC_API_BASE_URL) continue;
+
+      const pricePerGb   = Number(proj.pricePerGbToman ?? DEFAULT_PRICE_PER_GB);
+      const downloadOnly = !!proj.downloadOnly;
+      const minAlert     = Number(proj.minAlertToman ?? DEFAULT_MIN_ALERT_TOMAN);
+
+      const { cost } = await getProjectCost(userId, dc, proj.auth?.OS_PROJECT_ID, downloadOnly, pricePerGb);
+      const remainingForThisProject = Math.max(0, topupsTotal - cost);
+
+      // فقط اگر کاربر مرتبط است هشدار بده: 1) سرور active دارد یا 2) مصرف پروژه > 0
+      const isRelevant = meta.hasActive || cost > 0;
+      if (!isRelevant) continue;
+
+      if (remainingForThisProject < minAlert) {
+        const key = `${proj.dcKey}:${proj.auth?.OS_PROJECT_ID}`;
+        const label = proj.label || `${dc.name} / ${proj.auth?.OS_PROJECT_ID}`;
+        // reason را یک رشته بده، آرگومان اضافه نفرست
+        await sendLowBalanceAlertIfNeeded(userId, Number(userId), remainingForThisProject, `${label} (${key})`);
+      }
+    }
+  }
+
+  console.log('Billing candidates:',
+    allPurchases.map(p => ({
+      id: p.server_id,
+      st: p.status,
+      last: p.last_billed_at,
+      traf: p.last_billed_traffic_gb,
+      dc: p.datacenter
+    }))
+  );
+
+  // 💳 حلقه‌ی صورتحساب سرورها
+  for (const purchase of allPurchases) {
+    if (purchase.status === 'deleted') continue;
+
+    const dcsForUser = getUserEffectiveDCs(String(purchase.telegram_id));
+    const dcConfig = dcsForUser?.[purchase.datacenter];
+    if (!dcConfig) {
+      console.error(`Billing Error: DC '${purchase.datacenter}' for user ${purchase.telegram_id} not found. Skipping ${purchase.server_id}.`);
+      continue;
+    }
+
+    const {
+      telegram_id, server_id, server_name, amount, duration,
+      status, last_billed_at, price_per_gb, last_billed_traffic_gb, created_at
+    } = purchase;
+
+    const userId = String(telegram_id);
+    let currentBalance = await getUserWallet(userId);
+
+    const now = new Date();
+    const lastBilledDate = last_billed_at ? new Date(last_billed_at) : new Date(created_at || now);
+    const cycleHours = HOURS_IN_CYCLE[duration];
+    if (!cycleHours) {
+      console.error(`Billing Error: invalid duration '${duration}' for ${server_id}`);
+      continue;
+    }
+    const hoursSinceLastBill = (now - lastBilledDate) / 3600000;
+
+    // 🔢 ترافیک از زمان ساخت تا الان
+    const t = await calculateTrafficCost(purchase, created_at, now, dcConfig);
+
+    // ✅ اعمال سهمیه رایگان به‌صورت تجمعی بر اساس تعداد سیکل‌های سپری‌شده
+    const createdAtDate = created_at ? new Date(created_at) : now;
+    const elapsedHoursSinceCreation = Math.max(0, (now - createdAtDate) / 3600000);
+    const cyclesElapsed = Math.max(1, Math.floor(elapsedHoursSinceCreation / cycleHours) + 1); // سیکل جاری هم شمرده می‌شود
+    const freePerCycleGb = Number(t?.totalFreeTrafficForPeriod || 0);
+    const cumulativeFreeGb = freePerCycleGb * cyclesElapsed;
+
+    // billableTraffic خودش دانلود-تنها را لحاظ کرده
+    const rawBillableGbFromCreation = Number(t?.billableTraffic || 0);
+    const billableFromCreationGb = Math.max(0, rawBillableGbFromCreation - cumulativeFreeGb);
+
+    // last_billed_traffic_gb = ترافیک قابل‌صورتحساب *تجمیعی* که قبلاً صورت‌حساب شده
+    const alreadyBilledGb = Number(last_billed_traffic_gb || 0);
+    const newTrafficToBillGb = Math.max(0, billableFromCreationGb - alreadyBilledGb);
+    const trafficCost = newTrafficToBillGb * Number(price_per_gb || 0);
+
+    // 💻 هزینهٔ خود سرور فقط در مرز سیکل
+    let instanceCost = 0;
+    if (hoursSinceLastBill >= cycleHours) {
+      instanceCost = parseFloat(amount) * cycleHours; // amount = نرخ ساعتی
+    }
+
+    const totalCost = trafficCost + instanceCost;
+    if (totalCost <= 0) {
+      // حتی اگر هزینه صفره ولی سیکل رد شده، last_billed_at را به‌روز کنیم تا مرز سیکل جابه‌جا شود
+      if (hoursSinceLastBill >= cycleHours) {
+        await updatePurchaseStatus(server_id, status || 'active', billableFromCreationGb, now);
+      }
+      continue;
+    }
+
+    if (currentBalance >= totalCost) {
+      await debitUser(userId, totalCost);
+      await recordWalletLog(userId, -totalCost, `کسر هزینه سرور ${server_name}`, 'billing');
+
+      const newLastBilledAt = hoursSinceLastBill >= cycleHours ? now : lastBilledDate;
+      await updatePurchaseStatus(server_id, 'active', billableFromCreationGb, newLastBilledAt);
+
+      if (status === 'suspended') {
+        try {
+          const tok = await openstackApi.getToken(dcConfig);
+          await openstackApi.resumeServer(dcConfig, tok, server_id);
+          sendMessage(userId, `✅ سرور ${escapeMarkdownV2(server_name)} مجددا فعال شد.`);
+        } catch (e) {
+          console.error(`Error resuming server ${server_id}:`, e);
+        }
+      }
+    } else {
+      if (status === 'active') {
+        try {
+          const tok = await openstackApi.getToken(dcConfig);
+          await openstackApi.suspendServer(dcConfig, tok, server_id);
+          await updatePurchaseStatus(server_id, 'suspended');
+          sendMessage(userId, `⚠️ موجودی شما برای پرداخت هزینه سرور ${escapeMarkdownV2(server_name)} کافی نیست و سرور معلق شد.`);
+        } catch (e) {
+          console.error(`Error suspending server ${server_id}:`, e);
+        }
+      }
+    }
+  }
+
+  console.log('--- Hourly billing process completed ---');
+}
+
+
+// اجرای صورتحساب هر ساعت
+cron.schedule('0 * * * *', async () => {
+  console.log('[CRON] Running hourly billing...');
+  try {
+    await runHourlyBilling();
+    console.log('[CRON] Billing done.');
+  } catch (e) {
+    console.error('[CRON] Billing error:', e);
   }
 });
 
-// Error handling for polling
-bot.on('polling_error', (error) => {
-  console.error('Polling error:', error.code, error.message);
+
+// --- Cleanup expired test servers every 15 minutes ---
+const mysql = require('mysql2/promise');
+const datacenters = require('./datacenters');
+//const { deleteTestServer } = require('./db');
+const TEST_LIFETIME_HOURS = 1;
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'hamooncloud_db',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
+
+async function cleanupExpiredTestServers() {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.execute(`
+      SELECT telegram_id, datacenter, server_id, used_at
+      FROM test_servers
+      WHERE used_at < (NOW() - INTERVAL ${TEST_LIFETIME_HOURS} HOUR)
+    `);
+
+    if (rows.length === 0) {
+      console.log('[CRON] ✅ هیچ سرور تست منقضی‌شده‌ای یافت نشد.');
+      return;
+    }
+
+    console.log(`[CRON] ⚠️ ${rows.length} سرور تست منقضی‌شده پیدا شد.`);
+
+    for (const row of rows) {
+      const { telegram_id, datacenter, server_id } = row;
+     // const dcConfig = datacenters.find(dc => dc.key === datacenter);
+const dcConfig = Array.isArray(datacenters)
+  ? datacenters.find(dc => dc.key === datacenter)
+  : Object.values(datacenters).find(dc => dc.key === datacenter);
+
+if (!dcConfig) {
+        console.warn(`[CRON] ⚠️ دیتاسنتر ${datacenter} در فایل datacenters پیدا نشد.`);
+        continue;
+      }
+
+      try {
+        console.log(`[CRON] 🧹 حذف سرور تست ${server_id} (${datacenter}) متعلق به ${telegram_id}...`   );
+        const tok = await openstackApi.getToken(dcConfig);
+        await openstackApi.deleteServer(dcConfig, tok, server_id);
+  //      await deleteTestServer(server_id);
+await conn.execute(
+  'UPDATE test_servers SET server_id = NULL, boot_volume_id = NULL WHERE server_id = ?',
+  [server_id]
+);
+    console.log(`[CRON] ✅ سرور ${server_id} حذف شد.`);
+      }catch (err) {
+  if (err.response && err.response.status === 404) {
+    console.warn(`[CRON] ⚠️ سرور ${server_id} در OpenStack وجود ندارد. حذف رکورد DB...`);
+await conn.execute(
+  'UPDATE test_servers SET server_id = NULL, boot_volume_id = NULL WHERE server_id = ?',
+  [server_id]
+);
+ //await deleteTestServer(server_id);
+  } else {
+    console.error(`[CRON] ❌ خطا در حذف ${server_id}:`, err.message);
+  }
+}
+    }
+  } catch (err) {
+    console.error('[CRON] ❌ خطا در پاک‌سازی تست‌ها:', err.message);
+  } finally {
+    conn.release();
+  }
+}
+
+// اجرای کرون هر ۱۵ دقیقه
+cron.schedule('*/15 * * * *', async () => {
+  console.log('[CRON] Running test-server cleanup...');
+  await cleanupExpiredTestServers();
+});
+

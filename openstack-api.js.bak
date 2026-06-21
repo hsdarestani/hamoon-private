@@ -1,0 +1,111 @@
+// openstack-api.js - Centralized OpenStack API functions for multiple datacenters
+
+const axios = require('axios');
+const prices = require('./prices');
+
+async function getToken(config) {
+    const body = {
+        auth: {
+            identity: {
+                methods: ['password'],
+                password: { user: { name: config.OS_USERNAME, domain: { name: config.OS_USER_DOMAIN_NAME }, password: config.OS_PASSWORD } }
+            },
+            scope: {
+                project: { id: config.OS_PROJECT_ID, domain: { id: config.OS_PROJECT_DOMAIN_ID } }
+            }
+        }
+    };
+    try {
+        const r = await axios.post(`${config.OS_AUTH_URL}/v3/auth/tokens`, body, { headers: { 'Content-Type': 'application/json' } });
+        return r.headers['x-subject-token'];
+    } catch (error) {
+        console.error(`Error fetching OpenStack token for ${config.name}:`, error.message);
+        if (error.response && error.response.data) console.error('OpenStack API Error Details (Token):', JSON.stringify(error.response.data, null, 2));
+        throw error;
+    }
+}
+
+const computeUrl = (config) => `${config.OS_AUTH_URL.replace(/:5000$|:50000$/, ':8774')}/v2.1`;
+
+async function listFlavors(config) {
+    if (!config.flavors || config.flavors.length === 0) throw new Error(`No flavors defined for datacenter ${config.name}`);
+    return config.flavors.map(f => {
+        const cpu = parseInt(f.name.match(/(\d+)\s*Core/i)?.[1] || '0');
+        const ram = parseInt(f.name.match(/(\d+)\s*GB\s*RAM/i)?.[1] || '0');
+        const disk = parseInt(f.name.match(/(\d+)\s*GB\s*SSD/i)?.[1] || '0');
+        const hourlyPrice = f.monthly_price * (prices.hourlyFactorFromMonthly || (1 / 720));
+        return { id: f.id, label: `${cpu} Core, ${ram}GB RAM, ${disk}GB SSD`, price: Math.round(hourlyPrice), disk: disk };
+    });
+}
+
+async function listImages(config, tok) {
+    if (!config.images || config.images.length === 0) throw new Error(`No images defined for datacenter ${config.name}`);
+    return config.images.map(img => ({ id: img.id, label: img.name }));
+}
+
+async function createKeyPair(config, tok, keyName) {
+    const body = { keypair: { name: keyName } };
+    const r = await axios.post(`${computeUrl(config)}/os-keypairs`, body, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
+    return r.data.keypair;
+}
+
+async function deleteKeyPair(config, tok, keyName) {
+    await axios.delete(`${computeUrl(config)}/os-keypairs/${keyName}`, { headers: { 'X-Auth-Token': tok } });
+}
+
+async function createServer(config, tok, name, flavorRef, imageRef, keyName, meta, diskSize, bootMethod) {
+    let serverDetails = { name, flavorRef, networks: [{ uuid: config.OS_NETWORK_ID }], metadata: meta, key_name: keyName };
+    if (bootMethod === 'volume') {
+        serverDetails.block_device_mapping_v2 = [{ boot_index: '0', uuid: imageRef, source_type: 'image', destination_type: 'volume', volume_size: diskSize, delete_on_termination: true }];
+    } else {
+        serverDetails.imageRef = imageRef;
+    }
+    const r = await axios.post(`${computeUrl(config)}/servers`, { server: serverDetails }, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
+    // The response for server creation contains the adminPass
+    return r.data.server;
+}
+
+/**
+ * Rebuilds a server with a new image.
+ * @param {object} config - The datacenter configuration object.
+ * @param {string} tok - The authentication token.
+ * @param {string} serverId - The ID of the server to rebuild.
+ * @param {string} imageRef - The ID of the new image.
+ * @returns {Promise<Object>} The response object, which contains the new adminPass.
+ */
+async function rebuildServer(config, tok, serverId, imageRef) {
+    const body = { rebuild: { imageRef: imageRef } };
+    const r = await axios.post(`${computeUrl(config)}/servers/${serverId}/action`, body, {
+        headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' }
+    });
+    return r.data;
+}
+
+async function getServer(config, tok, id) {
+    const r = await axios.get(`${computeUrl(config)}/servers/${id}`, { headers: { 'X-Auth-Token': tok } });
+    return r.data.server;
+}
+
+async function deleteServer(config, tok, id) {
+    await axios.delete(`${computeUrl(config)}/servers/${id}`, { headers: { 'X-Auth-Token': tok } });
+}
+
+async function listServers(config, tok) {
+    const r = await axios.get(`${computeUrl(config)}/servers/detail`, { headers: { 'X-Auth-Token': tok } });
+    return r.data.servers;
+}
+
+async function suspendServer(config, tok, serverId) {
+    await axios.post(`${computeUrl(config)}/servers/${serverId}/action`, { suspend: null }, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
+}
+
+async function resumeServer(config, tok, serverId) {
+    await axios.post(`${computeUrl(config)}/servers/${serverId}/action`, { resume: null }, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
+}
+
+module.exports = {
+    getToken, listFlavors, listImages, createKeyPair, deleteKeyPair,
+    createServer, rebuildServer, getServer, deleteServer, listServers,
+    suspendServer, resumeServer
+};
+

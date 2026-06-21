@@ -1,0 +1,473 @@
+// db.js - Database utility functions using MySQL
+
+require('dotenv').config(); // Load environment variables from .env file
+const mysql = require('mysql2/promise'); // MySQL2 library for promise-based operations
+
+// Database connection pool configuration
+const pool = mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'hamooncloud_db',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+console.log('MySQL Pool initialized with host:', process.env.DB_HOST, 'database:', process.env.DB_NAME);
+
+/**
+ * Initializes the database by creating tables with the correct final schema if they don't exist.
+ */
+async function initializeDatabase() {
+    let connection = null;
+    try {
+        connection = await pool.getConnection();
+        console.log('Database connection obtained for initialization.');
+
+        // Users table
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id VARCHAR(255) PRIMARY KEY,
+                phone VARCHAR(255),
+                wallet DECIMAL(10, 2) DEFAULT 0.00,
+                step VARCHAR(255) DEFAULT 'READY',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Purchases table
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS purchases (
+                server_id VARCHAR(255) PRIMARY KEY,
+                telegram_id VARCHAR(255) NOT NULL,
+                datacenter VARCHAR(50) NOT NULL,
+                server_name VARCHAR(255) NOT NULL,
+                amount DECIMAL(10, 2) NOT NULL,
+                duration VARCHAR(50) NOT NULL,
+                price_per_gb DECIMAL(10, 2) NOT NULL,
+                download_only TINYINT(1) NOT NULL,
+                boot_volume_id VARCHAR(255) NULL,
+                boot_method VARCHAR(50) NOT NULL,
+                os_label VARCHAR(255) NULL,
+                status VARCHAR(50) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                last_billed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_billed_traffic_gb REAL DEFAULT 0.0,
+                free_traffic_hourly_gb REAL DEFAULT 0.0,
+                free_traffic_daily_gb REAL DEFAULT 0.0,
+                free_traffic_weekly_gb REAL DEFAULT 0.0,
+                free_traffic_monthly_gb REAL DEFAULT 0.0,
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+        `);
+
+        // Key Pairs table
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS key_pairs (
+                server_id VARCHAR(255) PRIMARY KEY,
+                telegram_id VARCHAR(255) NOT NULL,
+                key_name VARCHAR(255) NOT NULL,
+                private_key TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+        `);
+
+        // Wallet Logs table
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS wallet_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                telegram_id VARCHAR(255) NOT NULL,
+                amount DECIMAL(10, 2) NOT NULL,
+                description TEXT NOT NULL,
+                type VARCHAR(50) NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+        `);
+
+        // Test Servers table
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS test_servers (
+                telegram_id VARCHAR(255) NOT NULL,
+                datacenter VARCHAR(50) NOT NULL,
+                server_id VARCHAR(255) NULL,
+                boot_volume_id VARCHAR(255) NULL,
+                used_at TIMESTAMP NULL,
+                PRIMARY KEY (telegram_id, datacenter),
+                FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+        `);
+
+        console.log('Database tables checked/created successfully.');
+    } catch (error) {
+        console.error('Error initializing database:', error);
+        if (error.code === 'ER_BAD_DB_ERROR') {
+            console.error(`ERROR: The database '${process.env.DB_NAME || 'hamooncloud_db'}' does not exist. Please create it.`);
+        }
+        process.exit(1);
+    } finally {
+        if (connection) connection.release();
+    }
+}
+
+// Call database initialization on startup
+initializeDatabase();
+
+async function upsertUser(userData) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            'SELECT * FROM users WHERE telegram_id = ?',
+            [String(userData.telegram_id)]
+        );
+
+        if (rows.length > 0) {
+            let updateSql = 'UPDATE users SET updated_at = CURRENT_TIMESTAMP';
+            const updateValues = [];
+            if (userData.phone !== undefined) {
+                updateSql += ', phone = ?';
+                updateValues.push(userData.phone);
+            }
+            if (userData.wallet !== undefined) {
+                updateSql += ', wallet = ?';
+                updateValues.push(userData.wallet);
+            }
+            if (userData.step !== undefined) {
+                updateSql += ', step = ?';
+                updateValues.push(userData.step);
+            }
+            updateSql += ' WHERE telegram_id = ?';
+            updateValues.push(String(userData.telegram_id));
+            if (updateValues.length > 1) {
+                await conn.execute(updateSql, updateValues);
+            }
+        } else {
+            await conn.execute(
+                'INSERT INTO users (telegram_id, phone, wallet, step) VALUES (?, ?, ?, ?)',
+                [String(userData.telegram_id), userData.phone || null, userData.wallet || 0.00, userData.step || 'READY']
+            );
+        }
+    } catch (error) {
+        console.error('Error upserting user:', error);
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+async function getUser(telegramId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            'SELECT * FROM users WHERE telegram_id = ?',
+            [String(telegramId)]
+        );
+        return rows.length > 0 ? rows[0] : null;
+    } finally {
+        conn.release();
+    }
+}
+
+async function getUserWallet(telegramId) {
+    const user = await getUser(telegramId);
+    return user && user.wallet !== undefined && user.wallet !== null ? parseFloat(user.wallet) : 0;
+}
+
+async function debitUser(telegramId, amount) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const currentBalance = await getUserWallet(telegramId);
+        if (currentBalance >= amount) {
+            const [result] = await conn.execute(
+                'UPDATE users SET wallet = wallet - ? WHERE telegram_id = ?',
+                [amount, String(telegramId)]
+            );
+            if (result.affectedRows > 0) {
+                await conn.commit();
+                return true;
+            }
+        }
+        await conn.rollback();
+        return false;
+    } catch (error) {
+        await conn.rollback();
+        console.error(`debitUser: Error debiting user ${telegramId}:`, error);
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+async function creditUser(telegramId, amount) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [result] = await conn.execute(
+            'UPDATE users SET wallet = wallet + ? WHERE telegram_id = ?',
+            [amount, String(telegramId)]
+        );
+        if (result.affectedRows === 0) {
+            await conn.execute(
+                'INSERT INTO users (telegram_id, wallet) VALUES (?, ?)',
+                [String(telegramId), amount]
+            );
+        }
+        await conn.commit();
+    } catch (error) {
+        await conn.rollback();
+        console.error(`creditUser: Error crediting user ${telegramId}:`, error);
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+async function recordWalletLog(telegramId, amount, description, type) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
+            [String(telegramId), amount, description, type]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+async function getWalletLogs(telegramId, limit) {
+    const conn = await pool.getConnection();
+    try {
+        let query = 'SELECT amount, description, type, timestamp FROM wallet_logs WHERE telegram_id = ? ORDER BY timestamp DESC';
+        const params = [String(telegramId)];
+        if (limit !== null && limit > 0) {
+            query += ` LIMIT ${parseInt(limit, 10)}`;
+        }
+        const [rows] = await conn.execute(query, params);
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
+async function recordPurchase(telegramId, serverId, datacenter, serverName, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0) {
+    const conn = await pool.getConnection();
+    try {
+        const values = [
+            serverId, String(telegramId), datacenter, serverName, amount, duration,
+            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, 'active',
+            lastBilledTrafficGb, freeTrafficHourlyGb, freeTrafficDailyGb,
+            freeTrafficWeeklyGb, freeTrafficMonthlyGb
+        ];
+
+        await conn.execute(
+            `INSERT INTO purchases (server_id, telegram_id, datacenter, server_name, amount, duration, price_per_gb, download_only, boot_volume_id, boot_method, os_label, status, last_billed_traffic_gb, free_traffic_hourly_gb, free_traffic_daily_gb, free_traffic_weekly_gb, free_traffic_monthly_gb, created_at, last_billed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON DUPLICATE KEY UPDATE
+             telegram_id = VALUES(telegram_id), datacenter = VALUES(datacenter), server_name = VALUES(server_name), amount = VALUES(amount), duration = VALUES(duration),
+             price_per_gb = VALUES(price_per_gb), download_only = VALUES(download_only), boot_volume_id = VALUES(boot_volume_id),
+             boot_method = VALUES(boot_method), os_label = VALUES(os_label), status = VALUES(status), last_billed_traffic_gb = VALUES(last_billed_traffic_gb),
+             free_traffic_hourly_gb = VALUES(free_traffic_hourly_gb), free_traffic_daily_gb = VALUES(free_traffic_daily_gb), free_traffic_weekly_gb = VALUES(free_traffic_weekly_gb), free_traffic_monthly_gb = VALUES(free_traffic_monthly_gb), updated_at = CURRENT_TIMESTAMP`,
+            values
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+async function getPurchaseByServerId(serverId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute('SELECT * FROM purchases WHERE server_id = ?', [serverId]);
+        return rows.length > 0 ? rows[0] : null;
+    } finally {
+        conn.release();
+    }
+}
+
+async function hasUsedFreeTestServer(telegramId, datacenter) {
+    const conn = await pool.getConnection();
+    try {
+        const sql = 'SELECT * FROM test_servers WHERE telegram_id = ? AND datacenter = ?';
+        const [rows] = await conn.execute(sql, [String(telegramId), datacenter]);
+        return rows.length > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function recordTestServer(telegramId, datacenter, serverId, bootVolumeId) {
+    const conn = await pool.getConnection();
+    try {
+        const sql = 'INSERT INTO test_servers (telegram_id, datacenter, server_id, boot_volume_id, used_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE server_id=VALUES(server_id), boot_volume_id=VALUES(boot_volume_id), used_at=VALUES(used_at)';
+        await conn.execute(sql, [String(telegramId), datacenter, serverId, bootVolumeId]);
+    } catch (error) {
+        console.error(`[DB_RECORD_ERROR] Failed to record test server for user ${telegramId}:`, error);
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+async function deleteTestServer(serverId) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            'DELETE FROM test_servers WHERE server_id = ?',
+            [serverId]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+async function getAllPurchases() {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status != 'deleted'");
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseStatus(serverId, newStatus, newLastBilledTrafficGb = null, newLastBilledAt = null) {
+    const conn = await pool.getConnection();
+    try {
+        let sql = 'UPDATE purchases SET status = ?, updated_at = CURRENT_TIMESTAMP';
+        const params = [newStatus];
+
+        if (newLastBilledTrafficGb !== null) {
+            sql += ', last_billed_traffic_gb = ?';
+            params.push(newLastBilledTrafficGb);
+        }
+
+        if (newLastBilledAt !== null) {
+            const formattedDate = newLastBilledAt instanceof Date ? newLastBilledAt.toISOString().slice(0, 19).replace('T', ' ') : newLastBilledAt;
+            sql += ', last_billed_at = ?';
+            params.push(formattedDate);
+        }
+
+        sql += ' WHERE server_id = ?';
+        params.push(serverId);
+
+        await conn.execute(sql, params);
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseOsLabel(serverId, newOsLabel) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            'UPDATE purchases SET os_label = ?, updated_at = CURRENT_TIMESTAMP WHERE server_id = ?',
+            [newOsLabel, serverId]
+        );
+    } catch (error) {
+        console.error(`[DB_UPDATE_OS_ERROR] Failed to update OS label for server ${serverId}:`, error);
+        throw error;
+    } finally {
+        conn.release();
+    }
+}
+
+// --- NEW ADMIN FUNCTIONS ---
+async function updatePurchaseBilling(serverId, pricePerGb, downloadOnly) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            'UPDATE purchases SET price_per_gb = ?, download_only = ? WHERE server_id = ?',
+            [pricePerGb, downloadOnly, serverId]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseFreeTraffic(serverId, cycle, amountGb) {
+    const conn = await pool.getConnection();
+    try {
+        const fieldName = `free_traffic_${cycle}_gb`;
+        // First, reset all free traffic fields to 0
+        await conn.execute(
+            'UPDATE purchases SET free_traffic_hourly_gb = 0, free_traffic_daily_gb = 0, free_traffic_weekly_gb = 0, free_traffic_monthly_gb = 0 WHERE server_id = ?',
+            [serverId]
+        );
+        // Then, set the specific cycle's free traffic
+        await conn.execute(
+            `UPDATE purchases SET ${fieldName} = ? WHERE server_id = ?`,
+            [amountGb, serverId]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+
+async function storeKeyPair(telegramId, serverId, keyName, privateKey) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            `INSERT INTO key_pairs (server_id, telegram_id, key_name, private_key) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE key_name = VALUES(key_name), private_key = VALUES(private_key)`,
+            [serverId, String(telegramId), keyName, privateKey]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+async function getKeyPair(serverId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            'SELECT * FROM key_pairs WHERE server_id = ?',
+            [serverId]
+        );
+        return rows.length > 0 ? rows[0] : null;
+    } finally {
+        conn.release();
+    }
+}
+
+async function deleteKeyPairFromDb(serverId) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            'DELETE FROM key_pairs WHERE server_id = ?',
+            [serverId]
+        );
+    } finally {
+        conn.release();
+    }
+}
+
+module.exports = {
+    initializeDatabase,
+    upsertUser,
+    getUser,
+    getUserWallet,
+    debitUser,
+    creditUser,
+    recordPurchase,
+    hasUsedFreeTestServer,
+    recordTestServer,
+    storeKeyPair,
+    getKeyPair,
+    deleteKeyPairFromDb,
+    recordWalletLog,
+    getWalletLogs,
+    getAllPurchases,
+    updatePurchaseStatus,
+    updatePurchaseOsLabel,
+    updatePurchaseBilling,
+    updatePurchaseFreeTraffic,
+    getPurchaseByServerId,
+    deleteTestServer,
+};
+

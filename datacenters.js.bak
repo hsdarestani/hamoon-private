@@ -1,0 +1,181 @@
+// datacenters.js
+// این فایل مرکزی، اطلاعات تمام دیتاسنترها، پلن‌ها و ایمیج‌های مخصوص هرکدام را نگهداری می‌کند.
+
+// لیست نام‌های پلن‌ها و ایمیج‌های مورد تایید که در تمام دیتاسنترها مشترک هستند
+const approvedFlavorNames = [
+    "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD",
+    "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD",
+    "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD",
+    "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD",
+    "Thunder Medium- 4 Cores - 4 GB RAM - 80 GB SSD",
+    "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD",
+    "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD",
+    "Thunder basic - 4 Cores - 8 GB RAM - 100 GB SSD"
+];
+
+const approvedImageMap = {
+    "Debian-12": ["Debian-12", "debian-12", "debian-12-final"],
+    "Debian-11": ["Debian-11", "debian-11", "debian-11-final"],
+    "Mikrotik": ["Mikrotik", "mikrotik"],
+    "Ubuntu-24.04": ["Ubuntu-24.04", "ubuntu-24.04", "ubuntu-2404-final", "ubuntu-24"],
+    "Ubuntu-22.04": ["Ubuntu-22.04", "ubuntu-22.04", "ubuntu-2204-final", "ubuntu-22"],
+    "Ubuntu-20.04": ["Ubuntu-20.04", "ubuntu-20.04", "ubuntu-2004-final", "ubuntu-20"],
+    "Fedora": ["Fedora", "fedora"],
+    "Alma-9": ["Alma-9", "alma-9", "almalinux-9-final"],
+    "Alma-8": ["Alma-8", "alma-8", "almalinux-8-final"],
+    "Rocky-9": ["Rocky-9", "rocky-9", "rocky-9-generic-final"],
+    "Rocky-8": ["Rocky-8", "rocky-8", "rocky-8-generic-final"],
+    "pfSense-CE-2.7.2": ["pfSense-CE-2.7.2", "pfSense-2.7.2"],
+};
+
+
+module.exports = {
+  tabriz: {
+    key: 'tabriz',
+    name: 'تبریز',
+    OS_AUTH_URL: 'http://cloud.tbz.abraraz.com:5000',
+    OS_PROJECT_ID: '66e42ed912e946589e47eb3ba53f2ccd',
+    OS_USER_DOMAIN_NAME: 'Default',
+    OS_PROJECT_DOMAIN_ID: 'default',
+    OS_USERNAME: 'tbz2553_2',
+    OS_PASSWORD: '7QKipZfA',
+    OS_NETWORK_ID: 'd514947e-3556-427c-8433-7a63e263a73c',
+    OS_TEST_FLAVOR_ID: '2828ade8-16b7-4093-bdb7-0fb5a0181053', // 2-2-40
+    OS_TEST_IMAGE_ID: '83b33294-1261-4178-9fb2-21aed2853d4d', // Ubuntu 22
+    TRAFFIC_API_BASE_URL: 'https://netbill.tbz.abraraz.com/traffic/',
+    TRAFFIC_API_KEY: '4O2BzVGjkpvxBNS54z6VWG5+8ZxxvmPkYMD+wwzYEJk',
+    flavors: [
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "de6bcdc0-7725-48f8-bbe3-ce7b4553f0a4", monthly_price: 400000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "2828ade8-16b7-4093-bdb7-0fb5a0181053", monthly_price: 700000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "c7c66d86-503a-4d04-8e99-fd8820d49dd5", monthly_price: 900000 },
+        { name: "Thunder Medium- 4 Cores - 4 GB RAM - 80 GB SSD", id: "a528d9b3-5156-4684-910a-75487f9ec81e", monthly_price: 1120000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "4a65c9c0-2a60-4193-946a-2d0a3a86681c", monthly_price: 1640000 },
+        { name: "Thunder basic - 4 Cores - 8 GB RAM - 100 GB SSD", id: "2ccb7903-e4bc-4769-9c99-5b55f6d95ce8", monthly_price: 1461250 },
+    ],
+    images: [
+        { name: "Debian-12", id: "ccbf8327-b81c-4513-8483-b6c604c99d3a" },
+        { name: "Debian-11", id: "bdfb980a-ab00-429f-9811-a51045b2a3b7" },
+        { name: "Mikrotik", id: "66b00f37-6428-4c89-9fc1-050d9ddb5b82" },
+        { name: "Ubuntu-24.04", id: "3e9c9e59-feb4-4245-8915-f944d43ed73a" },
+        { name: "Ubuntu-22.04", id: "83b33294-1261-4178-9fb2-21aed2853d4d" },
+        { name: "Ubuntu-20.04", id: "716bd188-ed83-45c0-9b8a-224a99a860bc" },
+        { name: "Fedora", id: "de0ab35e-3c0a-47f9-ba3e-e138a6aef391" },
+        { name: "Alma-9", id: "d191d739-a4a4-46ea-ac66-0aa2d20c3a95" },
+        { name: "Alma-8", id: "abcc8a7f-2da9-45f3-88ce-2f6ac873ee2d" },
+        { name: "Rocky-9", id: "a54f8acb-f578-4588-be99-16c38e12bf0c" },
+        { name: "Rocky-8", id: "3192bdf9-c975-4fd7-a078-b4ca6187d10b" },
+        { name: "pfSense-CE-2.7.2", id: "b7143131-e92f-49da-a389-b9ec6fb2ad55" },
+    ]
+  },
+  tehran: {
+    key: 'tehran',
+    name: 'تهران',
+    OS_AUTH_URL: 'http://cloud.sc1.abraraz.com:5000',
+    OS_PROJECT_ID: 'c1c041a61b3e475fb0f1e035d31e65d0',
+    OS_USER_DOMAIN_NAME: 'Default',
+    OS_PROJECT_DOMAIN_ID: 'default',
+    OS_USERNAME: 'hsbl3199_4',
+    OS_PASSWORD: '9vz7K9hy',
+    OS_NETWORK_ID: '20b993b3-d9ea-4425-b454-748a5d8dc3c9',
+    OS_TEST_FLAVOR_ID: 'be9e667d-1cfc-4b22-890a-6b6cb08c2c19', // 2-2-40
+    OS_TEST_IMAGE_ID: 'e776ec28-ca59-4278-8aa7-edec071f1b2d', // Ubuntu 22
+    TRAFFIC_API_BASE_URL: 'https://netbill.abraraz.com/traffic/',
+    TRAFFIC_API_KEY: 'caMIyBKWHTFOVirT3WediCyAp6uKeRQWxNw9g9QdUnE',
+    flavors: [
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "1264712d-50b7-4323-ac5c-c4f942518f57", monthly_price: 340000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "be9e667d-1cfc-4b22-890a-6b6cb08c2c19", monthly_price: 600000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "b7eb3a71-c142-40ae-bce9-41e352f0b0ff", monthly_price: 770625 },
+        { name: "Thunder Medium- 4 Cores - 4 GB RAM - 80 GB SSD", id: "96ebb6c8-2f3f-4375-9614-13c452c86650", monthly_price: 1120000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "ae69003c-549f-4ebc-94ab-d480570df011", monthly_price: 1640000 },
+        { name: "Thunder basic - 4 Cores - 8 GB RAM - 100 GB SSD", id: "d04f3d35-4e70-4584-888a-1d20aa7473fa", monthly_price: 1461250 },
+    ],
+    images: [
+        { name: "Debian-12", id: "35bf75a9-956f-4b23-a577-17f453ce36d6" },
+        { name: "Debian-11", id: "cc3122ec-c06f-492e-88a6-c9d534ded6df" },
+        { name: "Mikrotik", id: "601a29cf-3091-4863-a892-32ec9e141da5" },
+        { name: "Ubuntu-24.04", id: "8ad93c13-d8af-4a61-972b-7bc2e12996f7" },
+        { name: "Ubuntu-22.04", id: "e776ec28-ca59-4278-8aa7-edec071f1b2d" },
+        { name: "Ubuntu-20.04", id: "82ecbd40-bd82-47db-830a-924e37e257ab" },
+        { name: "Fedora", id: "e3069954-4f77-46c1-9e2f-40eef90b851e" },
+        { name: "Alma-9", id: "bf7302a6-2b86-4ebe-bd6c-82016155c212" },
+        { name: "Alma-8", id: "4d3e7617-a21b-48f4-a29e-c08700e15a7c" },
+        { name: "Rocky-9", id: "96aff312-b704-45c2-b99f-a5e588b2ee4d" },
+        { name: "Rocky-8", id: "c9f71169-eda9-43f6-bba6-9cb74e5d80f2" },
+        { name: "pfSense-CE-2.7.2", id: "2cc53908-b61c-4e7c-bda8-232a64aaed74" },
+    ]
+  },
+  tebyan: {
+    key: 'tebyan',
+    name: 'تبیان',
+    OS_AUTH_URL: 'http://94.232.171.61:5000',
+    OS_PROJECT_ID: '0098ed7d85d04a298a79cc9a1ae30947',
+    OS_USER_DOMAIN_NAME: 'Default',
+    OS_PROJECT_DOMAIN_ID: 'default',
+    OS_USERNAME: 'hb_client_3199_3',
+    OS_PASSWORD: 'ivbrLrp1',
+    OS_NETWORK_ID: '6a7c5354-d64d-41f7-aa90-7f76bd788087',
+    OS_TEST_FLAVOR_ID: 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
+    OS_TEST_IMAGE_ID: '58e1c167-94cc-4537-8fca-68cb79f0f602', // Ubuntu 22
+    TRAFFIC_API_BASE_URL: 'https://netbill.tebyansmart.com/traffic/',
+    TRAFFIC_API_KEY: '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    flavors: [
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 340000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 600000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "2162d6cc-305c-415f-b4b7-7bd0bc5575f0", monthly_price: 770625 },
+        { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "72955761-999f-4bb3-bf58-f24e73fe4b47", monthly_price: 1120000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "16f7cfbb-4502-41bc-985f-6f12386f2dd3", monthly_price: 1640000 },
+        { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "5b444500-5a08-4a9b-808d-bd913014d0da", monthly_price: 1461250 },
+    ],
+    images: [
+        { name: "Debian-12", id: "a10db8cb-5831-4a96-b826-2f21886ed694" },
+        { name: "Debian-11", id: "24903df2-90f7-4bf4-ba28-5ad8931ba86b" },
+        { name: "Mikrotik", id: "78e950c1-58cc-4c35-8f3c-76270c6241f3" },
+        { name: "Ubuntu-24.04", id: "f24e6327-450b-4339-b79a-1abb08083c95" },
+        { name: "Ubuntu-22.04", id: "58e1c167-94cc-4537-8fca-68cb79f0f602" },
+        { name: "Ubuntu-20.04", id: "af76b2b6-f017-46c3-a38e-5dec6daa344c" },
+        { name: "Fedora", id: "65409c35-3989-4775-8f17-471ee4a7e82d" },
+        // No Alma-9 in Tebyan list
+        { name: "Alma-8", id: "b76d0cc9-4f7e-4f59-af5b-39e26944f8e2" },
+        { name: "Rocky-9", id: "e5ab87f0-abfa-4586-a716-f5bdc4862e42" },
+        { name: "Rocky-8", id: "9e753d09-19d5-4b8f-820b-5c3b381207a7" },
+        // No pfSense in Tebyan list
+    ]
+  },
+  respina: {
+    key: 'respina',
+    name: 'رسپینا',
+    OS_AUTH_URL: 'http://77.104.65.250:50000',
+    OS_PROJECT_ID: 'b5f9f809dcb14b15a3eed67bed3ce289',
+    OS_USER_DOMAIN_NAME: 'Default',
+    OS_PROJECT_DOMAIN_ID: 'default',
+    OS_USERNAME: 'hb_araz3199_2',
+    OS_PASSWORD: '1PtOKi0p',
+    OS_NETWORK_ID: '039eb3aa-09eb-49d0-8c74-02dbf5c4e289',
+    OS_TEST_FLAVOR_ID: '299588c0-f3bc-4f5f-9edd-cd5a25ac3e1a', // 2-2-40
+    // **FIX:** Corrected the test image ID to match an existing image in the list below.
+    OS_TEST_IMAGE_ID: 'f685f700-aa67-4332-8e59-abef716a08d7', // Ubuntu 22.04
+    TRAFFIC_API_BASE_URL: 'https://netbill-teh.abrenik.com/traffic/',
+    TRAFFIC_API_KEY: 'b44ccb9467714867a1b1ce059cde7499',
+    flavors: [
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "298cbbf0-ab5e-4d6a-bbab-bf6ecc72fb78", monthly_price: 408000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "299588c0-f3bc-4f5f-9edd-cd5a25ac3e1a", monthly_price: 720000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "97728c4c-040a-4b69-9245-911da1cff3f9", monthly_price: 924750 },
+        { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "6ea5bb54-01e1-4120-b58e-5b35234c2ecf", monthly_price: 1344000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "41703e58-a224-4871-8bf9-dcb51a5300d0", monthly_price: 1968000 },
+        { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "dd55a4d3-6cc3-43a5-a725-705ddbc5004f", monthly_price: 1753500 },
+    ],
+    images: [
+        // No Debian in Respina list
+        { name: "Mikrotik", id: "8dd49441-e0aa-4398-8abc-af2733153866" },
+        { name: "Ubuntu-24.04", id: "44ca64d0-6a7c-48e9-82a7-51a05ea83584" },
+        { name: "Ubuntu-22.04", id: "f685f700-aa67-4332-8e59-abef716a08d7" },
+        { name: "Ubuntu-20.04", id: "da07a398-1265-41c4-8883-dd799638e1ec" },
+        { name: "Fedora", id: "5de5e3db-37ea-4de2-9b1a-09f195880c87" },
+        // No Alma in Respina list
+        { name: "Rocky-9", id: "b34c16f7-0c32-4d86-890d-7a62ec96b66a" },
+        // No Rocky-8 in Respina list
+        // No pfSense in Respina list
+    ]
+  }
+};
+
