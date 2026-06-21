@@ -15,6 +15,16 @@ const pool = mysql.createPool({
 
 console.log('MySQL Pool initialized with host:', process.env.DB_HOST, 'database:', process.env.DB_NAME);
 
+async function ensureColumn(connection, tableName, columnName, definition) {
+    const [rows] = await connection.execute(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+        [tableName, columnName]
+    );
+    if (rows.length === 0) {
+        await connection.execute(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${definition}`);
+    }
+}
+
 async function initializeDatabase() {
     let connection = null;
     try {
@@ -28,11 +38,19 @@ async function initializeDatabase() {
                 phone VARCHAR(255),
                 wallet DECIMAL(10, 2) DEFAULT 0.00,
                 step VARCHAR(255) DEFAULT 'READY',
+                national_code VARCHAR(10) NULL,
+                shahkar_verified TINYINT(1) NOT NULL DEFAULT 0,
+                shahkar_verified_at DATETIME NULL,
+                shahkar_last_response TEXT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
 
+        await ensureColumn(connection, 'users', 'national_code', 'VARCHAR(10) NULL');
+        await ensureColumn(connection, 'users', 'shahkar_verified', 'TINYINT(1) NOT NULL DEFAULT 0');
+        await ensureColumn(connection, 'users', 'shahkar_verified_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'users', 'shahkar_last_response', 'TEXT NULL');
         // Purchases table
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS purchases (
@@ -41,7 +59,7 @@ async function initializeDatabase() {
                 datacenter VARCHAR(50) NOT NULL,
                 server_name VARCHAR(255) NOT NULL,
                 flavor_id VARCHAR(255) NOT NULL,
-                amount DECIMAL(10, 2) NOT NULL,
+                amount DECIMAL(14, 6) NOT NULL,
                 duration VARCHAR(50) NOT NULL,
                 price_per_gb DECIMAL(10, 2) NOT NULL,
                 download_only TINYINT(1) NOT NULL,
@@ -62,6 +80,10 @@ async function initializeDatabase() {
             )
         `);
 
+        await connection.execute('ALTER TABLE purchases MODIFY amount DECIMAL(14, 6) NOT NULL').catch(err => {
+            console.warn('Could not widen purchases.amount:', err.message);
+        });
+
         // Key Pairs table
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS key_pairs (
@@ -79,7 +101,7 @@ async function initializeDatabase() {
             CREATE TABLE IF NOT EXISTS wallet_logs (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 telegram_id VARCHAR(255) NOT NULL,
-                amount DECIMAL(10, 2) NOT NULL,
+                amount DECIMAL(14, 6) NOT NULL,
                 description TEXT NOT NULL,
                 type VARCHAR(50) NOT NULL,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -164,6 +186,21 @@ async function getUser(telegramId) {
             [String(telegramId)]
         );
         return rows.length > 0 ? rows[0] : null;
+    } finally {
+        conn.release();
+    }
+}
+
+
+async function updateUserShahkar(telegramId, nationalCode, rawResponse) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            `UPDATE users
+             SET national_code = ?, shahkar_verified = 1, shahkar_verified_at = NOW(), shahkar_last_response = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE telegram_id = ?`,
+            [String(nationalCode), JSON.stringify(rawResponse || null), String(telegramId)]
+        );
     } finally {
         conn.release();
     }
@@ -530,6 +567,7 @@ module.exports = {
     updatePurchaseBilling,
     updatePurchaseFreeTraffic,
     updatePurchaseCycle,
+    updateUserShahkar,
     getPurchaseByServerId,
     deleteTestServer,
 };

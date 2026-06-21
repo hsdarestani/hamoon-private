@@ -101,13 +101,31 @@ afracloud: {
 
   allowTest: false,
   BILL_TRAFFIC: false,
+  allowedCycles: ['monthly'],
+  authPolicy: {
+    buy: 'shahkar'
+  },
+  capabilities: {
+    listServers: true,
+    createServer: true,
+    deleteServer: true,
+    suspendServer: true,
+    resumeServer: true,
+    resetPassword: true,
+    resetPasswordLabel: '🔑 دریافت رمز عبور',
+    privateKey: true,
+    traffic: false,
+    projectTraffic: false,
+    rebuild: false,
+    snapshot: false,
+    listSnapshots: false,
+    buildFromSnapshot: false,
+    changeCycle: false,
+    createKeyPair: true,
+    deleteKeyPair: true
+  },
 
-  flavors: [
-    { id: "2c6d1e2f-ef14-4ef9-94c7-a63378bc1abf", name: "nano", label: "nano - 1 Core / 1GB RAM", monthly_price: 1, disk: 25 },
-    { id: "63457a90-3dc8-4c7e-a511-c9b171904235", name: "micro", label: "micro - 1 Core / 2GB RAM", monthly_price: 999999999, disk: 30 },
-    { id: "5bfe2e79-462d-4b4f-bf60-62ff40730a78", name: "small", label: "small - 1 Core / 4GB RAM", monthly_price: 99999999999, disk: 40 },
-    { id: "c05ec7d8-dbf4-44da-aa9b-001555dd4052", name: "medium", label: "medium - 2 Core / 8GB RAM", monthly_price: 99999999999, disk: 50 }
-  ],
+  flavors: [],
 
   images: [
     { name: "Ubuntu-24.04", id: "7bf8c5fc-a9e9-4d94-abe7-5a93f17745b3" },

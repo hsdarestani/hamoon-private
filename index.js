@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
+const { hasCapability, getCapabilityLabel } = require('./provider-capabilities');
+const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
 
 // --- DEBUG WRAPPER ---
 const _send = sendMessage;
@@ -272,7 +274,8 @@ const {
     updatePurchaseOsLabel,
     updatePurchaseBilling,
     updatePurchaseFreeTraffic,
-    updatePurchaseCycle
+    updatePurchaseCycle,
+    updateUserShahkar
 } = require('./db');
 
 // Environment variables
@@ -317,6 +320,51 @@ const HOURS_IN_CYCLE = {
     weekly: 168,
     monthly: 720
 };
+
+function getAllowedCycles(dcConfig) {
+  if (Array.isArray(dcConfig?.allowedCycles) && dcConfig.allowedCycles.length) {
+    return dcConfig.allowedCycles.filter(c => HOURS_IN_CYCLE[c]);
+  }
+  return Object.keys(HOURS_IN_CYCLE);
+}
+
+function getCycleLabel(cycle) {
+  const labels = { hourly: 'ساعتی', daily: 'روزانه', weekly: 'هفتگی', monthly: 'ماهانه' };
+  return labels[cycle] || cycle;
+}
+
+function getFlavorCyclePrice(flavor, cycle) {
+  if (flavor?.pricesByCycle && Number(flavor.pricesByCycle[cycle]) > 0) {
+    return Math.round(Number(flavor.pricesByCycle[cycle]));
+  }
+  if (cycle === 'monthly' && Number(flavor?.monthly_price || flavor?.monthlyPrice) > 0) {
+    return Math.round(Number(flavor.monthly_price || flavor.monthlyPrice));
+  }
+  return Math.round(Number(flavor?.price || 0) * HOURS_IN_CYCLE[cycle]);
+}
+
+function formatToman(n) {
+  return Number(n || 0).toLocaleString('en-US');
+}
+
+function requiresShahkar(dcConfig, action) {
+  return dcConfig?.authPolicy?.[action] === 'shahkar';
+}
+
+function isShahkarVerified(user) {
+  return Number(user?.shahkar_verified || 0) === 1;
+}
+
+function unsupportedFeature(chatId, text = 'این قابلیت برای این دیتاسنتر فعال نیست.') {
+  return sendMessage(chatId, text);
+}
+
+function requireCapabilityOrReply(chatId, dcConfig, feature, text) {
+  if (dcConfig && hasCapability(dcConfig, feature)) return true;
+  unsupportedFeature(chatId, text);
+  return false;
+}
+
 
 // --- Helper Functions ---
 function logServerEvent(eventDetails) {
@@ -368,6 +416,64 @@ async function sendMessage(chatId, text, options) {
         }
         return null;
     }
+}
+
+
+async function showBillingCycleSelection(chatId, userId, messageId, dcConfig) {
+  const cycles = getAllowedCycles(dcConfig);
+  if (!cycles.length) return sendMessage(chatId, '❌ برای این دیتاسنتر سیکل پرداختی تعریف نشده است.');
+
+  state[userId] = {
+    ...state[userId],
+    step: 'SELECT_BILLING_CYCLE',
+    selectedDatacenterConfig: dcConfig
+  };
+
+  const keyboard = cycles.map(cycle => ([
+    { text: getCycleLabel(cycle), callback_data: `CYCLE_${cycle}` }
+  ]));
+  keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+
+  const text = '🔹 سیکل پرداخت را انتخاب کنید:';
+  const opts = { reply_markup: { inline_keyboard: keyboard } };
+  if (messageId) {
+    return bot.editMessageText(text, { chat_id: chatId, message_id: messageId, ...opts }).catch(() => sendMessage(chatId, text, opts));
+  }
+  return sendMessage(chatId, text, opts);
+}
+
+async function handleShahkarNationalCodeMessage(chatId, userId, text) {
+  const current = state[userId];
+  const dcConfig = current?.selectedDatacenterConfig;
+  if (!dcConfig) {
+    state[userId] = { step: 'READY' };
+    return sendMessage(chatId, '❌ اطلاعات دیتاسنتر منقضی شده است. لطفاً دوباره خرید را شروع کنید.');
+  }
+
+  let nationalCode;
+  try {
+    nationalCode = normalizeNationalCode(text);
+  } catch (_) {
+    return sendMessage(chatId, '❌ کد ملی نامعتبر است. لطفاً کد ملی ۱۰ رقمی معتبر وارد کنید:');
+  }
+
+  const dbUser = await getUser(userId);
+  if (!dbUser?.phone || dbUser.phone === 'EXEMPT') {
+    return sendMessage(chatId, '⚠️ برای احراز شاهکار، ابتدا /start را بزنید و شماره موبایل واقعی خود را به اشتراک بگذارید.');
+  }
+
+  try {
+    const result = await verifyShahkarLite({ nationalCode, mobile: dbUser.phone });
+    if (!result.ok) {
+      return sendMessage(chatId, '❌ کد ملی با شماره موبایل شما تطابق ندارد. لطفاً دوباره تلاش کنید:');
+    }
+    await updateUserShahkar(userId, nationalCode, result.raw);
+    await sendMessage(chatId, '✅ احراز هویت شاهکار با موفقیت انجام شد.');
+    return showBillingCycleSelection(chatId, userId, current.messageId, dcConfig);
+  } catch (error) {
+    console.error('[Shahkar flow] verification failed:', error.message);
+    return sendMessage(chatId, '❌ خطا در استعلام شاهکار. چند دقیقه بعد دوباره تلاش کنید.');
+  }
 }
 
 async function isUserChannelMember(userId) {
@@ -501,6 +607,10 @@ bot.on('message', async (msg) => {
         await upsertUser({ telegram_id: effectiveUserId, phone: msg.contact.phone_number, step: 'READY' });
         showMainMenu(effectiveChatId, effectiveUserId);
         return;
+    }
+
+    if (state[effectiveUserId]?.step === 'WAIT_SHAHKAR_NATIONAL_CODE') {
+        return handleShahkarNationalCodeMessage(effectiveChatId, effectiveUserId, text);
     }
 
     switch (text) {
@@ -714,14 +824,17 @@ async function handleChangeCycleAsk(chatId, serverId, dcConfig, messageId) {
       return bot.editMessageText('❌ اطلاعات خرید این سرور یافت نشد.', { chat_id: chatId, message_id: messageId });
     }
 
-    const availableCycles = Object.keys(HOURS_IN_CYCLE).filter(c => c !== purchase.duration);
+    if (!hasCapability(dcConfig, 'changeCycle') || getAllowedCycles(dcConfig).length <= 1) {
+      return bot.editMessageText('این قابلیت برای این دیتاسنتر فعال نیست.', { chat_id: chatId, message_id: messageId });
+    }
+    const availableCycles = getAllowedCycles(dcConfig).filter(c => c !== purchase.duration);
     const keyboard = availableCycles.map(cycle => ([
-      { text: cycle, callback_data: makeCycleCb(dcConfig.key, serverId, cycle) }
+      { text: getCycleLabel(cycle), callback_data: makeCycleCb(dcConfig.key, serverId, cycle) }
     ]));
     keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
 
     bot.editMessageText(
-      `دوره فعلی: *${escapeMarkdownV2(purchase.duration)}*\n\nلطفاً دوره جدید را انتخاب کنید:`,
+      `دوره فعلی: *${escapeMarkdownV2(getCycleLabel(purchase.duration))}*\n\nلطفاً دوره جدید را انتخاب کنید:`,
       {
         chat_id: chatId,
         message_id: messageId,
@@ -736,6 +849,7 @@ async function handleChangeCycleAsk(chatId, serverId, dcConfig, messageId) {
 }
 
 async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
+  if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
   const keyboard = [
     [{ text: '✅ تأیید ریست پسورد', callback_data: makeShortCb(userId, { action: 'RESETPW', dcKey: dcConfig.key, serverId }) }],
     [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
@@ -745,6 +859,7 @@ async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
   });
 }
 async function handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId) {
+  if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
   try {
 
     const isHetzner = (dcConfig?.apiType === 'hetzner') || (dcConfig?.provider === 'hetzner');
@@ -869,6 +984,7 @@ bot.editMessageText('⏳ در حال محاسبه و تغییر دوره پرد�
   }
 }
 async function handleSnapshotAsk(chatId, userId, serverId, dcConfig) {
+  if (!requireCapabilityOrReply(chatId, dcConfig, 'snapshot')) return;
   const keyboard = [
     [{ text: '✅ تایید Snapshot', callback_data: makeShortCb(userId, { action: 'SNAPSHOT', dcKey: dcConfig.key, serverId }) }],
     [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
@@ -879,6 +995,7 @@ async function handleSnapshotAsk(chatId, userId, serverId, dcConfig) {
 }
 
 async function handleSnapshotConfirm(chatId, userId, serverId, dcConfig, messageId) {
+  if (!requireCapabilityOrReply(chatId, dcConfig, 'snapshot')) return;
   try {
     const tok = await openstackApi.getToken(dcConfig);
     const snapName = `snap-${userId}-${Date.now()}`;
@@ -904,6 +1021,7 @@ async function handleSnapshotConfirm(chatId, userId, serverId, dcConfig, message
 }
 
 async function handleBuildFromSnapshot(chatId, userId, dcConfig) {
+  if (!requireCapabilityOrReply(chatId, dcConfig, 'buildFromSnapshot')) return;
   try {
     const tok = await openstackApi.getToken(dcConfig);
     const snaps = await openstackApi.listSnapshots(dcConfig, tok, userId);
@@ -991,6 +1109,7 @@ bot.on('callback_query', async q => {
   const payload = readShortCb(effectiveUserId, data);
 if (payload && payload.action === 'PROJECT_SUM') {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'projectTraffic')) return;
   return getProjectTrafficSummary(effectiveChatId, effectiveUserId, dc, payload.projectId);
 }
 
@@ -1056,6 +1175,7 @@ if (payload && payload.action === 'PROJECT_SUM') {
 case 'GET_TRAFFIC_RAW': {
   const cfg = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
   if (!cfg) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  if (!hasCapability(cfg, 'traffic') && !hasCapability(cfg, 'projectTraffic')) return unsupportedFeature(effectiveChatId);
   return getTrafficInfoRaw(effectiveChatId, payload.serverId, cfg);
 }
       case 'M': {
@@ -1079,35 +1199,42 @@ case 'SELECT_IMAGE': {
 }
       case 'GET_TRAFFIC': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        if (!requireCapabilityOrReply(effectiveChatId, dc, 'traffic')) return;
         return getTrafficInfo(effectiveChatId, payload.serverId, dc);
       }
 
       case 'ASK_RESETPW': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        if (!requireCapabilityOrReply(effectiveChatId, dc, 'resetPassword')) return;
         return handleResetPasswordAsk(effectiveChatId,effectiveUserId, payload.serverId, dc);
       }
 
       case 'CHANGECYCLE_ASK': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        if (!hasCapability(dc, 'changeCycle') || getAllowedCycles(dc).length <= 1) return unsupportedFeature(effectiveChatId, 'برای این دیتاسنتر فقط پرداخت ماهانه فعال است');
         return handleChangeCycleAsk(effectiveChatId, payload.serverId, dc, q.message.message_id);
       }
 
       case 'REBUILD_ASK': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        if (!requireCapabilityOrReply(effectiveChatId, dc, 'rebuild')) return;
         return handleRebuildAsk(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id);
       }
 
       case 'ASK_DELETE': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        if (!requireCapabilityOrReply(effectiveChatId, dc, 'deleteServer')) return;
         return askForDeletionConfirmation(effectiveChatId, payload.serverId, dc);
       }
 case 'RESETPW': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
   if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'resetPassword')) return;
   return handleResetPasswordConfirm(effectiveChatId, payload.serverId, dc, q.message.message_id);
 }
 case 'SNAPSHOT_ASK': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'snapshot')) return;
   console.log('>>> SNAPSHOT_ASK triggered');
   return handleSnapshotAsk(
     effectiveChatId,
@@ -1119,6 +1246,7 @@ case 'SNAPSHOT_ASK': {
 
 case 'SNAPSHOT': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'snapshot')) return;
   console.log('>>> SNAPSHOT confirm');
   return handleSnapshotConfirm(
     effectiveChatId,
@@ -1131,12 +1259,14 @@ case 'SNAPSHOT': {
 
 case 'BUILD_FROM_SNAPSHOT': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'buildFromSnapshot')) return;
   console.log('>>> BUILD_FROM_SNAPSHOT triggered');
   return handleBuildFromSnapshot(effectiveChatId, effectiveUserId, dc);
 }
 
 case 'BUILD_SNAPSHOT_CONFIRM': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!requireCapabilityOrReply(effectiveChatId, dc, 'buildFromSnapshot')) return;
   console.log('>>> BUILD_SNAPSHOT_CONFIRM triggered');
   return handleBuildSnapshotConfirm(
     effectiveChatId,
@@ -1169,16 +1299,26 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
       bot.deleteMessage(effectiveChatId, q.message.message_id).catch(()=>{});
       handleFreeTrialRequest(effectiveChatId, effectiveUserId, dcConfig);
     } else if (flowType === 'BUY') {
-      state[effectiveUserId].step = 'SELECT_BILLING_CYCLE';
-      const keyboard = Object.keys(HOURS_IN_CYCLE).map(cycle => ([
-        { text: cycle.charAt(0).toUpperCase() + cycle.slice(1), callback_data: `CYCLE_${cycle}` }
-      ]));
-      keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
-      bot.editMessageText('🔹 سیکل پرداخت را انتخاب کنید:', {
-        chat_id: effectiveChatId,
-        message_id: q.message.message_id,
-        reply_markup: { inline_keyboard: keyboard }
-      });
+      const dbUser = await getUser(effectiveUserId);
+      if (requiresShahkar(dcConfig, 'buy') && !isShahkarVerified(dbUser)) {
+        if (!dbUser?.phone || dbUser.phone === 'EXEMPT') {
+          return sendMessage(effectiveChatId, '⚠️ برای خرید این دیتاسنتر، ابتدا /start را بزنید و شماره موبایل واقعی خود را به اشتراک بگذارید.');
+        }
+        state[effectiveUserId] = {
+          ...state[effectiveUserId],
+          step: 'WAIT_SHAHKAR_NATIONAL_CODE',
+          selectedDatacenterConfig: dcConfig,
+          messageId: q.message.message_id,
+          afterShahkar: 'CONTINUE_BUY'
+        };
+        return bot.editMessageText(`🔐 برای خرید سرورهای این دیتاسنتر، احراز هویت شاهکار لازم است.
+لطفاً کد ملی مالک همین شماره موبایل را وارد کنید:`, {
+          chat_id: effectiveChatId,
+          message_id: q.message.message_id
+        }).catch(() => sendMessage(effectiveChatId, `🔐 برای خرید سرورهای این دیتاسنتر، احراز هویت شاهکار لازم است.
+لطفاً کد ملی مالک همین شماره موبایل را وارد کنید:`));
+      }
+      return showBillingCycleSelection(effectiveChatId, effectiveUserId, q.message.message_id, dcConfig);
     }
     return;
   }
@@ -1224,6 +1364,7 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
         const serverIdToDelete = params[2];
       //  const deleteDcConfig = datacenters[deleteDcKey];
 const deleteDcConfig = getUserEffectiveDCs(effectiveUserId)[deleteDcKey];
+ if (!requireCapabilityOrReply(effectiveChatId, deleteDcConfig, 'deleteServer')) return;
  handleServerDeletion(effectiveChatId, effectiveUserId, serverIdToDelete, deleteDcConfig);
       }
       break;
@@ -1241,8 +1382,10 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
       const serverIdToAsk = params[2];
       const askDcConfig = getUserEffectiveDCs(effectiveUserId)[askDcKey];
       if (askAction === 'DELETE') {
+        if (!requireCapabilityOrReply(effectiveChatId, askDcConfig, 'deleteServer')) return;
         askForDeletionConfirmation(effectiveChatId, serverIdToAsk, askDcConfig);
       } else if (askAction === 'RESETPW') {
+        if (!requireCapabilityOrReply(effectiveChatId, askDcConfig, 'resetPassword')) return;
         handleResetPasswordAsk(effectiveChatId,effectiveUserId, serverIdToAsk, askDcConfig);
       }
       break;
@@ -1253,8 +1396,10 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
       const serverIdForGet = params[2];
       const getDcConfig =  getUserEffectiveDCs(effectiveUserId)[getDcKey];
       if (getType === 'KEY') {
+        if (!requireCapabilityOrReply(effectiveChatId, getDcConfig, 'privateKey')) return;
         getPrivateKey(effectiveChatId, serverIdForGet);
       } else if (getType === 'TRAFFIC') {
+        if (!requireCapabilityOrReply(effectiveChatId, getDcConfig, 'traffic')) return;
         getTrafficInfo(effectiveChatId, serverIdForGet, getDcConfig);
       }
       break;
@@ -1265,6 +1410,7 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
         const rebuildDcKey = params[1];
         const serverIdToRebuild = params[2];
         const rebuildDcConfig = getUserEffectiveDCs(effectiveUserId)[rebuildDcKey];
+        if (!requireCapabilityOrReply(effectiveChatId, rebuildDcConfig, 'rebuild')) return;
         handleRebuildAsk(effectiveChatId, effectiveUserId, serverIdToRebuild, rebuildDcConfig, q.message.message_id);
       } else if (rebuildAction === 'IMG') {
         const imageId = params[1];
@@ -1272,6 +1418,7 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
         if (!serverId || !rebuildDcConfigFromState) {
           return sendMessage(effectiveChatId, '❌ خطایی رخ داد، لطفاً دوباره از منوی مدیریت سرورها تلاش کنید.');
         }
+        if (!requireCapabilityOrReply(effectiveChatId, rebuildDcConfigFromState, 'rebuild')) return;
         handleRebuildConfirm(effectiveChatId, effectiveUserId, serverId, imageId, rebuildDcConfigFromState, q.message.message_id);
       }
       break;
@@ -1280,6 +1427,7 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
       const resetPwDcKey = params[0];
       const serverIdToReset = params[1];
       const resetPwDcConfig = getUserEffectiveDCs(effectiveUserId)[resetPwDcKey];
+      if (!requireCapabilityOrReply(effectiveChatId, resetPwDcConfig, 'resetPassword')) return;
       handleResetPasswordConfirm(effectiveChatId, serverIdToReset, resetPwDcConfig, q.message.message_id);
       break;
     }
@@ -1290,6 +1438,7 @@ handleServerManagement(effectiveChatId, effectiveUserId, serverIdToManage, manag
    //   const dcConfig = datacenters[dcKey];
 const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
 
+ if (!hasCapability(dcConfig, 'changeCycle') || getAllowedCycles(dcConfig).length <= 1) return unsupportedFeature(effectiveChatId, 'برای این دیتاسنتر فقط پرداخت ماهانه فعال است');
  if (changeAction === 'ASK') {
         handleChangeCycleAsk(effectiveChatId, serverId, dcConfig, q.message.message_id);
       } else if (changeAction === 'CONFIRM') {
@@ -1303,6 +1452,27 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
 
 
     // ← الگوی جدید کوتاه برای تغییر سیکل
+    case 'SUSPEND': {
+      const dcKey = params[0];
+      const serverId = params[1];
+      const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
+      if (!requireCapabilityOrReply(effectiveChatId, dcConfig, 'suspendServer')) return;
+      const tok = await openstackApi.getToken(dcConfig);
+      await openstackApi.suspendServer(dcConfig, tok, serverId);
+      await sendMessage(effectiveChatId, '✅ دستور خاموش کردن سرور ارسال شد.');
+      return handleServerManagement(effectiveChatId, effectiveUserId, serverId, dcConfig);
+    }
+    case 'RESUME': {
+      const dcKey = params[0];
+      const serverId = params[1];
+      const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
+      if (!requireCapabilityOrReply(effectiveChatId, dcConfig, 'resumeServer')) return;
+      const tok = await openstackApi.getToken(dcConfig);
+      await openstackApi.resumeServer(dcConfig, tok, serverId);
+      await sendMessage(effectiveChatId, '✅ دستور روشن کردن سرور ارسال شد.');
+      return handleServerManagement(effectiveChatId, effectiveUserId, serverId, dcConfig);
+    }
+
     case 'CC': {
       const ccDcKey    = params[0];
       const ccServerId = params[1];
@@ -1311,6 +1481,7 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
       if (!ccDcConfig) {
         return sendMessage(effectiveChatId, "❌ دیتاسنتر نامعتبر.");
       }
+      if (!hasCapability(ccDcConfig, 'changeCycle') || getAllowedCycles(ccDcConfig).length <= 1) return unsupportedFeature(effectiveChatId, 'برای این دیتاسنتر فقط پرداخت ماهانه فعال است');
       return handleChangeCycleConfirm(
         effectiveChatId,
         effectiveUserId,
@@ -1514,13 +1685,18 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
 }
 
 async function handleCycleSelection(chatId, userId, messageId, selectedCycle, dcConfig) {
+    const allowedCycles = getAllowedCycles(dcConfig);
+    if (!allowedCycles.includes(selectedCycle)) {
+      return showBillingCycleSelection(chatId, userId, messageId, dcConfig);
+    }
+
     state[userId].selectedCycle = selectedCycle;
     state[userId].step = 'SELECT_FLAVOR';
 
     const flavors = await openstackApi.listFlavors(dcConfig);
     const keyboard = flavors.map(f => {
-        const totalCyclePrice = Math.round(f.price * HOURS_IN_CYCLE[selectedCycle]);
-        return [{ text: `${f.label} — ${totalCyclePrice} تومان`, callback_data: `FLAVOR_${f.id}` }];
+        const totalCyclePrice = getFlavorCyclePrice(f, selectedCycle);
+        return [{ text: `${f.label} — ${formatToman(totalCyclePrice)} تومان`, callback_data: `FLAVOR_${f.id}` }];
     });
     keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
     bot.editMessageText('🔹 نوع سرور را انتخاب کنید:', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: keyboard } });
@@ -1544,10 +1720,10 @@ async function handleFlavorSelection(chatId, userId, messageId, selectedFlavorId
         console.error(`⚠️ [${dcConfig.name}] listImages error:`, err.message);
         return [];
       }),
-      openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
+      hasCapability(dcConfig, 'listSnapshots') ? openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
         console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);
         return [];
-      })
+      }) : Promise.resolve([])
     ]);
 
     console.log(`🟡 [DEBUG] ${dcConfig.name}: ${images.length} base images, ${snapshots.length} snap   shots received`);
@@ -1612,10 +1788,10 @@ async function handleImageSelection(chatId, userId, messageId, selectedImageId, 
         console.error(`⚠️ [${dcConfig.name}] listImages error:`, err.message);
         return [];
       }),
-      openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
+      hasCapability(dcConfig, 'listSnapshots') ? openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {
         console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);
         return [];
-      })
+      }) : Promise.resolve([])
     ]);
 
     console.log(`🟡 [DEBUG] ${dcConfig.name}: ${images.length} base images, ${snapshots.length} snap   shots for user ${userId}`);
@@ -1650,7 +1826,7 @@ async function handleImageSelection(chatId, userId, messageId, selectedImageId, 
     state[userId].step = 'CONFIRM_PURCHASE';
 
     const { selectedFlavor, selectedCycle } = state[userId];
-    const finalPrice = Math.round(selectedFlavor.price * HOURS_IN_CYCLE[selectedCycle]);
+    const finalPrice = getFlavorCyclePrice(selectedFlavor, selectedCycle);
     state[userId].finalPrice = finalPrice;
 
     const messageText =
@@ -1658,8 +1834,8 @@ async function handleImageSelection(chatId, userId, messageId, selectedImageId, 
       `🔹 دیتاسنتر: ${escapeMarkdownV2(dcConfig.name)}\n` +
       `🔹 پلن: ${escapeMarkdownV2(selectedFlavor.label)}\n` +
       `🔹 سیستم‌عامل / Snapshot: ${escapeMarkdownV2(selectedImage.label)}\n` +
-      `🔹 سیکل پرداخت: ${escapeMarkdownV2(selectedCycle)}\n` +
-      `🔹 هزینه دوره: ${escapeMarkdownV2(finalPrice)} تومان\n`;
+      `🔹 سیکل پرداخت: ${escapeMarkdownV2(getCycleLabel(selectedCycle))}\n` +
+      `🔹 هزینه دوره: ${escapeMarkdownV2(formatToman(finalPrice))} تومان\n`;
 
     await bot.editMessageText(messageText, {
       chat_id: chatId,
@@ -1692,7 +1868,10 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
   }).catch(() => {});
 
   try {
-    const { selectedFlavor, selectedImage, selectedCycle, finalPrice } = state[userId];
+    const { selectedFlavor, selectedImage, selectedCycle } = state[userId];
+    const allowedCycles = getAllowedCycles(dcConfig || state[userId]?.selectedDatacenterConfig);
+    if (!allowedCycles.includes(selectedCycle)) return sendMessage(chatId, '❌ سیکل پرداخت انتخاب‌شده برای این دیتاسنتر مجاز نیست.');
+    const finalPrice = getFlavorCyclePrice(selectedFlavor, selectedCycle);
 if (!dcConfig) {
   dcConfig = state[userId]?.selectedDatacenterConfig;
 }
@@ -1715,7 +1894,7 @@ const balance = await getUserWallet(userId);
     if (balance < finalPrice) {
       return sendMessage(
         chatId,
-        `❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${finalPrice} تومان`,
+        `❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${formatToman(finalPrice)} تومان\n💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.`,
         mainMenu
       );
     }
@@ -1808,7 +1987,7 @@ runcmd:
       dcConfig.key,
       serverName,
       selectedFlavor.id,
-      selectedFlavor.price,
+      finalPrice / HOURS_IN_CYCLE[selectedCycle],
       selectedCycle,
       DEFAULT_PRICE_PER_GB,
       DEFAULT_DOWNLOAD_ONLY,
@@ -1869,174 +2048,72 @@ runcmd:
 
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
-    // 👇 حتماً باید قبل از ساخت callback ها اجرا بشه
     ensureUserState(userId);
 
     const tok = await openstackApi.getToken(dcConfig);
     const srv = await openstackApi.getServer(dcConfig, tok, serverId);
     const purchase = await getPurchaseByServerId(serverId);
 
-    // --- IP Extraction ---
     let ip = '–';
-    for (const net in srv.addresses) {
-      const ipv4 = srv.addresses[net].find(a => a.version === 4);
+    for (const net in (srv.addresses || {})) {
+      const ipv4 = (srv.addresses[net] || []).find(a => a.version === 4 || a.addr);
       if (ipv4) ip = ipv4.addr;
     }
 
-    // --- Info Preparation ---
     const osLabel = purchase?.os_label || srv.image?.name || 'N/A';
-    const isHetzner = dcConfig.apiType === 'hetzner';
-    const isProjectUser = dcConfig.sharedProject === false;
+    const isProjectDC = dcConfig.sharedProject === false;
+    const hasTrafficApi = !!dcConfig.TRAFFIC_API_BASE_URL;
+    const stateText = String(srv.status || srv.state || '').toLowerCase();
+    const keyPair = hasCapability(dcConfig, 'privateKey') ? await getKeyPair(serverId).catch(() => null) : null;
 
     let messageText =
-      `*مدیریت سرور: ${escapeMarkdownV2(srv.name)}*\n` +
+      `*مدیریت سرور: ${escapeMarkdownV2(srv.name || srv.id)}*\n` +
       `دیتاسنتر: ${escapeMarkdownV2(dcConfig.name)}\n` +
       `IP: ${escapeMarkdownV2(ip)}\n` +
-      `وضعیت: ${escapeMarkdownV2(srv.status)}\n` +
+      `وضعیت: ${escapeMarkdownV2(srv.status || srv.state || 'N/A')}\n` +
       `سیستم عامل: ${escapeMarkdownV2(osLabel)}\n`;
 
-    const isProjectDC = dcConfig.sharedProject === false;
-    let keyboard = [];
+    const keyboard = [];
+    const short = (action, extra = {}) => makeShortCb(userId, { action, dcKey: dcConfig.key, serverId: srv.id, ...extra });
 
-    // --- برای کاربران پروژه‌محور (project-based) ---
-    if (isProjectUser) {
-      if (!isHetzner) {
-        keyboard.push([
-          {
-            text: '📈 ترافیک کل پروژه + باقیمانده',
-            callback_data: makeShortCb(userId, {
-              action: 'PROJECT_SUM',
-              dcKey: dcConfig.key,
-              projectId: dcConfig.OS_PROJECT_ID
-            })
-          }
-        ]);
-
-        const trafficAction = isProjectDC ? 'GET_TRAFFIC_RAW' : 'GET_TRAFFIC';
-        keyboard.push([
-          {
-            text: '📊 مشاهده ترافیک',
-            callback_data: makeShortCb(userId, {
-              action: trafficAction,
-              dcKey: dcConfig.key,
-              serverId: srv.id
-            })
-          }
-        ]);
-      }
-
-      keyboard.push([
-        {
-          text: '🔑 ریست پسورد',
-          callback_data: makeShortCb(userId, {
-            action: 'ASK_RESETPW',
-            dcKey: dcConfig.key,
-            serverId: srv.id
-          })
-        }
-      ]);
-
-      keyboard.push([
-        {
-          text: '🔄 ریبیلد سرور',
-          callback_data: makeShortCb(userId, {
-            action: 'REBUILD_ASK',
-            dcKey: dcConfig.key,
-            serverId: srv.id
-          })
-        }
-      ]);
-
-      // ✅ Snapshot برای کاربران پروژه‌محور
-      keyboard.push([
-        {
-          text: '📸 Snapshot',
-          callback_data: makeShortCb(userId, {
-            action: 'SNAPSHOT_ASK',
-            dcKey: dcConfig.key,
-            serverId: srv.id
-          })
-        }
-      ]);
-
+    if (isProjectDC && hasCapability(dcConfig, 'projectTraffic') && hasTrafficApi) {
+      keyboard.push([{ text: '📈 ترافیک کل پروژه + باقیمانده', callback_data: short('PROJECT_SUM', { projectId: dcConfig.OS_PROJECT_ID }) }]);
     }
-
-    // --- برای کاربران معمولی (با رکورد خرید) ---
-    else {
-               keyboard.push([
-          {
-            text: '🔑 ریست پسورد',
-            callback_data: makeShortCb(userId, {
-              action: 'ASK_RESETPW',
-              dcKey: dcConfig.key,
-              serverId: srv.id
-            })
-          }
-        ]);
-      if (!isHetzner) {
-
-
-        keyboard.push([
-          {
-            text: '🔑 دریافت کلید خصوصی',
-            callback_data: `GET_KEY_${dcConfig.key}_${srv.id}`
-          }
-        ]);
-
-        // ✅ Snapshot
-        keyboard.push([
-          {
-            text: '📸 Snapshot',
-            callback_data: makeShortCb(userId, {
-              action: 'SNAPSHOT_ASK',
-              dcKey: dcConfig.key,
-              serverId: srv.id
-            })
-          }
-        ]);
-
-      }
-
-      if (purchase) {
-        if (!isHetzner) {
-          keyboard.push([
-            {
-              text: '📊 مشاهده ترافیک',
-              callback_data: `GET_TRAFFIC_${dcConfig.key}_${srv.id}`
-            }
-          ]);
-        }
-        keyboard.push([
-          {
-            text: '🔄 تغییر دوره پرداخت',
-            callback_data: `CHANGECYCLE_ASK_${dcConfig.key}_${srv.id}`
-          }
-        ]);
-        keyboard.push([
-          {
-            text: '🔄 ریبیلد سرور',
-            callback_data: `REBUILD_ASK_${dcConfig.key}_${srv.id}`
-          }
-        ]);
-      }
-
-      keyboard.push([
-        {
-          text: '❌ حذف سرور',
-          callback_data: `ASK_DELETE_${dcConfig.key}_${srv.id}`
-        }
-      ]);
+    if (hasCapability(dcConfig, 'traffic') && hasTrafficApi) {
+      keyboard.push([{ text: '📊 مشاهده ترافیک', callback_data: short(isProjectDC ? 'GET_TRAFFIC_RAW' : 'GET_TRAFFIC') }]);
     }
+    if (hasCapability(dcConfig, 'resetPassword')) {
+      keyboard.push([{ text: getCapabilityLabel(dcConfig, 'resetPassword', '🔑 ریست پسورد'), callback_data: short('ASK_RESETPW') }]);
+    }
+    if (keyPair) {
+      keyboard.push([{ text: '🔑 دریافت کلید خصوصی', callback_data: `GET_KEY_${dcConfig.key}_${srv.id}` }]);
+    }
+    if (hasCapability(dcConfig, 'snapshot')) {
+      keyboard.push([{ text: '📸 Snapshot', callback_data: short('SNAPSHOT_ASK') }]);
+    }
+    if (hasCapability(dcConfig, 'changeCycle') && purchase && getAllowedCycles(dcConfig).length > 1) {
+      keyboard.push([{ text: '🔄 تغییر دوره پرداخت', callback_data: `CHANGECYCLE_ASK_${dcConfig.key}_${srv.id}` }]);
+    }
+    if (hasCapability(dcConfig, 'rebuild')) {
+      keyboard.push([{ text: '🔄 ریبیلد سرور', callback_data: `REBUILD_ASK_${dcConfig.key}_${srv.id}` }]);
+    }
+    if (hasCapability(dcConfig, 'suspendServer') && ['active', 'running', 'started'].some(x => stateText.includes(x))) {
+      keyboard.push([{ text: '⏸ خاموش کردن', callback_data: `SUSPEND_${dcConfig.key}_${srv.id}` }]);
+    }
+    if (hasCapability(dcConfig, 'resumeServer') && ['shutoff', 'stopped', 'suspended'].some(x => stateText.includes(x))) {
+      keyboard.push([{ text: '▶️ روشن کردن', callback_data: `RESUME_${dcConfig.key}_${srv.id}` }]);
+    }
+    if (hasCapability(dcConfig, 'deleteServer')) {
+      keyboard.push([{ text: '❌ حذف سرور', callback_data: `ASK_DELETE_${dcConfig.key}_${srv.id}` }]);
+    }
+    keyboard.push([{ text: '🔙 بازگشت', callback_data: 'CANCEL' }]);
 
-    // --- ارسال پیام مدیریت سرور ---
     await sendMessage(chatId, messageText, {
       parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: keyboard }
     });
 
-    // 🧩 لاگ دیباگ (برای اطمینان از ساخت callback)
     console.log('[handleServerManagement] Buttons created for user', userId, 'DC:', dcConfig.key, 'srv:', srv.id);
-
   } catch (e) {
     console.error(`Manage Server Error for ${serverId} in ${dcConfig.name}:`, e);
     sendMessage(chatId, `❌ خطا در دریافت اطلاعات سرور: ${escapeMarkdownV2(e.message)}`);

@@ -1,5 +1,6 @@
 
 const axios = require('axios');
+const { AFRA_CLOUD_PLANS, MONTHLY_HOURS } = require('./afracloud-prices');
 
 function client(config) {
   return axios.create({
@@ -21,20 +22,70 @@ async function getToken(config) {
   return 'afracloud-header-auth';
 }
 
+function normalizePlanName(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function toMemoryGb(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n > 256 ? n / 1024 : n;
+}
+
+function flavorCpu(f) {
+  return Number(f.numberOfCores || f.cpu || f.cores || 0);
+}
+
+function flavorMemoryGb(f) {
+  return toMemoryGb(f.memory || f.memoryGb || f.ram || 0);
+}
+
 async function listFlavors(config) {
   const r = await client(config).get('/restapi/compute/computeOfferingList', {
     params: { zoneUuid: config.ZONE_UUID },
   });
 
-  return (r.data.listComputeOfferingResponse || []).map(f => ({
-    id: f.uuid,
-    name: f.name,
-    label: f.displayText || f.name,
-    price: 0,
-    disk: 0,
-    cores: Number(f.numberOfCores || 0),
-    memory: Number(f.memory || 0),
-  }));
+  const apiFlavors = r.data.listComputeOfferingResponse || [];
+  const allowlist = config.allowedFlavorNames || config.afraAllowedFlavorNames;
+  const allowedNames = Array.isArray(allowlist) && allowlist.length
+    ? new Set(allowlist.map(normalizePlanName))
+    : null;
+  const planByName = new Map(AFRA_CLOUD_PLANS.map(plan => [normalizePlanName(plan.name), plan]));
+  const usedPlanNames = new Set();
+  const results = [];
+
+  for (const f of apiFlavors) {
+    const normalizedName = normalizePlanName(f.name || f.displayText);
+    let plan = planByName.get(normalizedName);
+
+    if (!plan) {
+      const cpu = flavorCpu(f);
+      const memoryGb = flavorMemoryGb(f);
+      plan = AFRA_CLOUD_PLANS.find(p => p.cpu === cpu && Math.abs(p.memoryGb - memoryGb) < 0.01);
+    }
+
+    if (!plan) continue;
+    const planName = normalizePlanName(plan.name);
+    if (usedPlanNames.has(planName)) continue;
+    if (allowedNames && !allowedNames.has(planName)) continue;
+
+    usedPlanNames.add(planName);
+    results.push({
+      id: f.uuid,
+      name: plan.name,
+      label: `${plan.name} — ${plan.cpu} CPU / ${plan.memoryGb}GB RAM`,
+      price: plan.monthlyPrice / MONTHLY_HOURS,
+      monthly_price: plan.monthlyPrice,
+      monthlyPrice: plan.monthlyPrice,
+      pricesByCycle: { monthly: plan.monthlyPrice },
+      disk: 0,
+      cores: plan.cpu,
+      memory: plan.memoryGb,
+      raw: f,
+    });
+  }
+
+  return results;
 }
 
 
@@ -201,11 +252,11 @@ async function resetServerPassword(config, _tok, serverId) {
 }
 
 async function rebuildServer() {
-  throw new Error('AfraCloud rebuild is not implemented in public API');
+  throw new Error('AfraCloud rebuild is not supported');
 }
 
 async function createSnapshot() {
-  throw new Error('AfraCloud snapshot adapter not wired yet');
+  throw new Error('AfraCloud snapshot is not supported');
 }
 
 async function listSnapshots() {
@@ -213,7 +264,7 @@ async function listSnapshots() {
 }
 
 async function createServerFromSnapshot() {
-  throw new Error('AfraCloud create from snapshot not wired yet');
+  throw new Error('AfraCloud create from snapshot is not supported');
 }
 
 module.exports = {
