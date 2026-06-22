@@ -91,6 +91,10 @@ afracloud: {
   key: 'afracloud',
   name: 'افراکلود',
   provider: 'afracloud',
+  apiType: 'afracloud',
+  SET_ROOT_PASSWORD_WITH_CLOUD_INIT: true,
+  USERDATA_FIELD: 'userData',
+  USERDATA_ENCODING: 'plain',
 
   API_BASE_URL: 'https://panel.afracloud.net',
   API_KEY: process.env.AFRACLOUD_API_KEY,
@@ -112,6 +116,8 @@ afracloud: {
     suspendServer: true,
     resumeServer: true,
     resetPassword: true,
+    getStoredPassword: true,
+    resetPasswordBySsh: true,
     resetPasswordLabel: '🔑 دریافت رمز عبور',
     privateKey: false,
     traffic: false,
@@ -132,8 +138,6 @@ afracloud: {
     { name: "Ubuntu-22.04", id: "6cd297d9-a9a5-4960-8b15-07d846628de9" },
     { name: "Debian-12", id: "b9775e7a-ceda-43a5-9b34-59f872c6a1e0" }
   ],
-
-  apiType: 'afracloud'
 },
 
 
