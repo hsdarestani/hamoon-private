@@ -14,21 +14,8 @@ const path = require('path');
 const cron = require('node-cron');
 const { hasCapability, getCapabilityLabel } = require('./provider-capabilities');
 const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
-
-// --- DEBUG WRAPPER ---
-const _send = sendMessage;
-sendMessage = function(chatId, text, options = {}) {
-  console.log('\n=======================');
-  console.log('SENDING TO:', chatId);
-  console.log('TEXT:', JSON.stringify(text));
-  console.log('OPTIONS:', JSON.stringify(options));
-  console.log('=======================\n');
-
-  return _send(chatId, text, options);
-};
-
-
-
+const { generateStrongPassword } = require('./services/passwords');
+const { resetLinuxRootPasswordOverSsh } = require('./services/ssh-reset-password');
 
 // Importing datacenter configurations
 //const datacenters = require('./datacenters');
@@ -282,7 +269,9 @@ const {
     updatePurchaseFreeTraffic,
     updatePurchaseCycle,
     updateUserShahkar,
-    getUserActivePurchases
+    getUserActivePurchases,
+    upsertServerSecret,
+    getServerSecret
 } = require('./db');
 
 // Environment variables
@@ -907,6 +896,100 @@ async function handleChangeCycleAsk(chatId, serverId, dcConfig, messageId) {
   }
 }
 
+
+function isAfraDc(dcConfig) {
+  return dcConfig?.provider === 'afracloud' || dcConfig?.apiType === 'afracloud';
+}
+
+function serverSecretNotConfiguredMessage() {
+  return 'ذخیره امن رمز عبور روی سرور تنظیم نشده است. لطفاً با پشتیبانی تماس بگیرید.';
+}
+
+async function getAfraPasswordFromApiOnce(dcConfig, serverId) {
+  try {
+    const tok = await openstackApi.getToken(dcConfig);
+    return await openstackApi.resetServerPassword(dcConfig, tok, serverId);
+  } catch (e) {
+    const status = e?.response?.status || e?.status;
+    if (status === 401 || status === 403) {
+      const err = new Error('AFRA_PASSWORD_API_FORBIDDEN');
+      err.code = 'AFRA_PASSWORD_API_FORBIDDEN';
+      throw err;
+    }
+    throw e;
+  }
+}
+
+async function handleGetStoredPassword(chatId, userId, serverId, dcConfig, messageId) {
+  if (!isAfraDc(dcConfig)) return handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId);
+  try {
+    let password = await getServerSecret(serverId, 'root_password');
+    if (!password) {
+      try {
+        password = await getAfraPasswordFromApiOnce(dcConfig, serverId);
+        if (password) await upsertServerSecret({ telegramId: userId, serverId, datacenter: dcConfig.key, secretType: 'root_password', secretValue: password });
+      } catch (e) {
+        if (e.code === 'SERVER_SECRET_KEY_MISSING') return sendMessage(chatId, serverSecretNotConfiguredMessage());
+        if (e.code === 'AFRA_PASSWORD_API_FORBIDDEN') return sendMessage(chatId, 'برای این سرور رمزی در ربات ذخیره نشده و API افراکلود اجازه دریافت رمز را نمی‌دهد. اگر این سرور قبل از پچ جدید ساخته شده، پشتیبانی باید رمز را یک‌بار ثبت کند.');
+        throw e;
+      }
+    }
+    if (!password) return sendMessage(chatId, 'برای این سرور رمزی در ربات ذخیره نشده است. لطفاً با پشتیبانی تماس بگیرید.');
+    return sendMessage(chatId, `🔑 رمز عبور سرور:\n${htmlCodeBlock(password)}`, { parse_mode: 'HTML' });
+  } catch (e) {
+    if (e.code === 'SERVER_SECRET_KEY_MISSING' || e.message === 'SERVER_SECRET_KEY_MISSING') return sendMessage(chatId, serverSecretNotConfiguredMessage());
+    console.error('[get_stored_password] failed:', { server_id: serverId, message: e.message });
+    return sendMessage(chatId, 'دریافت رمز عبور با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.');
+  }
+}
+
+async function resetAfraPasswordBySsh({ userId, dcConfig, serverId }) {
+  const oldPassword = await getServerSecret(serverId, 'root_password');
+  if (!oldPassword) throw new Error('NO_STORED_PASSWORD');
+  const tok = await openstackApi.getToken(dcConfig);
+  const srv = await openstackApi.getServer(dcConfig, tok, serverId);
+  const ip = extractServerIp(srv);
+  if (!ip) throw new Error('NO_SERVER_IP');
+  const status = String(srv.status || srv.state || '').toLowerCase();
+  if (status.includes('stop') || status.includes('suspend') || status.includes('shutoff')) throw new Error('SERVER_NOT_RUNNING');
+  const newPassword = generateStrongPassword();
+  await resetLinuxRootPasswordOverSsh({ host: ip, username: 'root', currentPassword: oldPassword, newPassword });
+  await upsertServerSecret({ telegramId: userId, serverId, datacenter: dcConfig.key, secretType: 'root_password', secretValue: newPassword });
+  return { newPassword, ip };
+}
+
+async function handleAfraSshResetAsk(chatId, userId, serverId, dcConfig) {
+  const keyboard = [
+    [{ text: '✅ تایید ریست رمز', callback_data: makeShortCb(userId, { action: 'RESET_PASSWORD_SSH_CONFIRM', dcKey: dcConfig.key, serverId }) }],
+    [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
+  ];
+  return sendMessage(chatId, 'آیا مطمئن هستید؟ رمز قبلی دیگر معتبر نخواهد بود.', { reply_markup: { inline_keyboard: keyboard } });
+}
+
+function afraResetErrorMessage(e) {
+  const code = e?.code || e?.message;
+  return ({
+    NO_STORED_PASSWORD: 'برای این سرور رمز قبلی در ربات ذخیره نشده، ریست خودکار ممکن نیست. با پشتیبانی تماس بگیرید.',
+    NO_SERVER_IP: 'IP سرور پیدا نشد.',
+    SERVER_NOT_RUNNING: 'برای ریست رمز، سرور باید روشن باشد. ابتدا سرور را روشن کنید.',
+    SSH_AUTH_FAILED: 'اتصال SSH با رمز ذخیره‌شده برقرار نشد. ممکن است رمز از خارج تغییر کرده باشد.',
+    SSH_TIMEOUT: 'اتصال SSH برقرار نشد. مطمئن شوید سرور روشن است و پورت ۲۲ باز است.',
+    SSH_COMMAND_FAILED: 'اتصال برقرار شد اما تغییر رمز انجام نشد. لطفاً با پشتیبانی تماس بگیرید.',
+    SERVER_SECRET_KEY_MISSING: serverSecretNotConfiguredMessage()
+  })[code] || 'ریست رمز عبور با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.';
+}
+
+async function handleAfraSshResetConfirm(chatId, userId, serverId, dcConfig, messageId) {
+  await bot.editMessageText('⏳ در حال اتصال به سرور و تغییر رمز عبور...', { chat_id: chatId, message_id: messageId }).catch(() => sendMessage(chatId, '⏳ در حال اتصال به سرور و تغییر رمز عبور...'));
+  try {
+    const { newPassword } = await resetAfraPasswordBySsh({ userId, dcConfig, serverId });
+    return sendMessage(chatId, `✅ رمز عبور با موفقیت تغییر کرد.\n🔑 رمز جدید:\n${htmlCodeBlock(newPassword)}\nلطفاً رمز را در جای امن ذخیره کنید.`, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.error('[afra_ssh_reset] failed:', { server_id: serverId, code: e.code || e.message });
+    return sendMessage(chatId, afraResetErrorMessage(e));
+  }
+}
+
 async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
   const keyboard = [
@@ -1243,6 +1326,19 @@ case 'GET_TRAFFIC_RAW': {
         if (!manageDcConfig) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
         return handleServerManagement(effectiveChatId, effectiveUserId, serverId, manageDcConfig);
       }
+
+      case 'GET_STORED_PASSWORD': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleGetStoredPassword(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id);
+      }
+      case 'RESET_PASSWORD_SSH_ASK': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleAfraSshResetAsk(effectiveChatId, effectiveUserId, payload.serverId, dc);
+      }
+      case 'RESET_PASSWORD_SSH_CONFIRM': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+        return handleAfraSshResetConfirm(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id);
+      }
       case 'GET_KEY': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
         if (!requireCapabilityOrReply(effectiveChatId, dc, 'privateKey')) return;
@@ -1268,7 +1364,7 @@ case 'SELECT_IMAGE': {
       case 'ASK_RESETPW': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
         if (!requireCapabilityOrReply(effectiveChatId, dc, 'resetPassword')) return;
-        return handleResetPasswordAsk(effectiveChatId,effectiveUserId, payload.serverId, dc);
+        return isAfraDc(dc) ? handleGetStoredPassword(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id) : handleResetPasswordAsk(effectiveChatId,effectiveUserId, payload.serverId, dc);
       }
 
       case 'CHANGECYCLE_ASK': {
@@ -1316,7 +1412,7 @@ case 'RESETPW': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
   if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
   if (!requireCapabilityOrReply(effectiveChatId, dc, 'resetPassword')) return;
-  return handleResetPasswordConfirm(effectiveChatId, payload.serverId, dc, q.message.message_id);
+  return isAfraDc(dc) ? handleGetStoredPassword(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id) : handleResetPasswordConfirm(effectiveChatId, payload.serverId, dc, q.message.message_id);
 }
 case 'SNAPSHOT_ASK': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
@@ -1590,11 +1686,64 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
 
 // --- ADMIN COMMANDS ---
 
+
+bot.onText(/\/set_server_password\s+(\d+)\s+(\S+)\s+(.+)/, async (msg, match) => {
+  if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+  const [, userId, serverId, password] = match;
+  try {
+    const existing = await getPurchaseByServerId(serverId);
+    let dcConfig = existing ? getUserEffectiveDCs(userId)[existing.datacenter] : (getUserEffectiveDCs(userId).afracloud || baseDatacenters.afracloud);
+    if (!existing && dcConfig) {
+      const tok = await openstackApi.getToken(dcConfig);
+      const srv = await openstackApi.getServer(dcConfig, tok, serverId).catch(() => null);
+      if (!srv) return sendMessage(msg.chat.id, '❌ خرید یا سرور افراکلود برای این شناسه پیدا نشد.');
+    }
+    await upsertServerSecret({ telegramId: userId, serverId, datacenter: dcConfig?.key || 'afracloud', secretType: 'root_password', secretValue: password });
+    await sendMessage(userId, '🔐 رمز عبور سرور شما در ربات ثبت شد. از بخش مدیریت سرورها می‌توانید آن را دریافت کنید.').catch(() => null);
+    return sendMessage(msg.chat.id, `✅ رمز سرور ${serverId} برای کاربر ${userId} ثبت شد. (masked: ****)`);
+  } catch (e) {
+    console.error('[set_server_password] failed:', { server_id: serverId, message: e.code || e.message });
+    return sendMessage(msg.chat.id, `❌ ثبت رمز انجام نشد: ${e.code || e.message}`);
+  }
+});
+
+bot.onText(/\/reset_afra_password_ssh\s+(\d+)\s+(\S+)/, async (msg, match) => {
+  if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+  const [, userId, serverId] = match;
+  const dcConfig = getUserEffectiveDCs(userId).afracloud || baseDatacenters.afracloud;
+  try {
+    const { newPassword } = await resetAfraPasswordBySsh({ userId, dcConfig, serverId });
+    await sendMessage(msg.chat.id, `✅ رمز جدید:\n${htmlCodeBlock(newPassword)}`, { parse_mode: 'HTML' });
+    await sendMessage(userId, `✅ رمز عبور سرور شما تغییر کرد.\n🔑 رمز جدید:\n${htmlCodeBlock(newPassword)}\nلطفاً رمز را در جای امن ذخیره کنید.`, { parse_mode: 'HTML' }).catch(() => null);
+  } catch (e) {
+    return sendMessage(msg.chat.id, `❌ ریست SSH انجام نشد: ${afraResetErrorMessage(e)}`);
+  }
+});
+
+bot.onText(/\/test_afra_password_api\s+(\S+)/, async (msg, match) => {
+  if (String(msg.from.id) !== String(SUPPORT_ID)) return;
+  const [, serverId] = match;
+  const dcConfig = baseDatacenters.afracloud;
+  try {
+    const password = await getAfraPasswordFromApiOnce(dcConfig, serverId);
+    const purchase = await getPurchaseByServerId(serverId);
+    if (password && purchase) await upsertServerSecret({ telegramId: purchase.telegram_id, serverId, datacenter: purchase.datacenter, secretType: 'root_password', secretValue: password });
+    return sendMessage(msg.chat.id, `✅ Afra password API status: 200\npassword_returned=${password ? 'yes' : 'no'}\nstored=${password && purchase ? 'yes' : 'no'}`);
+  } catch (e) {
+    const status = e?.response?.status || e?.status || e.code || 'error';
+    return sendMessage(msg.chat.id, `⚠️ Afra password API status: ${status}\npassword_returned=no\nmessage=${e.code || 'safe failure'}`);
+  }
+});
+
+
 bot.onText(/\/attach_afra\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(.+)/, async (msg, match) => {
   if (String(msg.from.id) !== String(SUPPORT_ID)) return;
   const [, userId, serverUuid, serverName, flavorUuid, monthlyPriceRaw, osLabelRaw] = match;
-  const debitFlag = /\s--debit\s*$/.test(osLabelRaw);
-  const osLabel = osLabelRaw.replace(/\s--debit\s*$/, '').trim();
+  const passwordMatch = osLabelRaw.match(/\s--password=(?:'([^']*)'|\"([^\"]*)\"|(\S+))/);
+  const providedPassword = passwordMatch ? (passwordMatch[1] || passwordMatch[2] || passwordMatch[3]) : null;
+  const cleanedLabelRaw = osLabelRaw.replace(/\s--password=(?:'[^']*'|\"[^\"]*\"|\S+)/, '');
+  const debitFlag = /\s--debit\s*$/.test(cleanedLabelRaw);
+  const osLabel = cleanedLabelRaw.replace(/\s--debit\s*$/, '').trim();
   const monthlyPrice = Number(monthlyPriceRaw);
   const dcConfig = getUserEffectiveDCs(userId).afracloud || baseDatacenters.afracloud;
   if (!dcConfig) return sendMessage(msg.chat.id, '❌ دیتاسنتر afracloud یافت نشد.');
@@ -1609,6 +1758,9 @@ bot.onText(/\/attach_afra\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(.+)/, async
     if (existing) return sendMessage(msg.chat.id, 'ℹ️ این سرور قبلاً به یک خرید متصل شده است.');
     const amountForDb = monthlyPrice / HOURS_IN_CYCLE.monthly;
     await recordPurchase(userId, serverUuid, 'afracloud', serverName, flavorUuid, amountForDb, 'monthly', DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, serverUuid, 'volume', osLabel);
+    if (providedPassword) {
+      await upsertServerSecret({ telegramId: userId, serverId: serverUuid, datacenter: 'afracloud', secretType: 'root_password', secretValue: providedPassword });
+    }
     if (debitFlag) {
       await debitUser(userId, monthlyPrice);
       await recordWalletLog(userId, -monthlyPrice, `بازیابی و اتصال سرور افراکلود ${serverName}`, 'purchase_recovery');
@@ -2026,6 +2178,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
 
     const serverName = `Srv-${effectiveDc.key.substring(0, 3).toUpperCase()}-${crypto.randomBytes(3).toString('hex')}`;
     let rawPrivateKey = null, rootPassword = null, tok = null;
+    let generatedRootPassword = null;
 
     if (!isHetzner) {
       tok = await openstackApi.getToken(effectiveDc);
@@ -2035,10 +2188,15 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
         kp = await openstackApi.createKeyPair(effectiveDc, tok, keyName);
       }
       const isSnapshot = selectedImage.type === 'snapshot';
-      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, { user: userId, type: 'purchased', datacenter: effectiveDc.key }, selectedFlavor.disk, 'volume', isSnapshot);
+      const serverMeta = { user: userId, type: 'purchased', datacenter: effectiveDc.key };
+      if (isAfra) {
+        generatedRootPassword = generateStrongPassword();
+        serverMeta.rootPassword = generatedRootPassword;
+        serverMeta.passwordManagedByBot = true;
+      }
+      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, 'volume', isSnapshot);
       rawPrivateKey = kp?.private_key ? String(kp.private_key || '').replace(/-----BEGIN RSA PRIVATE KEY-----/g, '').replace(/-----END RSA PRIVATE KEY-----/g, '').trim() : null;
-      rootPassword = srv.adminPass;
-      if (isAfra && !rootPassword && srv?.id) rootPassword = await fetchAfraPasswordWithRetry(effectiveDc, tok, srv.id);
+      rootPassword = isAfra ? generatedRootPassword : srv.adminPass;
     } else {
       const passwordOnly = !!effectiveDc.HETZNER_PASSWORD_ONLY;
       let keyId = null;
@@ -2063,6 +2221,15 @@ runcmd:
     }
 
     if (!srv?.id) throw new Error('شناسه سرور از Provider دریافت نشد.');
+    if (isAfra && generatedRootPassword) {
+      try {
+        await upsertServerSecret({ telegramId: userId, serverId: srv.id, datacenter: effectiveDc.key, secretType: 'root_password', secretValue: generatedRootPassword });
+      } catch (secretErr) {
+        logServerEvent({ type: 'server_secret_store_failed', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key, message: secretErr.code || secretErr.message });
+        if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 AfraCloud secret store failed\nuser_id=${userId}\nserver_id=${srv.id}\ndc=${effectiveDc.key}\nerror=${secretErr.code || secretErr.message}`).catch(() => null);
+        return sendMessage(chatId, 'سرور ساخته شد اما ذخیره امن رمز عبور با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.', mainMenu);
+      }
+    }
     await debitUser(userId, finalPrice);
     await recordPurchase(userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle, DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, srv.id, 'volume', selectedImage.label);
     await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${effectiveDc.name})`, 'purchase');
@@ -2084,8 +2251,8 @@ ${rawPrivateKey}
       `🔹 پلن: ${htmlEscape(planLabel)}`,
       `🔹 مبلغ ماهانه: ${htmlEscape(formatToman(finalPrice))} تومان`
     ].join('\n');
-    if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور:</b>\n` + htmlCodeBlock(rootPassword);
-    else if (isAfra) msgHtml += '\nرمز عبور هنوز از پنل افراکلود آماده نشده؛ از مدیریت سرور گزینه دریافت رمز عبور را بزنید.';
+    if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword) + '\nلطفاً رمز را در جای امن ذخیره کنید.';
+    else if (isAfra) msgHtml += '\n' + serverSecretNotConfiguredMessage();
     if (privateKeyText) msgHtml += '\n' + `🔑 <b>کلید خصوصی شما (SSH):</b>\n` + htmlCodeBlock(privateKeyText);
 
     const notifyResult = await notifyPurchaseSuccess(chatId, messageId, msgHtml, { inline_keyboard: [[{ text: '⚙️ مدیریت سرور', callback_data: makeShortCb(userId, { action: 'M', dcKey: effectiveDc.key, serverId: srv.id }) }]] });
@@ -2146,7 +2313,10 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
     if (hasCapability(dcConfig, 'traffic') && hasTrafficApi) {
       keyboard.push([{ text: '📊 مشاهده ترافیک', callback_data: short(isProjectDC ? 'GET_TRAFFIC_RAW' : 'GET_TRAFFIC') }]);
     }
-    if (hasCapability(dcConfig, 'resetPassword')) {
+    if (isAfraDc(dcConfig)) {
+      keyboard.push([{ text: '🔑 دریافت رمز عبور', callback_data: short('GET_STORED_PASSWORD') }]);
+      keyboard.push([{ text: '♻️ ریست رمز عبور', callback_data: short('RESET_PASSWORD_SSH_ASK') }]);
+    } else if (hasCapability(dcConfig, 'resetPassword')) {
       keyboard.push([{ text: getCapabilityLabel(dcConfig, 'resetPassword', '🔑 ریست پسورد'), callback_data: short('ASK_RESETPW') }]);
     }
     if (keyPair) {

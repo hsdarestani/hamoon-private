@@ -1,5 +1,6 @@
 
 const axios = require('axios');
+const { buildRootPasswordCloudInit } = require('../services/cloud-init');
 const { AFRA_CLOUD_PLANS, MONTHLY_HOURS } = require('./afracloud-prices');
 
 function client(config) {
@@ -177,6 +178,16 @@ async function createServer(config, _tok, name, flavorRef, imageRef, keyName, me
     computeOfferingUuid: flavorRef,
     templateUuid: imageRef,
   };
+
+  const rootPassword = meta?.rootPassword || meta?.afraRootPassword || null;
+  if (rootPassword && config.SET_ROOT_PASSWORD_WITH_CLOUD_INIT !== false) {
+    const cloudInit = buildRootPasswordCloudInit(rootPassword);
+    const payloadUserData = String(config.USERDATA_ENCODING || 'plain').toLowerCase() === 'base64'
+      ? Buffer.from(cloudInit, 'utf8').toString('base64')
+      : cloudInit;
+    body[config.USERDATA_FIELD || 'userData'] = payloadUserData;
+  }
+  if (rootPassword && config.PASSWORD_FIELD) body[config.PASSWORD_FIELD] = rootPassword;
 
   if (keyName) body.sshKeyName = keyName;
   if (diskSize) body.rootDiskSize = Number(diskSize);

@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 const mysql = require('mysql2/promise');
+const crypto = require('crypto');
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
@@ -14,6 +15,9 @@ const pool = mysql.createPool({
 });
 
 console.log('MySQL Pool initialized with host:', process.env.DB_HOST, 'database:', process.env.DB_NAME);
+if (!process.env.SERVER_SECRET_KEY) {
+    console.warn('[SECURITY] SERVER_SECRET_KEY is not set; secure server password storage is disabled.');
+}
 
 async function ensureColumn(connection, tableName, columnName, definition) {
     const [rows] = await connection.execute(
@@ -83,6 +87,21 @@ async function initializeDatabase() {
         await connection.execute('ALTER TABLE purchases MODIFY amount DECIMAL(14, 6) NOT NULL').catch(err => {
             console.warn('Could not widen purchases.amount:', err.message);
         });
+
+
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS server_secrets (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                telegram_id VARCHAR(64) NOT NULL,
+                server_id VARCHAR(128) NOT NULL,
+                datacenter VARCHAR(64) NOT NULL,
+                secret_type VARCHAR(32) NOT NULL DEFAULT 'root_password',
+                secret_value_enc TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_server_secret (server_id, secret_type)
+            )
+        `);
 
         // Key Pairs table
         await connection.execute(`
@@ -537,6 +556,63 @@ async function storeKeyPair(telegramId, serverId, keyName, privateKey) {
     }
 }
 
+
+function getServerSecretKey() {
+    if (!process.env.SERVER_SECRET_KEY) {
+        const err = new Error('SERVER_SECRET_KEY_MISSING');
+        err.code = 'SERVER_SECRET_KEY_MISSING';
+        throw err;
+    }
+    return crypto.createHash('sha256').update(process.env.SERVER_SECRET_KEY).digest();
+}
+
+function encryptServerSecret(secretValue) {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', getServerSecretKey(), iv);
+    const data = Buffer.concat([cipher.update(String(secretValue), 'utf8'), cipher.final()]);
+    return JSON.stringify({
+        iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        data: data.toString('base64')
+    });
+}
+
+function decryptServerSecret(payload) {
+    const parsed = JSON.parse(payload);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getServerSecretKey(), Buffer.from(parsed.iv, 'base64'));
+    decipher.setAuthTag(Buffer.from(parsed.tag, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(parsed.data, 'base64')), decipher.final()]).toString('utf8');
+}
+
+async function upsertServerSecret({ telegramId, serverId, datacenter, secretType = 'root_password', secretValue }) {
+    if (!telegramId || !serverId || !datacenter || !secretValue) throw new Error('INVALID_SERVER_SECRET_INPUT');
+    const encrypted = encryptServerSecret(secretValue);
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(
+            `INSERT INTO server_secrets (telegram_id, server_id, datacenter, secret_type, secret_value_enc)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE telegram_id = VALUES(telegram_id), datacenter = VALUES(datacenter), secret_value_enc = VALUES(secret_value_enc)`,
+            [String(telegramId), String(serverId), String(datacenter), String(secretType), encrypted]
+        );
+        return true;
+    } finally {
+        conn.release();
+    }
+}
+
+async function getServerSecret(serverId, secretType = 'root_password') {
+    if (!serverId) return null;
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute('SELECT secret_value_enc FROM server_secrets WHERE server_id = ? AND secret_type = ? LIMIT 1', [String(serverId), String(secretType)]);
+        if (!rows.length) return null;
+        return decryptServerSecret(rows[0].secret_value_enc);
+    } finally {
+        conn.release();
+    }
+}
+
 async function getKeyPair(serverId) {
     const conn = await pool.getConnection();
     try {
@@ -587,5 +663,7 @@ module.exports = {
     getPurchaseByServerId,
     getUserActivePurchases,
     deleteTestServer,
+    upsertServerSecret,
+    getServerSecret,
 };
 
