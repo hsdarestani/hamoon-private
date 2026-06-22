@@ -354,6 +354,22 @@ async function getPurchaseByServerId(serverId) {
     }
 }
 
+async function getUserActivePurchases(telegramId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT * FROM purchases
+             WHERE telegram_id = ?
+               AND (status IS NULL OR status NOT IN ('deleted','cancelled'))
+             ORDER BY created_at DESC`,
+            [String(telegramId)]
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
 async function hasUsedFreeTestServer(telegramId, datacenter) {
     const conn = await pool.getConnection();
     try {
@@ -569,6 +585,7 @@ module.exports = {
     updatePurchaseCycle,
     updateUserShahkar,
     getPurchaseByServerId,
+    getUserActivePurchases,
     deleteTestServer,
 };
 

@@ -113,7 +113,7 @@ afracloud: {
     resumeServer: true,
     resetPassword: true,
     resetPasswordLabel: '🔑 دریافت رمز عبور',
-    privateKey: true,
+    privateKey: false,
     traffic: false,
     projectTraffic: false,
     rebuild: false,
@@ -121,8 +121,8 @@ afracloud: {
     listSnapshots: false,
     buildFromSnapshot: false,
     changeCycle: false,
-    createKeyPair: true,
-    deleteKeyPair: true
+    createKeyPair: false,
+    deleteKeyPair: false
   },
 
   flavors: [],
