@@ -27,7 +27,7 @@ const PROVIDER_CAPABILITIES = {
     resumeServer: true,
     resetPassword: true,
     resetPasswordLabel: '🔑 دریافت رمز عبور',
-    privateKey: true,
+    privateKey: false,
     traffic: false,
     projectTraffic: false,
     rebuild: false,
@@ -35,8 +35,8 @@ const PROVIDER_CAPABILITIES = {
     listSnapshots: false,
     buildFromSnapshot: false,
     changeCycle: false,
-    createKeyPair: true,
-    deleteKeyPair: true
+    createKeyPair: false,
+    deleteKeyPair: false
   },
   hetzner: {},
   openstack: {}

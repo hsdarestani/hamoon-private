@@ -7,7 +7,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
-    "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js"
+    "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
+    "validate:syntax": "node -c index.js && node -c db.js && node -c cloud-api.js && node -c Afracloud/afracloud-api.js",
+    "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js"
   },
   "keywords": [],
   "author": "",
