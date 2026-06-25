@@ -702,28 +702,52 @@ async function adminAuditLog(action, actor, target = {}, metadata = {}, ip = nul
 
 async function pingDatabase() { const conn = await pool.getConnection(); try { await conn.query('SELECT 1'); return true; } finally { conn.release(); } }
 
+
 async function getAdminOverviewStats() {
     const conn = await pool.getConnection();
     try {
-        const [[users]] = await conn.query('SELECT COUNT(*) total_users, SUM(shahkar_verified = 1) shahkar_verified, COALESCE(SUM(wallet),0) total_wallet_balance FROM users');
-        const [[servers]] = await conn.query(`SELECT SUM(status='active') active_servers, SUM(status IN ('suspended','stopped')) suspended_servers,
-            SUM(datacenter='afracloud') afracloud_servers, SUM(datacenter='hetzner') hetzner_servers, SUM(datacenter NOT IN ('afracloud','hetzner')) tebyan_servers,
-            COALESCE(SUM(CASE WHEN status='active' THEN amount ELSE 0 END),0) monthly_revenue_estimate FROM purchases WHERE status <> 'deleted'`);
-        const [[purchases]] = await conn.query(`SELECT SUM(DATE(created_at)=CURDATE()) purchases_today, SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) purchases_month FROM purchases`);
-        const [[alerts]] = await conn.query(`SELECT COUNT(*) failed_operations FROM wallet_logs WHERE type LIKE '%fail%' OR description LIKE '%failed%' OR description LIKE '%خطا%'`);
-        return { ...users, ...servers, ...purchases, ...alerts };
+        const [[users]] = await conn.query(`SELECT COUNT(*) totalUsers, COALESCE(SUM(shahkar_verified = 1),0) shahkarVerifiedUsers, COALESCE(SUM(wallet),0) totalWalletBalance FROM users`);
+        const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('suspended','stopped')),0) suspendedServers,
+            COALESCE(SUM(status='deleted'),0) deletedServers, COUNT(*) totalPurchases,
+            COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter='hetzner'),0) hetznerServers,
+            COALESCE(SUM(datacenter LIKE '%openstack%'),0) openstackServers, COALESCE(SUM(datacenter='tebyan'),0) tebyanServers,
+            COALESCE(SUM(CASE WHEN status='active' THEN amount ELSE 0 END),0) estimatedMonthlyRevenue FROM purchases`);
+        const [[purchases]] = await conn.query(`SELECT COALESCE(SUM(DATE(created_at)=CURDATE()),0) purchasesToday, COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')),0) purchasesThisMonth FROM purchases`);
+        const [[revenue]] = await conn.query(`SELECT COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND DATE(timestamp)=CURDATE() THEN amount ELSE 0 END),0) revenueToday,
+            COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND timestamp >= DATE_FORMAT(CURDATE(), '%Y-%m-01') THEN amount ELSE 0 END),0) revenueThisMonth FROM wallet_logs`);
+        const [[alerts]] = await conn.query(`SELECT COUNT(*) failedOperationsLast24h FROM admin_audit_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND action LIKE '%failed%'`).catch(async()=>[[{failedOperationsLast24h:0}]]);
+        return { ...users, ...servers, ...purchases, ...revenue, ...alerts };
     } finally { conn.release(); }
 }
 
-async function dailyStats(table, dateField, valueExpr, days = 30) {
+function emptySeries(days) {
     const d = Math.min(Math.max(parseInt(days,10)||30,1),90);
-    const conn = await pool.getConnection();
-    try { const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [d]); return rows; }
-    finally { conn.release(); }
+    const out = [];
+    const now = new Date();
+    for (let i = d - 1; i >= 0; i--) {
+        const x = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+        out.push({ day: x.toISOString().slice(0,10), value: 0 });
+    }
+    return out;
 }
-async function getAdminRevenueStats(days) { return dailyStats('purchases','created_at','COALESCE(SUM(amount),0)',days); }
+
+async function dailyStats(table, dateField, valueExpr, days = 30) {
+    const series = emptySeries(days);
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [series.length]);
+        const byDay = new Map(rows.map(r => [String(r.day).slice(0,10), Number(r.value) || 0]));
+        return series.map(r => ({ ...r, value: byDay.get(r.day) || 0 }));
+    } finally { conn.release(); }
+}
+async function getAdminRevenueStats(days) { return dailyStats('wallet_logs','timestamp',`COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 THEN amount ELSE 0 END),0)`,days); }
 async function getAdminPurchaseStats(days) { return dailyStats('purchases','created_at','COUNT(*)',days); }
-async function getAdminDatacenterStats() { const conn=await pool.getConnection(); try { const [rows]=await conn.query('SELECT datacenter, status, COUNT(*) count FROM purchases GROUP BY datacenter,status'); return rows; } finally {conn.release();} }
+async function getAdminDatacenterStats() { const conn=await pool.getConnection(); try { const [rows]=await conn.query('SELECT datacenter, status, COUNT(*) count FROM purchases GROUP BY datacenter,status ORDER BY datacenter,status'); return rows; } finally {conn.release();} }
+async function getAdminWalletFlowStats(days) {
+    const credits = await dailyStats('wallet_logs','timestamp',`COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)`,days);
+    const debits = await dailyStats('wallet_logs','timestamp',`COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END),0)`,days);
+    return credits.map((r,i)=>({ day:r.day, credits:r.value, debits:debits[i]?.value || 0 }));
+}
 
 async function listAdminUsers(filters = {}) {
     const limit = toLimit(filters.limit); const offset = pageOffset(filters.page, limit); const where=[]; const params=[];
@@ -740,8 +764,8 @@ async function listAdminUsers(filters = {}) {
     } finally {conn.release();}
 }
 
-async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT * FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
-async function listAdminServers(filters={}) { const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ?)');params.push(...Array(3).fill('%'+filters.search+'%'));} ['datacenter','status'].forEach(k=>{if(filters[k]){where.push('p.'+k+'=?');params.push(filters[k]);}}); if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT p.*, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
+async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
+async function listAdminServers(filters={}) { const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ? OR u.phone LIKE ?)');params.push(...Array(4).fill('%'+filters.search+'%'));} ['datacenter','status'].forEach(k=>{if(filters[k]){where.push('p.'+k+'=?');params.push(filters[k]);}}); if(filters.provider){where.push('p.datacenter=?');params.push(filters.provider);} if(filters.hasPassword==='yes')where.push("EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.hasPassword==='no')where.push("NOT EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT p.*, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
 async function getAdminServerDetail(serverId){ const conn=await pool.getConnection(); try{const [[purchase]]=await conn.query("SELECT p.*,u.phone,u.wallet, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE p.server_id=?",[String(serverId)]); if(!purchase)return null; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? AND description LIKE ? ORDER BY timestamp DESC LIMIT 50',[String(purchase.telegram_id),'%'+serverId+'%']); return {purchase,user:{telegram_id:purchase.telegram_id,phone:purchase.phone,wallet:purchase.wallet},wallet_logs,password_stored:!!purchase.password_stored};}finally{conn.release();}}
 async function listAdminPurchases(filters={}){return listAdminServers(filters);}
 async function listAdminWalletLogs(filters={}){const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(w.telegram_id LIKE ? OR w.description LIKE ?)');params.push('%'+filters.search+'%','%'+filters.search+'%');} if(filters.type){where.push('w.type=?');params.push(filters.type);} if(filters.from){where.push('w.timestamp>=?');params.push(filters.from);} if(filters.to){where.push('w.timestamp<=?');params.push(filters.to);} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT w.*,u.wallet current_balance FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id ${whereSql} ORDER BY w.timestamp DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM wallet_logs w ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
@@ -758,6 +782,7 @@ module.exports = {
     getAdminRevenueStats,
     getAdminPurchaseStats,
     getAdminDatacenterStats,
+    getAdminWalletFlowStats,
     listAdminUsers,
     getAdminUserDetail,
     listAdminServers,
