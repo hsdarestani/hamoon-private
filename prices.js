@@ -14,7 +14,7 @@ const prices = {
 // خروجی کمکی: تبدیل دلار به تومان با اعمال حاشیه سود
 
 // نرخ دلار به تومان و درصد سود (مقدار پیش‌فرض؛ قابل override با .env)
-const USD_TO_TOMAN = parseFloat(process.env.USD_TO_TOMAN || '65000'); // مثلا 65هزار
+const USD_TO_TOMAN = parseFloat(process.env.USD_TO_TOMAN || '80000'); // مثلا 65هزار
 const USD_MARGIN   = parseFloat(process.env.USD_MARGIN   || '0.15');  // 15% سود
 
 // گرد کردن به تومان (عدد صحیح)

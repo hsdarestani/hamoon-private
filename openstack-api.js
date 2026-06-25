@@ -208,7 +208,15 @@ async function createServer(config, tok, name, flavorRef, imageRef, keyName, met
       key_name: keyName || null,
     };
 
-    if (options.user_data) serverDetails.user_data = Buffer.from(String(options.user_data), 'utf8').toString('base64');
+    if (options.user_data) {
+      serverDetails.user_data = Buffer.from(String(options.user_data), 'utf8').toString('base64');
+
+      // Tebyan metadata service is not available in this environment.
+      // Force config-drive so cloud-init can receive user_data/root-password config.
+      if (config?.key === 'tebyan') {
+        serverDetails.config_drive = true;
+      }
+    }
     if (Array.isArray(options.security_groups) && options.security_groups.length) serverDetails.security_groups = options.security_groups.map(name => ({ name }));
 
     const forceImageBoot = config?.key === 'tebyan' && config.TEBYAN_ENABLE_BOOT_FROM_VOLUME !== true && !isSnapshot;

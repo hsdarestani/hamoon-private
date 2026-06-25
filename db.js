@@ -909,6 +909,7 @@ async function globalAdminSearch(q, limit = 8) {
     } finally { conn.release(); }
 }
 
+
 async function listAdminUsers(filters = {}) {
     const pageSize = toLimit(filters.pageSize || filters.limit, 50, 200);
     const page = Math.max(parseInt(filters.page, 10) || 1, 1);
@@ -917,48 +918,139 @@ async function listAdminUsers(filters = {}) {
     const status = String(filters.status || '').trim();
     const datacenter = String(filters.datacenter || '').trim();
     const dir = String(filters.dir || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    // Force one collation inside the users query. This avoids ER_CANT_AGGREGATE_2COLLATIONS
+    // even if older tables were created with different utf8mb4 collations.
+    const norm = (expr) => `CONVERT(${expr} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+
     const conn = await pool.getConnection();
     try {
         const userCols = await tableColumns(conn, 'users');
-        const canonicalSql = await adminUserCanonicalSetSql(conn);
+
+        const canonicalSql = `
+            SELECT DISTINCT telegram_id
+            FROM (
+                SELECT ${norm('telegram_id')} AS telegram_id FROM users WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+                UNION
+                SELECT ${norm('telegram_id')} AS telegram_id FROM wallet_logs WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+                UNION
+                SELECT ${norm('telegram_id')} AS telegram_id FROM purchases WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+                UNION
+                SELECT ${norm('telegram_id')} AS telegram_id FROM test_servers WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+                UNION
+                SELECT ${norm('telegram_id')} AS telegram_id FROM key_pairs WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+                UNION
+                SELECT ${norm('telegram_id')} AS telegram_id FROM server_secrets WHERE telegram_id IS NOT NULL AND telegram_id <> ''
+            ) canonical_users
+        `;
+
         const searchCandidates = ['phone','phone_number','national_id','national_code','card_number','username','first_name','last_name','name'];
         const searchCols = searchCandidates.filter(c => userCols.has(c));
+
         const phoneExpr = userCols.has('phone') ? 'u.phone' : (userCols.has('phone_number') ? 'u.phone_number' : 'NULL');
         const nationalExpr = userCols.has('national_id') ? 'u.national_id' : (userCols.has('national_code') ? 'u.national_code' : 'NULL');
         const shahkarExpr = userCols.has('shahkar_verified') ? 'u.shahkar_verified' : 'NULL';
         const createdExpr = userCols.has('created_at') ? 'u.created_at' : 'NULL';
         const updatedExpr = userCols.has('updated_at') ? 'u.updated_at' : 'NULL';
+
         const where = [];
         const params = [];
+
         if (q) {
             const like = `%${q}%`;
             const clauses = ['cu.telegram_id = ?', 'cu.telegram_id LIKE ?'];
             params.push(q, like);
-            for (const col of searchCols) { clauses.push(`u.${col} LIKE ?`); params.push(like); }
+
+            for (const col of searchCols) {
+                clauses.push(`${norm('u.' + col)} LIKE ?`);
+                params.push(like);
+            }
+
             where.push(`(${clauses.join(' OR ')})`);
         }
-        if (status) { where.push('EXISTS (SELECT 1 FROM purchases ps WHERE ps.telegram_id = cu.telegram_id AND ps.status = ?)'); params.push(status); }
-        if (datacenter) { where.push('EXISTS (SELECT 1 FROM purchases pd WHERE pd.telegram_id = cu.telegram_id AND pd.datacenter = ?)'); params.push(datacenter); }
+
+        if (status) {
+            where.push(`EXISTS (
+                SELECT 1 FROM purchases ps
+                WHERE ${norm('ps.telegram_id')} = cu.telegram_id
+                  AND ps.status = ?
+            )`);
+            params.push(status);
+        }
+
+        if (datacenter) {
+            where.push(`EXISTS (
+                SELECT 1 FROM purchases pd
+                WHERE ${norm('pd.telegram_id')} = cu.telegram_id
+                  AND pd.datacenter = ?
+            )`);
+            params.push(datacenter);
+        }
+
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
         const pending = PENDING_SERVER_STATUSES;
+
         const baseFrom = `FROM (${canonicalSql}) cu
-            LEFT JOIN users u ON u.telegram_id = cu.telegram_id
-            LEFT JOIN (SELECT telegram_id, COALESCE(SUM(amount),0) wallet_balance, MAX(timestamp) last_wallet_log_at FROM wallet_logs GROUP BY telegram_id) wl ON wl.telegram_id = cu.telegram_id
-            LEFT JOIN (SELECT telegram_id, COUNT(*) purchases_count,
+            LEFT JOIN users u
+                ON ${norm('u.telegram_id')} = cu.telegram_id
+
+            LEFT JOIN (
+                SELECT
+                    ${norm('telegram_id')} AS telegram_id,
+                    COALESCE(SUM(amount),0) wallet_balance,
+                    MAX(timestamp) last_wallet_log_at
+                FROM wallet_logs
+                GROUP BY ${norm('telegram_id')}
+            ) wl
+                ON wl.telegram_id = cu.telegram_id
+
+            LEFT JOIN (
+                SELECT
+                    ${norm('telegram_id')} AS telegram_id,
+                    COUNT(*) purchases_count,
                     COALESCE(SUM(status='active'),0) active_servers,
                     COALESCE(SUM(status IN (${sqlIn(pending)})),0) pending_servers,
                     COALESCE(SUM(status='deleted'),0) deleted_servers,
                     MAX(created_at) last_purchase_at
-                FROM purchases GROUP BY telegram_id) pa ON pa.telegram_id = cu.telegram_id`;
+                FROM purchases
+                GROUP BY ${norm('telegram_id')}
+            ) pa
+                ON pa.telegram_id = cu.telegram_id`;
+
         const sort = adminUserSortSql(filters.sort);
-        const select = `SELECT cu.telegram_id, ${phoneExpr} phone, ${nationalExpr} national_id, ${shahkarExpr} shahkar_verified,
-                COALESCE(wl.wallet_balance,0) wallet_balance, COALESCE(wl.wallet_balance,0) wallet,
-                COALESCE(pa.purchases_count,0) purchases_count, COALESCE(pa.active_servers,0) active_servers,
-                COALESCE(pa.pending_servers,0) pending_servers, COALESCE(pa.deleted_servers,0) deleted_servers,
-                pa.last_purchase_at, wl.last_wallet_log_at, ${createdExpr} created_at, ${updatedExpr} updated_at,
-                GREATEST(COALESCE(pa.last_purchase_at,'1000-01-01'), COALESCE(wl.last_wallet_log_at,'1000-01-01'), COALESCE(${createdExpr},'1000-01-01'), COALESCE(${updatedExpr},'1000-01-01')) last_activity_at`;
-        const [rows] = await conn.query(`${select} ${baseFrom} ${whereSql} ORDER BY ${sort} ${dir}, cu.telegram_id ASC LIMIT ? OFFSET ?`, [...pending, ...params, pageSize, offset]);
-        const [[count]] = await conn.query(`SELECT COUNT(*) total ${baseFrom} ${whereSql}`, [...pending, ...params]);
+
+        const select = `SELECT
+                cu.telegram_id,
+                ${phoneExpr} phone,
+                ${nationalExpr} national_id,
+                ${shahkarExpr} shahkar_verified,
+                COALESCE(wl.wallet_balance,0) wallet_balance,
+                COALESCE(wl.wallet_balance,0) wallet,
+                COALESCE(pa.purchases_count,0) purchases_count,
+                COALESCE(pa.active_servers,0) active_servers,
+                COALESCE(pa.pending_servers,0) pending_servers,
+                COALESCE(pa.deleted_servers,0) deleted_servers,
+                pa.last_purchase_at,
+                wl.last_wallet_log_at,
+                ${createdExpr} created_at,
+                ${updatedExpr} updated_at,
+                GREATEST(
+                    COALESCE(pa.last_purchase_at,'1000-01-01'),
+                    COALESCE(wl.last_wallet_log_at,'1000-01-01'),
+                    COALESCE(${createdExpr},'1000-01-01'),
+                    COALESCE(${updatedExpr},'1000-01-01')
+                ) last_activity_at`;
+
+        const [rows] = await conn.query(
+            `${select} ${baseFrom} ${whereSql} ORDER BY ${sort} ${dir}, cu.telegram_id ASC LIMIT ? OFFSET ?`,
+            [...pending, ...params, pageSize, offset]
+        );
+
+        const [[count]] = await conn.query(
+            `SELECT COUNT(*) total ${baseFrom} ${whereSql}`,
+            [...pending, ...params]
+        );
+
         rows.forEach(r => {
             r.phone = maskLast4(r.phone);
             r.phone_masked = r.phone;
@@ -967,11 +1059,73 @@ async function listAdminUsers(filters = {}) {
             r.national_code_masked = r.national_id;
             if (String(r.last_activity_at).startsWith('1000-01-01')) r.last_activity_at = null;
         });
+
         return { ok: true, page, pageSize, total: count.total, rows };
-    } finally { conn.release(); }
+    } finally {
+        conn.release();
+    }
 }
 
-async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
+
+
+async function getAdminUserDetail(telegramId) {
+    const tid = String(telegramId);
+    const norm = (expr) => `CONVERT(${expr} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+    const conn = await pool.getConnection();
+
+    try {
+        const [usersRows] = await conn.query(
+            `SELECT *
+             FROM users
+             WHERE ${norm('telegram_id')} = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             LIMIT 1`,
+            [tid]
+        );
+
+        const user = usersRows[0] || { telegram_id: tid };
+
+        const [[walletRow]] = await conn.query(
+            `SELECT COALESCE(SUM(amount),0) wallet
+             FROM wallet_logs
+             WHERE ${norm('telegram_id')} = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci`,
+            [tid]
+        );
+
+        user.wallet = Number(walletRow?.wallet || 0);
+
+        const [wallet_logs] = await conn.query(
+            `SELECT *
+             FROM wallet_logs
+             WHERE ${norm('telegram_id')} = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             ORDER BY timestamp DESC
+             LIMIT 100`,
+            [tid]
+        );
+
+        const [servers] = await conn.query(
+            `SELECT *
+             FROM purchases
+             WHERE ${norm('telegram_id')} = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             ORDER BY created_at DESC
+             LIMIT 200`,
+            [tid]
+        );
+
+        user.phone_masked = typeof maskLast4 === 'function' ? maskLast4(user.phone || user.phone_number) : (user.phone || user.phone_number || null);
+        user.national_code_masked = typeof maskLast4 === 'function' ? maskLast4(user.national_code || user.national_id) : (user.national_code || user.national_id || null);
+        user.national_id_masked = user.national_code_masked;
+
+        return {
+            user,
+            wallet_logs,
+            servers
+        };
+    } finally {
+        conn.release();
+    }
+}
+
+
 async function listAdminServers(filters={}) {
     const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[];
     if(filters.search){ const q='%'+filters.search+'%'; where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ? OR p.datacenter LIKE ? OR p.status LIKE ? OR p.os_label LIKE ? OR p.flavor_id LIKE ? OR p.duration LIKE ? OR u.phone LIKE ?)'); params.push(q,q,q,q,q,q,q,q,q); }
