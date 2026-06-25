@@ -45,6 +45,9 @@ function createDashboardApiRouter() {
   router.use(requireAuth, requireAdminAction);
   router.get('/me', (req,res)=>jsonOk(res,{user:req.admin.actor, configured:adminConfigured()}));
   router.get('/overview', async (_req,res,next)=>{ try{jsonOk(res, await db.getAdminOverviewStats());}catch(e){next(e);} });
+  router.get('/metrics/:metric/details', async (req,res,next)=>{ try{const data=await db.getAdminMetricDetails(req.params.metric, req.query); data?res.json(data):jsonError(res,404,'METRIC_NOT_FOUND','شاخص پیدا نشد.');}catch(e){next(e);} });
+  router.get('/metrics/:metric/export.csv', async (req,res,next)=>{ try{const data=await db.getAdminMetricDetails(req.params.metric, {...req.query,pageSize:200}); if(!data)return jsonError(res,404,'METRIC_NOT_FOUND','شاخص پیدا نشد.'); res.type('text/csv').send(csv(data.rows));}catch(e){next(e);} });
+  router.get('/search', async (req,res,next)=>{ try{jsonOk(res, await db.globalAdminSearch(req.query.q, req.query.limit));}catch(e){next(e);} });
   router.get('/charts/revenue', async (req,res,next)=>{ try{jsonOk(res, await db.getAdminRevenueStats(req.query.days));}catch(e){next(e);} });
   router.get('/charts/purchases', async (req,res,next)=>{ try{jsonOk(res, await db.getAdminPurchaseStats(req.query.days));}catch(e){next(e);} });
   router.get('/charts/servers-by-datacenter', async (_req,res,next)=>{ try{jsonOk(res, await db.getAdminDatacenterStats());}catch(e){next(e);} });

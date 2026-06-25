@@ -711,14 +711,16 @@ async function getAdminOverviewStats() {
     const conn = await pool.getConnection();
     try {
         const [[users]] = await conn.query(`SELECT COUNT(*) totalUsers, COALESCE(SUM(shahkar_verified = 1),0) shahkarVerifiedUsers, COALESCE(SUM(wallet),0) totalWalletBalance FROM users`);
-        const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('suspended','stopped')),0) suspendedServers,
+        const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,
             COALESCE(SUM(status='deleted'),0) deletedServers, COUNT(*) totalPurchases,
             COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter='hetzner'),0) hetznerServers,
             COALESCE(SUM(datacenter LIKE '%openstack%'),0) openstackServers, COALESCE(SUM(datacenter='tebyan'),0) tebyanServers,
             COALESCE(SUM(CASE WHEN status='active' THEN amount ELSE 0 END),0) estimatedMonthlyRevenue FROM purchases`);
         const [[purchases]] = await conn.query(`SELECT COALESCE(SUM(DATE(created_at)=CURDATE()),0) purchasesToday, COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')),0) purchasesThisMonth FROM purchases`);
         const [[revenue]] = await conn.query(`SELECT COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND DATE(timestamp)=CURDATE() THEN amount ELSE 0 END),0) revenueToday,
-            COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND timestamp >= DATE_FORMAT(CURDATE(), '%Y-%m-01') THEN amount ELSE 0 END),0) revenueThisMonth FROM wallet_logs`);
+            COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND timestamp >= DATE_FORMAT(CURDATE(), '%Y-%m-01') THEN amount ELSE 0 END),0) revenueThisMonth,
+            COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND timestamp >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN amount ELSE 0 END),0) revenue30d,
+            COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 THEN 1 ELSE 0 END),0) approvedTopups FROM wallet_logs`);
         const [[alerts]] = await conn.query(`SELECT COUNT(*) failedOperationsLast24h FROM admin_audit_logs WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND action LIKE '%failed%'`).catch(async()=>[[{failedOperationsLast24h:0}]]);
         return { ...users, ...servers, ...purchases, ...revenue, ...alerts };
     } finally { conn.release(); }
@@ -751,6 +753,116 @@ async function getAdminWalletFlowStats(days) {
     const credits = await dailyStats('wallet_logs','timestamp',`COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)`,days);
     const debits = await dailyStats('wallet_logs','timestamp',`COALESCE(SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END),0)`,days);
     return credits.map((r,i)=>({ day:r.day, credits:r.value, debits:debits[i]?.value || 0 }));
+}
+
+
+const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];
+const REVENUE_WALLET_TYPES = ['credit','deposit','payment','topup','admin_credit'];
+const APPROVED_TOPUP_TYPES = ['credit','deposit','payment','topup','admin_credit'];
+
+function sqlIn(values) { return values.map(() => '?').join(','); }
+function metricDateWhere(metric, field) {
+    if (metric.endsWith('_today')) return `${field} >= CURDATE() AND ${field} < DATE_ADD(CURDATE(), INTERVAL 1 DAY)`;
+    if (metric.endsWith('_month')) return `${field} >= DATE_FORMAT(CURDATE(), '%Y-%m-01')`;
+    if (metric.endsWith('_30d')) return `${field} >= DATE_SUB(NOW(), INTERVAL 30 DAY)`;
+    return '1=1';
+}
+function metricSort(sort, fallback, allow) { return allow[sort] || fallback; }
+function withSearch(base, params, q, fields) {
+    if (!q) return base;
+    const like = `%${q}%`;
+    params.push(...fields.map(() => like));
+    return `${base} AND (${fields.map(f => `${f} LIKE ?`).join(' OR ')})`;
+}
+
+function metricConfig(metric) {
+    const purchaseCols = [
+        { key:'server_name', label:'نام سرور' }, { key:'server_id', label:'شناسه سرور' }, { key:'telegram_id', label:'کاربر' },
+        { key:'datacenter', label:'دیتاسنتر' }, { key:'status', label:'وضعیت' }, { key:'amount', label:'مبلغ' }, { key:'created_at', label:'تاریخ ایجاد' }
+    ];
+    const walletCols = [
+        { key:'telegram_id', label:'کاربر' }, { key:'amount', label:'مبلغ' }, { key:'type', label:'نوع' },
+        { key:'description', label:'شرح' }, { key:'timestamp', label:'زمان' }
+    ];
+    const purchaseSelect = 'p.server_id,p.telegram_id,p.datacenter,p.server_name,p.flavor_id,p.amount,p.duration,p.status,p.created_at,p.updated_at,u.phone';
+    const configs = {
+        users_total: { title:'کل کاربران', kind:'users', columns:[{key:'telegram_id',label:'تلگرام'},{key:'phone_masked',label:'تلفن'},{key:'wallet',label:'کیف پول'},{key:'purchases_count',label:'خریدها'},{key:'active_servers',label:'سرور فعال'},{key:'created_at',label:'ایجاد'}], where:'1=1' },
+        users_with_positive_balance: { title:'کاربران دارای موجودی مثبت', kind:'users', columns:[{key:'telegram_id',label:'تلگرام'},{key:'phone_masked',label:'تلفن'},{key:'wallet',label:'کیف پول'},{key:'created_at',label:'ایجاد'}], where:'u.wallet > 0' },
+        total_balance: { title:'موجودی کل کاربران', kind:'users', sumField:'wallet', columns:[{key:'telegram_id',label:'تلگرام'},{key:'phone_masked',label:'تلفن'},{key:'wallet',label:'موجودی'},{key:'updated_at',label:'آخرین تغییر'}], where:'u.wallet <> 0' },
+        approved_topups: { title:'شارژهای تأیید شده', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(APPROVED_TOPUP_TYPES)})`, params:[...APPROVED_TOPUP_TYPES] },
+        servers_active: { title:'سرورهای فعال', kind:'purchases', columns:purchaseCols, where:"p.status IN ('active')" },
+        servers_pending: { title:'سرورهای معلق/در انتظار', kind:'purchases', columns:purchaseCols, where:`p.status IN (${sqlIn(PENDING_SERVER_STATUSES)})`, params:[...PENDING_SERVER_STATUSES] },
+        servers_deleted: { title:'سرورهای حذف‌شده', kind:'purchases', columns:purchaseCols, where:"p.status='deleted'" },
+        purchases_total: { title:'کل خریدها', kind:'purchases', columns:purchaseCols, where:'1=1' },
+        purchases_today: { title:'خریدهای امروز', kind:'purchases', columns:purchaseCols, where:metricDateWhere('purchases_today','p.created_at') },
+        purchases_month: { title:'خریدهای ماه جاری', kind:'purchases', columns:purchaseCols, where:metricDateWhere('purchases_month','p.created_at') },
+        revenue_today: { title:'درآمد امروز', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_today','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
+        revenue_month: { title:'درآمد ماه', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_month','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
+        revenue_30d: { title:'درآمد ۳۰ روز', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_30d','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
+        datacenter_tebyan: { title:'سرورهای Tebyan', kind:'purchases', columns:purchaseCols, where:"p.datacenter='tebyan'" },
+        datacenter_hetzner: { title:'سرورهای Hetzner', kind:'purchases', columns:purchaseCols, where:"p.datacenter='hetzner'" },
+        datacenter_afracloud: { title:'سرورهای AfraCloud', kind:'purchases', columns:purchaseCols, where:"p.datacenter='afracloud'" },
+        datacenter_openstack: { title:'سرورهای OpenStack', kind:'purchases', columns:purchaseCols, where:"p.datacenter LIKE '%openstack%'" },
+        errors_24h: { title:'خطاهای ۲۴ ساعت', kind:'audit', columns:[{key:'actor',label:'ادمین'},{key:'action',label:'عملیات'},{key:'target_type',label:'نوع'},{key:'target_id',label:'هدف'},{key:'metadata',label:'جزئیات'},{key:'created_at',label:'زمان'}], where:"a.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND a.action LIKE '%failed%'" }
+    };
+    const cfg = configs[metric];
+    if (cfg && cfg.kind === 'purchases') cfg.select = purchaseSelect;
+    return cfg || null;
+}
+
+async function getAdminMetricDetails(metric, filters = {}) {
+    await ensureAdminAuditLogsTable().catch(() => {});
+    const cfg = metricConfig(metric);
+    if (!cfg) return null;
+    const pageSize = toLimit(filters.pageSize || filters.limit, 50, 200);
+    const page = Math.max(parseInt(filters.page, 10) || 1, 1);
+    const offset = (page - 1) * pageSize;
+    const params = [...(cfg.params || [])];
+    let where = cfg.where || '1=1';
+    const q = String(filters.q || filters.search || '').trim();
+    const dir = String(filters.dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const conn = await pool.getConnection();
+    try {
+        let rows, count, metricTotal;
+        if (cfg.kind === 'users') {
+            where = withSearch(where, params, q, ['u.telegram_id','u.phone','u.national_code']);
+            const sort = metricSort(filters.sort, 'u.created_at', {telegram_id:'u.telegram_id', wallet:'u.wallet', created_at:'u.created_at', updated_at:'u.updated_at'});
+            [rows] = await conn.query(`SELECT u.telegram_id,u.phone,u.wallet,u.created_at,u.updated_at,COUNT(p.server_id) purchases_count,COALESCE(SUM(p.status='active'),0) active_servers FROM users u LEFT JOIN purchases p ON p.telegram_id=u.telegram_id WHERE ${where} GROUP BY u.telegram_id ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+            [[count]] = await conn.query(`SELECT COUNT(*) total FROM users u WHERE ${where}`, params);
+            if (metric === 'total_balance') { [[metricTotal]] = await conn.query(`SELECT COALESCE(SUM(u.wallet),0) total FROM users u WHERE ${where}`, params); }
+            rows.forEach(r => { r.phone_masked = maskLast4(r.phone); delete r.phone; });
+        } else if (cfg.kind === 'wallet') {
+            where = withSearch(where, params, q, ['w.telegram_id','w.description','w.type']);
+            const sort = metricSort(filters.sort, 'w.timestamp', {telegram_id:'w.telegram_id', amount:'w.amount', type:'w.type', timestamp:'w.timestamp'});
+            [rows] = await conn.query(`SELECT w.id,w.telegram_id,w.amount,w.type,w.description,w.timestamp,u.wallet current_balance FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id WHERE ${where} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+            [[count]] = await conn.query(`SELECT COUNT(*) total FROM wallet_logs w WHERE ${where}`, params);
+            if (metric.startsWith('revenue_')) { [[metricTotal]] = await conn.query(`SELECT COALESCE(SUM(w.amount),0) total FROM wallet_logs w WHERE ${where}`, params); }
+        } else if (cfg.kind === 'audit') {
+            where = withSearch(where, params, q, ['a.actor','a.action','a.target_type','a.target_id']);
+            const sort = metricSort(filters.sort, 'a.created_at', {actor:'a.actor', action:'a.action', target_id:'a.target_id', created_at:'a.created_at'});
+            [rows] = await conn.query(`SELECT a.* FROM admin_audit_logs a WHERE ${where} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+            [[count]] = await conn.query(`SELECT COUNT(*) total FROM admin_audit_logs a WHERE ${where}`, params);
+        } else {
+            where = withSearch(where, params, q, ['p.server_id','p.server_name','p.telegram_id','p.datacenter','p.status','p.flavor_id','u.phone']);
+            const sort = metricSort(filters.sort, 'p.created_at', {server_id:'p.server_id', server_name:'p.server_name', telegram_id:'p.telegram_id', datacenter:'p.datacenter', status:'p.status', amount:'p.amount', created_at:'p.created_at'});
+            [rows] = await conn.query(`SELECT ${cfg.select} FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE ${where} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`, [...params, pageSize, offset]);
+            [[count]] = await conn.query(`SELECT COUNT(*) total FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE ${where}`, params);
+        }
+        return { ok:true, metric, title:cfg.title, total:Number((metricTotal || count).total)||0, rowTotal:Number(count.total)||0, page, pageSize, columns:cfg.columns, rows };
+    } finally { conn.release(); }
+}
+
+async function globalAdminSearch(q, limit = 8) {
+    const text = String(q || '').trim();
+    if (!text) return { users: [], servers: [], purchases: [] };
+    const like = `%${text}%`;
+    const conn = await pool.getConnection();
+    try {
+        const [users] = await conn.query('SELECT telegram_id, phone, wallet, created_at FROM users WHERE telegram_id LIKE ? OR phone LIKE ? OR national_code LIKE ? ORDER BY created_at DESC LIMIT ?', [like, like, like, toLimit(limit, 8, 20)]);
+        users.forEach(r => { r.phone_masked = maskLast4(r.phone); delete r.phone; });
+        const [servers] = await conn.query("SELECT server_id, telegram_id, server_name, datacenter, status, created_at FROM purchases WHERE status NOT IN ('deleted','deletion_pending','provider_missing','manual_review') AND (server_id LIKE ? OR server_name LIKE ? OR telegram_id LIKE ? OR datacenter LIKE ?) ORDER BY created_at DESC LIMIT ?", [like, like, like, like, toLimit(limit, 8, 20)]);
+        return { users, servers, purchases: servers };
+    } finally { conn.release(); }
 }
 
 async function listAdminUsers(filters = {}) {
@@ -804,6 +916,8 @@ module.exports = {
     getAdminPurchaseStats,
     getAdminDatacenterStats,
     getAdminWalletFlowStats,
+    getAdminMetricDetails,
+    globalAdminSearch,
     listAdminUsers,
     getAdminUserDetail,
     listAdminServers,
