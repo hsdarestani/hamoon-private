@@ -55,7 +55,7 @@ function createDashboardApiRouter() {
   router.get('/stats/revenue', async (req,res,next)=>{ try{jsonOk(res, await db.getAdminRevenueStats(req.query.days));}catch(e){next(e);} });
   router.get('/stats/purchases', async (req,res,next)=>{ try{jsonOk(res, await db.getAdminPurchaseStats(req.query.days));}catch(e){next(e);} });
   router.get('/stats/datacenters', async (_req,res,next)=>{ try{jsonOk(res, await db.getAdminDatacenterStats());}catch(e){next(e);} });
-  router.get('/users', async (req,res,next)=>{ try{jsonOk(res, await db.listAdminUsers(req.query));}catch(e){next(e);} });
+  router.get('/users', async (req,res,next)=>{ try{res.json(await db.listAdminUsers(req.query));}catch(e){next(e);} });
   router.get('/users/:telegramId', async (req,res,next)=>{ try{const d=await db.getAdminUserDetail(req.params.telegramId); d?jsonOk(res,d):jsonError(res,404,'USER_NOT_FOUND','کاربر پیدا نشد.');}catch(e){next(e);} });
   router.get('/users/:telegramId/wallet', async (req,res,next)=>{ try{jsonOk(res,{balance:await db.getUserWallet(req.params.telegramId)});}catch(e){next(e);} });
   router.get('/users/:telegramId/wallet-logs', async (req,res,next)=>{ try{jsonOk(res, await db.listAdminWalletLogs({...req.query,search:req.params.telegramId}));}catch(e){next(e);} });
