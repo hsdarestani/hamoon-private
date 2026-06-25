@@ -225,6 +225,8 @@ function getUserEffectiveDCs(userId) {
 
 
 const prices = require('./prices');
+const { isBillablePurchaseStatus } = require('./billing-status');
+const { tcpCheck, getDefaultSshUser } = require('./provisioning-utils');
 function mdCodeBlock(s = '') {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -271,7 +273,8 @@ const {
     updateUserShahkar,
     getUserActivePurchases,
     upsertServerSecret,
-    getServerSecret
+    getServerSecret,
+    createSystemAlert
 } = require('./db');
 
 // Environment variables
@@ -1125,6 +1128,11 @@ bot.editMessageText('⏳ در حال محاسبه و تغییر دوره پرد�
     sendMessage(chatId, `❌ عملیات تغییر دوره با خطا مواجه شد: ${escapeMarkdownV2(String(e.message))}`, { parse_mode: 'MarkdownV2' });
   }
 }
+async function handleRebuildAsk(chatId, userId, serverId, dcConfig, messageId) {
+  await bot.answerCallbackQuery?.().catch?.(() => null);
+  return sendMessage(chatId, '❌ بازسازی سرور برای این ارائه‌دهنده فعلاً پشتیبانی نمی‌شود.');
+}
+
 async function handleSnapshotAsk(chatId, userId, serverId, dcConfig) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'snapshot')) return;
   const keyboard = [
@@ -1952,7 +1960,11 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
             `🔑 **کلید خصوصی شما \\(برای اتصال SSH\\):**\n\`\`\`\n${escapeMarkdownV2(privateKeyText)}\n\`\`\``;
 
 
-        sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: short('ASK_DELETE') }]] } });
+        try {
+            await sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]] } });
+        } catch (notifyErr) {
+            console.error('FREE_TRIAL_NOTIFY_ERROR', { server_id: srv.id, datacenter: dcConfig.key, message: notifyErr.message });
+        }
         logServerEvent({ type: 'test_server_created', server_id: srv.id, user_id: userId, datacenter: dcConfig.key });
 
     } catch (e) {
@@ -2188,13 +2200,14 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
         kp = await openstackApi.createKeyPair(effectiveDc, tok, keyName);
       }
       const isSnapshot = selectedImage.type === 'snapshot';
-      const serverMeta = { user: userId, type: 'purchased', datacenter: effectiveDc.key };
+      const tebyanImageBoot = effectiveDc.key === 'tebyan' && !effectiveDc.ENABLE_BOOT_FROM_VOLUME;
+      const serverMeta = { user: String(userId), type: 'purchased', datacenter: effectiveDc.key, boot_method: tebyanImageBoot ? 'image' : 'volume' };
       if (isAfra) {
         generatedRootPassword = generateStrongPassword();
         serverMeta.rootPassword = generatedRootPassword;
         serverMeta.passwordManagedByBot = true;
       }
-      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, 'volume', isSnapshot);
+      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, tebyanImageBoot ? 'image' : 'volume', isSnapshot);
       rawPrivateKey = kp?.private_key ? String(kp.private_key || '').replace(/-----BEGIN RSA PRIVATE KEY-----/g, '').replace(/-----END RSA PRIVATE KEY-----/g, '').trim() : null;
       rootPassword = isAfra ? generatedRootPassword : srv.adminPass;
     } else {
@@ -2231,13 +2244,36 @@ runcmd:
       }
     }
     await debitUser(userId, finalPrice);
-    await recordPurchase(userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle, DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, srv.id, 'volume', selectedImage.label);
+    await recordPurchase(userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle, DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, effectiveDc.key === 'tebyan' ? null : srv.id, effectiveDc.key === 'tebyan' ? 'image' : 'volume', selectedImage.label, 0,0,0,0,0,null, effectiveDc.key === 'tebyan' ? 'provisioning' : 'active');
     await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${effectiveDc.name})`, 'purchase');
     purchaseRecorded = true;
 
     let ip = extractServerIp(srv);
-    if (!ip && !isHetzner) ip = await pollForIp(effectiveDc, tok || await openstackApi.getToken(effectiveDc), srv.id, isAfra ? 3 : 24, isAfra ? 3000 : 5000);
-    if (!ip && isHetzner) ip = srv.public_net?.ipv4?.ip || null;
+    if (effectiveDc.key === 'tebyan') {
+      await updatePurchaseStatus(srv.id, 'building');
+      const maxChecks = Number(process.env.TEBYAN_DELIVERY_CHECKS || 36);
+      for (let i = 0; i < maxChecks; i++) {
+        const live = await openstackApi.getServer(effectiveDc, tok, srv.id).catch(() => null);
+        const st = String(live?.status || '').toUpperCase();
+        if (st === 'ERROR') { await updatePurchaseStatus(srv.id, 'provisioning_failed'); throw new Error('Tebyan provisioning failed with provider ERROR'); }
+        ip = extractServerIp(live) || ip;
+        if (st === 'ACTIVE' && ip) {
+          await updatePurchaseStatus(srv.id, 'pending_ssh');
+          if (await tcpCheck(ip, 22)) { await updatePurchaseStatus(srv.id, 'active'); break; }
+        } else if (st === 'ACTIVE' && !ip) {
+          await updatePurchaseStatus(srv.id, 'pending_ip');
+        }
+        await new Promise(r => setTimeout(r, Number(process.env.TEBYAN_DELIVERY_INTERVAL_MS || 10000)));
+      }
+      const finalPurchase = await getPurchaseByServerId(srv.id);
+      if (!isBillablePurchaseStatus(finalPurchase?.status)) {
+        await createSystemAlert({ severity: 'critical', code: ip ? 'PENDING_SSH_TIMEOUT' : 'PROVISIONING_TIMEOUT', title: 'Tebyan provisioning not ready', message: `server ${srv.id} not ready for delivery`, entityType: 'server', entityId: srv.id, datacenter: 'tebyan', dedupeKey: `tebyan:not-ready:${srv.id}`, metadata: { ip, status: finalPurchase?.status } }).catch(()=>{});
+        return sendMessage(chatId, '⚠️ سرور تبیان ساخته شد اما هنوز آماده تحویل نیست. پس از ACTIVE + IP + SSH توسط پشتیبانی بررسی می‌شود.', mainMenu);
+      }
+    } else {
+      if (!ip && !isHetzner) ip = await pollForIp(effectiveDc, tok || await openstackApi.getToken(effectiveDc), srv.id, isAfra ? 3 : 24, isAfra ? 3000 : 5000);
+      if (!ip && isHetzner) ip = srv.public_net?.ipv4?.ip || null;
+    }
 
     const privateKeyText = rawPrivateKey ? `-----BEGIN RSA PRIVATE KEY-----
 ${rawPrivateKey}
@@ -2251,6 +2287,7 @@ ${rawPrivateKey}
       `🔹 پلن: ${htmlEscape(planLabel)}`,
       `🔹 مبلغ ماهانه: ${htmlEscape(formatToman(finalPrice))} تومان`
     ].join('\n');
+    if (effectiveDc.key === 'tebyan') msgHtml += '\n' + `👤 <b>کاربر SSH:</b> <code>${htmlEscape(getDefaultSshUser(selectedImage.label || selectedImage.name))}</code>`;
     if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword) + '\nلطفاً رمز را در جای امن ذخیره کنید.';
     else if (isAfra) msgHtml += '\n' + serverSecretNotConfiguredMessage();
     if (privateKeyText) msgHtml += '\n' + `🔑 <b>کلید خصوصی شما (SSH):</b>\n` + htmlCodeBlock(privateKeyText);
@@ -2899,7 +2936,7 @@ async function runHourlyBilling() {
 
   // 💳 حلقه‌ی صورتحساب سرورها
   for (const purchase of allPurchases) {
-    if (purchase.status === 'deleted') continue;
+    if (!isBillablePurchaseStatus(purchase.status)) continue;
 
     const dcsForUser = getUserEffectiveDCs(String(purchase.telegram_id));
     const dcConfig = dcsForUser?.[purchase.datacenter];

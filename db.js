@@ -3,6 +3,7 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const { isBillablePurchaseStatus } = require('./billing-status');
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
@@ -152,6 +153,33 @@ async function initializeDatabase() {
                 used_at TIMESTAMP NULL,
                 PRIMARY KEY (telegram_id, datacenter),
                 FOREIGN KEY (telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE
+            )
+        `);
+
+        await ensureColumn(connection, 'test_servers', 'status', "VARCHAR(50) NOT NULL DEFAULT 'active'");
+        await ensureColumn(connection, 'test_servers', 'updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+        await ensureColumn(connection, 'test_servers', 'error_code', 'VARCHAR(128) NULL');
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS system_alerts (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                severity VARCHAR(32) NOT NULL DEFAULT 'warning',
+                code VARCHAR(128) NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                message TEXT NULL,
+                entity_type VARCHAR(64) NULL,
+                entity_id VARCHAR(255) NULL,
+                datacenter VARCHAR(64) NULL,
+                dedupe_key VARCHAR(255) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'open',
+                metadata JSON NULL,
+                first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                acknowledged_at DATETIME NULL,
+                acknowledged_by VARCHAR(128) NULL,
+                resolved_at DATETIME NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_system_alert_dedupe (dedupe_key)
             )
         `);
 
@@ -325,12 +353,12 @@ async function getWalletLogs(telegramId, limit) {
     }
 }
 
-async function recordPurchase(telegramId, serverId, datacenter, serverName, flavorId, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0, sshKeyId = null) {
+async function recordPurchase(telegramId, serverId, datacenter, serverName, flavorId, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0, sshKeyId = null, status = 'active') {
     const conn = await pool.getConnection();
     try {
         const values = [
             serverId, String(telegramId), datacenter, serverName, flavorId, amount, duration,
-            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, 'active',
+            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, status,
             lastBilledTrafficGb, freeTrafficHourlyGb, freeTrafficDailyGb,
             freeTrafficWeeklyGb, freeTrafficMonthlyGb, sshKeyId
         ];
@@ -410,7 +438,7 @@ async function getUserActivePurchases(telegramId) {
 async function hasUsedFreeTestServer(telegramId, datacenter) {
     const conn = await pool.getConnection();
     try {
-        const sql = 'SELECT * FROM test_servers WHERE telegram_id = ? AND datacenter = ?';
+        const sql = "SELECT * FROM test_servers WHERE telegram_id = ? AND datacenter = ? AND server_id IS NOT NULL AND COALESCE(status,'active') IN ('active','created')";
         const [rows] = await conn.execute(sql, [String(telegramId), datacenter]);
         return rows.length > 0;
     } finally {
@@ -421,7 +449,7 @@ async function hasUsedFreeTestServer(telegramId, datacenter) {
 async function recordTestServer(telegramId, datacenter, serverId, bootVolumeId) {
     const conn = await pool.getConnection();
     try {
-        const sql = 'INSERT INTO test_servers (telegram_id, datacenter, server_id, boot_volume_id, used_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE server_id=VALUES(server_id), boot_volume_id=VALUES(boot_volume_id), used_at=VALUES(used_at)';
+        const sql = "INSERT INTO test_servers (telegram_id, datacenter, server_id, boot_volume_id, used_at, status, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, 'active', CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE server_id=VALUES(server_id), boot_volume_id=VALUES(boot_volume_id), used_at=VALUES(used_at), status='active', error_code=NULL, updated_at=CURRENT_TIMESTAMP";
         await conn.execute(sql, [String(telegramId), datacenter, serverId, bootVolumeId]);
     } catch (error) {
         console.error(`[DB_RECORD_ERROR] Failed to record test server for user ${telegramId}:`, error);
@@ -446,7 +474,7 @@ async function deleteTestServer(serverId) {
 async function getAllPurchases() {
     const conn = await pool.getConnection();
     try {
-        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status != 'deleted'");
+        const [rows] = await conn.execute("SELECT * FROM purchases WHERE COALESCE(status,'') != 'deleted'");
         return rows;
     } finally {
         conn.release();
@@ -772,10 +800,37 @@ async function listAdminWalletLogs(filters={}){const limit=toLimit(filters.limit
 async function adminCreditUser(telegramId, amount, description='شارژ کیف پول توسط ادمین'){ await creditUser(telegramId, Number(amount)); await recordWalletLog(telegramId, Number(amount), description, 'admin_credit'); return getUserWallet(telegramId); }
 async function adminDebitUser(telegramId, amount, description='کسر کیف پول توسط ادمین'){ const ok=await debitUser(telegramId, Number(amount)); if(!ok) throw new Error('INSUFFICIENT_BALANCE'); await recordWalletLog(telegramId, -Math.abs(Number(amount)), description, 'admin_debit'); return getUserWallet(telegramId); }
 async function adminUpdatePurchaseStatus(idOrServerId,status){ await updatePurchaseStatus(idOrServerId,status); return getPurchaseByServerId(idOrServerId); }
+
+async function createSystemAlert({ severity = 'warning', code, title, message = '', entityType = null, entityId = null, datacenter = null, dedupeKey, metadata = {} }) {
+    const conn = await pool.getConnection();
+    try {
+        await conn.execute(`INSERT INTO system_alerts (severity, code, title, message, entity_type, entity_id, datacenter, dedupe_key, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE severity=VALUES(severity), title=VALUES(title), message=VALUES(message), status=IF(status='resolved','open',status), metadata=VALUES(metadata), last_seen_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP`,
+            [severity, code, title, message, entityType, entityId, datacenter, dedupeKey || `${code}:${entityId || datacenter || 'global'}`, JSON.stringify(metadata || {})]);
+    } finally { conn.release(); }
+}
+
+async function listSystemAlerts({ status = 'open', limit = 100 } = {}) {
+    const conn = await pool.getConnection();
+    try { const [rows] = await conn.execute("SELECT * FROM system_alerts WHERE (? = 'all' OR status = ?) ORDER BY last_seen_at DESC LIMIT ?", [status, status, Math.min(Number(limit)||100, 500)]); return rows; }
+    finally { conn.release(); }
+}
+
+async function updateSystemAlertStatus(id, status, actor) {
+    const conn = await pool.getConnection();
+    try { await conn.execute(`UPDATE system_alerts SET status=?, acknowledged_at=IF(?='acknowledged',CURRENT_TIMESTAMP,acknowledged_at), acknowledged_by=IF(?='acknowledged',?,acknowledged_by), resolved_at=IF(?='resolved',CURRENT_TIMESTAMP,resolved_at), updated_at=CURRENT_TIMESTAMP WHERE id=?`, [status,status,status,String(actor||'admin'),status,id]); }
+    finally { conn.release(); }
+}
+
 async function listAdminAuditLogs(limit=200){await ensureAdminAuditLogsTable(); const conn=await pool.getConnection(); try{const [rows]=await conn.query('SELECT * FROM admin_audit_logs ORDER BY created_at DESC LIMIT ?',[toLimit(limit,200,500)]); return rows;}finally{conn.release();}}
 
 module.exports = {
     pool,
+    isBillablePurchaseStatus,
+    createSystemAlert,
+    listSystemAlerts,
+    updateSystemAlertStatus,
     pingDatabase,
     ensureAdminAuditLogsTable,
     getAdminOverviewStats,

@@ -11,7 +11,9 @@
     "validate:syntax": "node -c index.js && node -c db.js && node -c cloud-api.js && node -c dashboard-api.js && node -c server.js",
     "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js",
     "dashboard": "node server.js",
-    "validate:dashboard": "node scripts/validate-dashboard.js"
+    "validate:dashboard": "node scripts/validate-dashboard.js",
+    "validate:production-patch": "node scripts/validate-production-patch.js && node scripts/validate-telegram-actions.js",
+    "reconcile:tebyan": "node scripts/reconcile-tebyan.js --dry-run"
   },
   "keywords": [],
   "author": "",
