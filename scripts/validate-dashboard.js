@@ -1,0 +1,22 @@
+'use strict';
+const fs = require('fs');
+function assert(ok, msg){ if(!ok){ console.error('FAIL:', msg); process.exitCode=1; } else console.log('OK:', msg); }
+const files = ['server.js','dashboard-api.js','db.js','public/dashboard/index.html','public/dashboard/app.js','public/dashboard/styles.css'];
+files.forEach(f=>assert(fs.existsSync(f), `${f} exists`));
+const server = fs.readFileSync('server.js','utf8');
+const api = fs.readFileSync('dashboard-api.js','utf8');
+const db = fs.readFileSync('db.js','utf8');
+const app = fs.readFileSync('public/dashboard/app.js','utf8') + fs.readFileSync('public/dashboard/index.html','utf8');
+assert(server.includes("'/dashboard/api'") || server.includes('"/dashboard/api"'), '/dashboard api mounted');
+assert(server.includes('/dashboard') && server.includes('sendFile'), '/dashboard route exists');
+assert(api.includes("router.post('/login'") || api.includes('router.post("/login"'), '/dashboard/api/login exists');
+assert(api.includes('requireAuth'), 'auth middleware exists');
+assert(db.includes('adminAuditLog'), 'admin audit log helper exists');
+assert(api.includes("router.get('/users'"), 'users API route exists');
+assert(api.includes("router.get('/servers'"), 'servers API route exists');
+assert(api.includes("router.get('/wallet/logs'"), 'wallet API route exists');
+assert(api.includes("router.get('/purchases'"), 'purchases API route exists');
+assert(api.includes('/export/users.csv') && api.includes('/export/servers.csv') && api.includes('/export/wallet.csv') && api.includes('/export/purchases.csv'), 'export endpoints exist');
+assert(!/console\.log\([^\n]*(password|secret|token)/i.test(api + server + db), 'no obvious console.log of secrets/passwords');
+assert(!app.includes('SERVER_SECRET_KEY'), 'dashboard does not expose SERVER_SECRET_KEY');
+process.exit(process.exitCode || 0);
