@@ -11,6 +11,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const cron = require('node-cron');
 const { hasCapability, getCapabilityLabel } = require('./provider-capabilities');
 const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
@@ -225,6 +226,7 @@ function getUserEffectiveDCs(userId) {
 
 
 const prices = require('./prices');
+const { formatBillingAmountLabel, formatBillingCycleFa } = require('./billing-utils');
 function mdCodeBlock(s = '') {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -239,6 +241,20 @@ function htmlEscape(s) {
 }
 function htmlCodeBlock(s) {
   return `<pre><code>${htmlEscape(s)}</code></pre>`;
+}
+
+
+function tcpCheck(host, port = 22, timeout = 4500) {
+  return new Promise(resolve => {
+    const sock = new net.Socket();
+    let done = false;
+    const finish = reachable => { if (done) return; done = true; sock.destroy(); resolve({ reachable }); };
+    sock.setTimeout(timeout);
+    sock.once('connect', () => finish(true));
+    sock.once('timeout', () => finish(false));
+    sock.once('error', () => finish(false));
+    sock.connect(port, host);
+  });
 }
 
 // API IMPORTS
@@ -324,10 +340,7 @@ function getAllowedCycles(dcConfig) {
   return Object.keys(HOURS_IN_CYCLE);
 }
 
-function getCycleLabel(cycle) {
-  const labels = { hourly: 'ساعتی', daily: 'روزانه', weekly: 'هفتگی', monthly: 'ماهانه' };
-  return labels[cycle] || cycle;
-}
+function getCycleLabel(cycle) { return formatBillingCycleFa(cycle); }
 
 function getFlavorCyclePrice(flavor, cycle) {
   if (flavor?.pricesByCycle && Number(flavor.pricesByCycle[cycle]) > 0) {
@@ -341,6 +354,45 @@ function getFlavorCyclePrice(flavor, cycle) {
 
 function formatToman(n) {
   return Number(n || 0).toLocaleString('en-US');
+}
+
+
+function buildTebyanRootPasswordCloudInit(rootPassword) {
+  const pwd = String(rootPassword).replace(/\\/g, '\\\\').replace(/"/g, '\"');
+  return `#cloud-config
+package_update: false
+ssh_pwauth: true
+disable_root: false
+
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: "${pwd}"
+      type: text
+    - name: ubuntu
+      password: "${pwd}"
+      type: text
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/60-hamoon-password-login.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication yes
+      PubkeyAuthentication yes
+      PermitRootLogin yes
+      UsePAM yes
+
+runcmd:
+  - [ bash, -lc, "passwd -u root || true" ]
+  - [ bash, -lc, "ufw allow 22/tcp || true" ]
+  - [ bash, -lc, "systemctl unmask ssh.service ssh.socket || true" ]
+  - [ bash, -lc, "systemctl enable --now ssh.socket || systemctl enable --now ssh.service || true" ]
+  - [ bash, -lc, "systemctl restart ssh.service || systemctl restart ssh.socket || true" ]
+  - [ bash, -lc, "echo HAMOON_ROOT_PASSWORD_LOGIN_ENABLED >/dev/ttyS0" ]
+  - [ bash, -lc, "echo HAMOON_CLOUD_INIT_DONE >/dev/ttyS0" ]
+`;
 }
 
 function requiresShahkar(dcConfig, action) {
@@ -1952,7 +2004,7 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
             `🔑 **کلید خصوصی شما \\(برای اتصال SSH\\):**\n\`\`\`\n${escapeMarkdownV2(privateKeyText)}\n\`\`\``;
 
 
-        sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: short('ASK_DELETE') }]] } });
+        sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]] } });
         logServerEvent({ type: 'test_server_created', server_id: srv.id, user_id: userId, datacenter: dcConfig.key });
 
     } catch (e) {
@@ -2160,6 +2212,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
     const amountForDb = finalPrice / HOURS_IN_CYCLE[selectedCycle];
     const isHetzner = effectiveDc.provider === 'hetzner' || effectiveDc.apiType === 'hetzner';
     const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';
+    const isTebyan = effectiveDc.key === 'tebyan';
 
     console.log('[PURCHASE]', {
       dcKey: effectiveDc.key,
@@ -2189,14 +2242,21 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
       }
       const isSnapshot = selectedImage.type === 'snapshot';
       const serverMeta = { user: userId, type: 'purchased', datacenter: effectiveDc.key };
-      if (isAfra) {
+      let createOptions = {};
+      let bootMethod = 'volume';
+      if (isAfra || isTebyan) {
         generatedRootPassword = generateStrongPassword();
-        serverMeta.rootPassword = generatedRootPassword;
         serverMeta.passwordManagedByBot = true;
       }
-      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, 'volume', isSnapshot);
+      if (isAfra) serverMeta.rootPassword = generatedRootPassword;
+      if (isTebyan) {
+        bootMethod = effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image';
+        const sgName = await openstackApi.ensureSshSecurityGroup(effectiveDc, tok);
+        createOptions = { security_groups: [sgName], user_data: buildTebyanRootPasswordCloudInit(generatedRootPassword) };
+      }
+      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, bootMethod, isSnapshot, createOptions);
       rawPrivateKey = kp?.private_key ? String(kp.private_key || '').replace(/-----BEGIN RSA PRIVATE KEY-----/g, '').replace(/-----END RSA PRIVATE KEY-----/g, '').trim() : null;
-      rootPassword = isAfra ? generatedRootPassword : srv.adminPass;
+      rootPassword = (isAfra || isTebyan) ? generatedRootPassword : srv.adminPass;
     } else {
       const passwordOnly = !!effectiveDc.HETZNER_PASSWORD_ONLY;
       let keyId = null;
@@ -2221,7 +2281,7 @@ runcmd:
     }
 
     if (!srv?.id) throw new Error('شناسه سرور از Provider دریافت نشد.');
-    if (isAfra && generatedRootPassword) {
+    if ((isAfra || isTebyan) && generatedRootPassword) {
       try {
         await upsertServerSecret({ telegramId: userId, serverId: srv.id, datacenter: effectiveDc.key, secretType: 'root_password', secretValue: generatedRootPassword });
       } catch (secretErr) {
@@ -2231,12 +2291,18 @@ runcmd:
       }
     }
     await debitUser(userId, finalPrice);
-    await recordPurchase(userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle, DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, srv.id, 'volume', selectedImage.label);
+    const initialStatus = isTebyan ? 'provisioning' : 'active';
+    const purchaseBootMethod = isTebyan ? (effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image') : 'volume';
+    await recordPurchase(userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle, DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY, purchaseBootMethod === 'volume' ? srv.id : null, purchaseBootMethod, selectedImage.label, 0, 0, 0, 0, 0, null, initialStatus);
     await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${effectiveDc.name})`, 'purchase');
     purchaseRecorded = true;
 
     let ip = extractServerIp(srv);
     if (!ip && !isHetzner) ip = await pollForIp(effectiveDc, tok || await openstackApi.getToken(effectiveDc), srv.id, isAfra ? 3 : 24, isAfra ? 3000 : 5000);
+    if (isTebyan) {
+      const sshReady = ip ? await tcpCheck(ip, 22, 180000).catch(() => ({ reachable:false })) : { reachable:false };
+      await updatePurchaseStatus(srv.id, sshReady.reachable ? 'active' : 'pending_ssh');
+    }
     if (!ip && isHetzner) ip = srv.public_net?.ipv4?.ip || null;
 
     const privateKeyText = rawPrivateKey ? `-----BEGIN RSA PRIVATE KEY-----
@@ -2249,9 +2315,17 @@ ${rawPrivateKey}
       ip ? `🔹 IP: <code>${htmlEscape(ip)}</code>` : '🔹 IP: در حال تخصیص...',
       `🔹 سیستم‌عامل: ${htmlEscape(selectedImage.label || selectedImage.name || selectedImage.id)}`,
       `🔹 پلن: ${htmlEscape(planLabel)}`,
-      `🔹 مبلغ ماهانه: ${htmlEscape(formatToman(finalPrice))} تومان`
+      `🔹 ${htmlEscape(formatBillingAmountLabel(finalPrice, selectedCycle))}`
     ].join('\n');
-    if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword) + '\nلطفاً رمز را در جای امن ذخیره کنید.';
+    if (rootPassword && isTebyan && ip) {
+      msgHtml += '\n' + `IP: <code>${htmlEscape(ip)}</code>` +
+        '\nSSH user: root' +
+        '\nRoot password: ' + htmlCodeBlock(rootPassword) +
+        '\nLogin command:' +
+        `\n<code>ssh root@${htmlEscape(ip)}</code>` +
+        '\nFallback:' +
+        `\n<code>ssh ubuntu@${htmlEscape(ip)}</code>`;
+    } else if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword) + '\nلطفاً رمز را در جای امن ذخیره کنید.';
     else if (isAfra) msgHtml += '\n' + serverSecretNotConfiguredMessage();
     if (privateKeyText) msgHtml += '\n' + `🔑 <b>کلید خصوصی شما (SSH):</b>\n` + htmlCodeBlock(privateKeyText);
 
@@ -2338,7 +2412,7 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
       keyboard.push([{ text: '▶️ روشن کردن', callback_data: short('RESUME') }]);
     }
     if (hasCapability(dcConfig, 'deleteServer')) {
-      keyboard.push([{ text: '❌ حذف سرور', callback_data: short('ASK_DELETE') }]);
+      keyboard.push([{ text: '❌ حذف سرور', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]);
     }
     keyboard.push([{ text: '🔙 بازگشت', callback_data: 'CANCEL' }]);
 

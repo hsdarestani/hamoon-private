@@ -35,6 +35,7 @@ createServerFromSnapshot: (dc, ...a) =>
   createKeyPair:         (dc, ...a) => (pick(dc).createKeyPair ? pick(dc).createKeyPair(dc, ...a) : safeNoopCreateKeyPair(dc, ...a)),
   deleteKeyPair:         (dc, ...a) => pick(dc).deleteKeyPair ? pick(dc).deleteKeyPair(dc, ...a) : Promise.reject(new Error('deleteKeyPair not supported')),
   getServerDetails:      (dc, ...a) => pick(dc).getServerDetails ? pick(dc).getServerDetails(dc, ...a) : Promise.reject(new Error('getServerDetails not supported')),
+  ensureSshSecurityGroup:(dc, ...a) => pick(dc).ensureSshSecurityGroup ? pick(dc).ensureSshSecurityGroup(dc, ...a) : Promise.resolve('default'),
 
 };
 

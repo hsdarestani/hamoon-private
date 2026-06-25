@@ -155,7 +155,17 @@ afracloud: {
     OS_TEST_FLAVOR_ID: 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
     OS_TEST_IMAGE_ID: 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
     TRAFFIC_API_BASE_URL: 'https://netbill.tebyansmart.com/traffic/',
-    TRAFFIC_API_KEY: '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    TEBYAN_DEFAULT_BOOT_METHOD: process.env.TEBYAN_DEFAULT_BOOT_METHOD || 'image',
+    TEBYAN_ENABLE_BOOT_FROM_VOLUME: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
+    TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN: process.env.TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN !== 'false',
+    TEBYAN_PURCHASE_HEALTH_GATE: process.env.TEBYAN_PURCHASE_HEALTH_GATE !== 'false',
+    BILL_TRAFFIC: true,
+    capabilities: {
+      bootFromVolume: false, resetPassword: false, traffic: true, projectTraffic: true,
+      rootPasswordLogin: true, passwordLogin: true, sshUser: 'root', createKeyPair: true, deleteKeyPair: true,
+      createServer: true, deleteServer: true, suspendServer: true, resumeServer: true, rebuild: false
+    },
     flavors: [
         { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 340000 },
         { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 600000 },
