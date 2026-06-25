@@ -324,8 +324,8 @@ const mainMenu = {
 };
 
 // --- Billing Configuration ---
-const DEFAULT_PRICE_PER_GB = 500;
-const DEFAULT_DOWNLOAD_ONLY = 0;
+const DEFAULT_PRICE_PER_GB = 550;
+const DEFAULT_DOWNLOAD_ONLY = 1;
 const HOURS_IN_CYCLE = {
     hourly: 1,
     daily: 24,
@@ -2246,7 +2246,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
       let bootMethod = 'volume';
       if (isAfra || isTebyan) {
         generatedRootPassword = generateStrongPassword();
-        serverMeta.passwordManagedByBot = true;
+        serverMeta.passwordManagedByBot = 'true';
       }
       if (isAfra) serverMeta.rootPassword = generatedRootPassword;
       if (isTebyan) {
@@ -2865,18 +2865,35 @@ if (!dcConfig || dcConfig.apiType === 'hetzner' || !dcConfig.TRAFFIC_API_BASE_UR
     };
   }
 
-  const totalRawTrafficGb = Number(received_gb) + Number(transmitted_gb);
+  const dcKeyForTraffic = String(dcConfig?.key || purchase?.datacenter || '').toLowerCase();
+
+  // Tebyan NetBill fields are provider-directional:
+  // customer download = transmitted_gb
+  // customer upload   = received_gb
+  const customerDownloadGb = dcKeyForTraffic === 'tebyan'
+    ? Number(transmitted_gb)
+    : Number(received_gb);
+
+  const customerUploadGb = dcKeyForTraffic === 'tebyan'
+    ? Number(received_gb)
+    : Number(transmitted_gb);
+
+  const totalRawTrafficGb = customerDownloadGb + customerUploadGb;
 
   // اگر دانلود-تنها باشد، فقط received محاسبه می‌شود
   const isDownloadOnly = purchase?.download_only == 1 || purchase?.download_only === true || purchase?.download_only === '1';
-  const billableTraffic = isDownloadOnly ? Number(received_gb) : totalRawTrafficGb;
+  const billableTraffic = isDownloadOnly ? customerDownloadGb : totalRawTrafficGb;
 
   // سهمیه رایگان دوره (fallback به free_traffic_gb)
   const freeTrafficGb = Number(purchase?.[`free_traffic_${duration}_gb`]) || Number(purchase?.free_traffic_gb) || 0;
 
   return {
-    received_gb: Number(received_gb) || 0,
-    transmitted_gb: Number(transmitted_gb) || 0,
+    provider_received_gb: Number(received_gb) || 0,
+    provider_transmitted_gb: Number(transmitted_gb) || 0,
+    received_gb: customerDownloadGb || 0,
+    transmitted_gb: customerUploadGb || 0,
+    download_gb: customerDownloadGb || 0,
+    upload_gb: customerUploadGb || 0,
     totalRawTrafficGb,
     billableTraffic,
     totalFreeTrafficForPeriod: freeTrafficGb
