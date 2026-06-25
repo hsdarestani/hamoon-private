@@ -1,6 +1,7 @@
 // scheduler.js - Handles automated tasks like billing and server suspension/deletion.
 
 require('dotenv').config(); // Load environment variables
+const { isBillablePurchaseStatus } = require('./billing-status');
 const {
     getToken,
     suspendServer,
@@ -50,6 +51,7 @@ async function runBillingCycle() {
 
         for (const purchase of activePurchases) {
             const { telegram_id, server_id, amount, duration, status, last_billed_at } = purchase;
+            if (!isBillablePurchaseStatus(status)) continue;
             const cycleHours = BILLING_CYCLES_HOURS[duration];
 
             if (!cycleHours) {
@@ -130,6 +132,7 @@ async function runBillingCycle() {
             const currentTime = new Date().getTime();
             const ageInMs = currentTime - creationTime;
 
+            if (!server_id) { console.warn(`Skipping stale NULL test server for user ${telegram_id}`); continue; }
             if (ageInMs >= ONE_HOUR_IN_MS) {
                 console.log(`Test server ${server_id} for user ${telegram_id} has expired (Age: ${ageInMs / (1000 * 60)} minutes). Deleting...`);
                 try {

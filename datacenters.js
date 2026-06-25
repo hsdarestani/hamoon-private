@@ -152,10 +152,20 @@ afracloud: {
     OS_USERNAME: 'hb_client_3199_3',
     OS_PASSWORD: 'ivbrLrp1',
     OS_NETWORK_ID:'6a7c5354-d64d-41f7-aa90-7f76bd788087',
+    DEFAULT_BOOT_METHOD: process.env.TEBYAN_DEFAULT_BOOT_METHOD || 'image',
+    ENABLE_BOOT_FROM_VOLUME: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
+    PURCHASE_HEALTH_GATE: process.env.TEBYAN_PURCHASE_HEALTH_GATE !== 'false',
+    SECURITY_GROUP_NAME: process.env.TEBYAN_SECURITY_GROUP_NAME || 'hamoon-servers',
     OS_TEST_FLAVOR_ID: 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
     OS_TEST_IMAGE_ID: 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
     TRAFFIC_API_BASE_URL: 'https://netbill.tebyansmart.com/traffic/',
-    TRAFFIC_API_KEY: '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    capabilities: {
+      listServers: true, createServer: true, deleteServer: true, suspendServer: true, resumeServer: true,
+      resetPassword: false, bootFromVolume: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
+      traffic: true, projectTraffic: true, rebuild: false, snapshot: true, listSnapshots: true, buildFromSnapshot: false,
+      createKeyPair: true, deleteKeyPair: true
+    },
     flavors: [
         { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 340000 },
         { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 600000 },

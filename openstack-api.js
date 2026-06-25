@@ -4,6 +4,7 @@ const axios = require('axios');
 const prices = require('./prices');
 const http = require('http');
 const https = require('https');
+const { tebyanCloudConfig } = require('./provisioning-utils');
 
 const axiosClient = axios.create({
   timeout: 20000,
@@ -175,46 +176,57 @@ async function deleteKeyPair(config, tok, keyName) {
 
 
 
+async function ensureSshSecurityGroup(config, tok, preferredName) {
+  if (!tok || !config.OS_AUTH_URL) return preferredName || 'default';
+  const name = preferredName || config.SECURITY_GROUP_NAME || 'hamoon-servers';
+  const headers = { 'X-Auth-Token': tok, 'Content-Type': 'application/json' };
+  try {
+    const base = computeUrl(config);
+    const list = await axios.get(`${base}/os-security-groups`, { headers });
+    let group = (list.data.security_groups || []).find(g => g.name === name);
+    if (!group && name !== 'default') {
+      const created = await axios.post(`${base}/os-security-groups`, { security_group: { name, description: 'Hamoon managed servers' } }, { headers });
+      group = created.data.security_group;
+    }
+    group = group || (list.data.security_groups || []).find(g => g.name === 'default');
+    if (group) {
+      const hasSsh = (group.rules || []).some(r => String(r.ip_protocol || r.protocol).toLowerCase() === 'tcp' && Number(r.from_port) === 22 && Number(r.to_port) === 22 && (!r.ip_range || r.ip_range.cidr === '0.0.0.0/0'));
+      if (!hasSsh) {
+        await axios.post(`${base}/os-security-group-rules`, { security_group_rule: { parent_group_id: group.id, ip_protocol: 'tcp', from_port: 22, to_port: 22, cidr: '0.0.0.0/0' } }, { headers }).catch(e => { if (e.response?.status !== 409) throw e; });
+      }
+      return group.name;
+    }
+  } catch (e) {
+    console.warn('[SECURITY_GROUP_SSH_WARN]', config.key || config.name, e.response?.status || e.message);
+  }
+  return name;
+}
+
+function buildOpenStackServerBody(config, name, flavorRef, imageRef, keyName, meta = {}, diskSize, bootMethod, isSnapshot = false, options = {}) {
+  const isTebyan = config.key === 'tebyan';
+  const effectiveBoot = isTebyan && !config.ENABLE_BOOT_FROM_VOLUME ? 'image' : (bootMethod || config.DEFAULT_BOOT_METHOD || 'image');
+  const serverDetails = { name, flavorRef, networks: [{ uuid: config.OS_NETWORK_ID }], metadata: { ...meta }, key_name: keyName || undefined };
+  if (isTebyan) {
+    serverDetails.metadata.datacenter = 'tebyan';
+    serverDetails.metadata.boot_method = effectiveBoot;
+    serverDetails.security_groups = [{ name: options.securityGroupName || config.SECURITY_GROUP_NAME || 'hamoon-servers' }];
+    serverDetails.user_data = Buffer.from(options.userData || tebyanCloudConfig()).toString('base64');
+  }
+  if (isSnapshot || effectiveBoot === 'volume') {
+    serverDetails.block_device_mapping_v2 = [{ boot_index: 0, uuid: imageRef, source_type: 'image', destination_type: 'volume', volume_size: diskSize || 20, delete_on_termination: true }];
+  } else {
+    serverDetails.imageRef = imageRef;
+  }
+  Object.keys(serverDetails).forEach(k => serverDetails[k] === undefined && delete serverDetails[k]);
+  return { server: serverDetails };
+}
+
 async function createServer(config, tok, name, flavorRef, imageRef, keyName, meta, diskSize, bootMethod, isSnapshot = false) {
   try {
-    const networkId = config.OS_NETWORK_ID;
-    const serverDetails = {
-      name,
-      flavorRef,
-      networks: [{ uuid: networkId }],
-      metadata: meta,
-      key_name: keyName || null,
-    };
-
-    if (isSnapshot) {
-      // ✅ اسنپ‌شات Glance مثل image است
-      serverDetails.block_device_mapping_v2 = [{
-        boot_index: 0,
-        uuid: imageRef,
-        source_type: 'image',          // ← قبلاً snapshot بود؛ اصلاح شد
-        destination_type: 'volume',
-        volume_size: diskSize || 20,
-        delete_on_termination: true
-      }];
-    } else if (bootMethod === 'volume') {
-      serverDetails.block_device_mapping_v2 = [{
-        boot_index: 0,
-        uuid: imageRef,
-        source_type: 'image',
-        destination_type: 'volume',
-        volume_size: diskSize || 20,
-        delete_on_termination: true
-      }];
-    } else {
-      serverDetails.imageRef = imageRef;
-    }
-
-    console.log("🟡 [DEBUG] Final server body:", JSON.stringify({ server: serverDetails }, null, 2));
-
-    const r = await axios.post(`${computeUrl(config)}/servers`, { server: serverDetails }, {
-      headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' }
-    });
-
+    const securityGroupName = config.key === 'tebyan' ? await ensureSshSecurityGroup(config, tok, config.SECURITY_GROUP_NAME) : undefined;
+    const body = buildOpenStackServerBody(config, name, flavorRef, imageRef, keyName, meta, diskSize, bootMethod, isSnapshot, { securityGroupName });
+    console.log("🟡 [DEBUG] Final server body:", JSON.stringify(body, null, 2).replace(/(user_data":\s*")[^"]+/g, '$1[base64-cloud-init-redacted]'));
+    const r = await axios.post(`${computeUrl(config)}/servers`, body, { headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' } });
     return r.data.server;
   } catch (error) {
     console.error("❌ Error in createServer:", error.response?.data || error.message);
@@ -483,7 +495,7 @@ async function getServerDetails(dcConfig, token, serverId) {
 
 module.exports = {
     getToken, listFlavors, listImages, createKeyPair, deleteKeyPair,
-    createServer, rebuildServer, getServer, deleteServer, listServers,
+    createServer, buildOpenStackServerBody, ensureSshSecurityGroup, rebuildServer, getServer, deleteServer, listServers,
     suspendServer, resumeServer, resetServerPassword,createSnapshot,listSnapshots,createServerFromSnapshot ,getServerDetails
 };
 
