@@ -704,13 +704,57 @@ async function adminAuditLog(action, actor, target = {}, metadata = {}, ip = nul
     } finally { conn.release(); }
 }
 
+
+async function tableExists(connection, tableName) {
+    const [rows] = await connection.query(
+        'SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+        [tableName]
+    );
+    return rows.length > 0;
+}
+
+async function tableColumns(connection, tableName) {
+    const [rows] = await connection.query(
+        'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+        [tableName]
+    );
+    return new Set(rows.map(r => r.COLUMN_NAME));
+}
+
+async function adminUserCanonicalSetSql(connection) {
+    const sources = [];
+    for (const table of ['users','wallet_logs','purchases','test_servers','key_pairs','server_secrets']) {
+        if (await tableExists(connection, table)) sources.push(`SELECT CAST(telegram_id AS CHAR) telegram_id FROM ${table} WHERE telegram_id IS NOT NULL AND telegram_id <> ''`);
+    }
+    return sources.length ? sources.join(' UNION ') : "SELECT '' telegram_id WHERE 1=0";
+}
+
+function adminUserSortSql(sort) {
+    return ({
+        telegram_id: 'cu.telegram_id',
+        wallet_balance: 'wallet_balance',
+        wallet: 'wallet_balance',
+        purchases_count: 'purchases_count',
+        active_servers: 'active_servers',
+        pending_servers: 'pending_servers',
+        deleted_servers: 'deleted_servers',
+        created_at: 'u.created_at',
+        last_activity_at: 'last_activity_at'
+    })[sort] || 'last_activity_at';
+}
+
 async function pingDatabase() { const conn = await pool.getConnection(); try { await conn.query('SELECT 1'); return true; } finally { conn.release(); } }
 
 
 async function getAdminOverviewStats() {
     const conn = await pool.getConnection();
     try {
-        const [[users]] = await conn.query(`SELECT COUNT(*) totalUsers, COALESCE(SUM(shahkar_verified = 1),0) shahkarVerifiedUsers, COALESCE(SUM(wallet),0) totalWalletBalance FROM users`);
+        const userSetSql = await adminUserCanonicalSetSql(conn);
+        const [[users]] = await conn.query(`SELECT COUNT(*) totalUsers FROM (${userSetSql}) cu`);
+        const [[walletTotal]] = await conn.query(`SELECT COALESCE(SUM(amount),0) totalWalletBalance FROM wallet_logs`);
+        const [[shahkar]] = await conn.query(`SELECT COALESCE(SUM(shahkar_verified = 1),0) shahkarVerifiedUsers FROM users`).catch(async()=>[[{shahkarVerifiedUsers:0}]]);
+        users.shahkarVerifiedUsers = shahkar.shahkarVerifiedUsers;
+        users.totalWalletBalance = walletTotal.totalWalletBalance;
         const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,
             COALESCE(SUM(status='deleted'),0) deletedServers, COUNT(*) totalPurchases,
             COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter='hetzner'),0) hetznerServers,
@@ -866,18 +910,65 @@ async function globalAdminSearch(q, limit = 8) {
 }
 
 async function listAdminUsers(filters = {}) {
-    const limit = toLimit(filters.limit); const offset = pageOffset(filters.page, limit); const where=[]; const params=[];
-    if (filters.search) { where.push('(u.telegram_id LIKE ? OR u.phone LIKE ? OR u.national_code LIKE ?)'); params.push(...Array(3).fill('%'+filters.search+'%')); }
-    if (filters.shahkar === '1' || filters.shahkar === '0') { where.push('u.shahkar_verified = ?'); params.push(Number(filters.shahkar)); }
-    if (filters.minBalance) { where.push('u.wallet >= ?'); params.push(Number(filters.minBalance)); }
-    const having = filters.hasServers ? ' HAVING active_servers > 0' : '';
-    const whereSql = where.length ? 'WHERE '+where.join(' AND ') : '';
-    const conn=await pool.getConnection(); try {
-        const [rows]=await conn.query(`SELECT u.telegram_id,u.phone,u.national_code,u.shahkar_verified,u.wallet,u.created_at,u.updated_at,COUNT(p.server_id) purchases_count,SUM(p.status='active') active_servers FROM users u LEFT JOIN purchases p ON p.telegram_id=u.telegram_id ${whereSql} GROUP BY u.telegram_id ${having} ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
-        rows.forEach(r=>{r.national_code_masked=maskLast4(r.national_code); r.phone_masked=maskLast4(r.phone); delete r.national_code;});
-        const [[count]]=await conn.query(`SELECT COUNT(*) total FROM users u ${whereSql}`, params);
-        return { rows, page:Number(filters.page)||1, limit, total:count.total };
-    } finally {conn.release();}
+    const pageSize = toLimit(filters.pageSize || filters.limit, 50, 200);
+    const page = Math.max(parseInt(filters.page, 10) || 1, 1);
+    const offset = (page - 1) * pageSize;
+    const q = String(filters.q || filters.search || '').trim();
+    const status = String(filters.status || '').trim();
+    const datacenter = String(filters.datacenter || '').trim();
+    const dir = String(filters.dir || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const conn = await pool.getConnection();
+    try {
+        const userCols = await tableColumns(conn, 'users');
+        const canonicalSql = await adminUserCanonicalSetSql(conn);
+        const searchCandidates = ['phone','phone_number','national_id','national_code','card_number','username','first_name','last_name','name'];
+        const searchCols = searchCandidates.filter(c => userCols.has(c));
+        const phoneExpr = userCols.has('phone') ? 'u.phone' : (userCols.has('phone_number') ? 'u.phone_number' : 'NULL');
+        const nationalExpr = userCols.has('national_id') ? 'u.national_id' : (userCols.has('national_code') ? 'u.national_code' : 'NULL');
+        const shahkarExpr = userCols.has('shahkar_verified') ? 'u.shahkar_verified' : 'NULL';
+        const createdExpr = userCols.has('created_at') ? 'u.created_at' : 'NULL';
+        const updatedExpr = userCols.has('updated_at') ? 'u.updated_at' : 'NULL';
+        const where = [];
+        const params = [];
+        if (q) {
+            const like = `%${q}%`;
+            const clauses = ['cu.telegram_id = ?', 'cu.telegram_id LIKE ?'];
+            params.push(q, like);
+            for (const col of searchCols) { clauses.push(`u.${col} LIKE ?`); params.push(like); }
+            where.push(`(${clauses.join(' OR ')})`);
+        }
+        if (status) { where.push('EXISTS (SELECT 1 FROM purchases ps WHERE ps.telegram_id = cu.telegram_id AND ps.status = ?)'); params.push(status); }
+        if (datacenter) { where.push('EXISTS (SELECT 1 FROM purchases pd WHERE pd.telegram_id = cu.telegram_id AND pd.datacenter = ?)'); params.push(datacenter); }
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+        const pending = PENDING_SERVER_STATUSES;
+        const baseFrom = `FROM (${canonicalSql}) cu
+            LEFT JOIN users u ON u.telegram_id = cu.telegram_id
+            LEFT JOIN (SELECT telegram_id, COALESCE(SUM(amount),0) wallet_balance, MAX(timestamp) last_wallet_log_at FROM wallet_logs GROUP BY telegram_id) wl ON wl.telegram_id = cu.telegram_id
+            LEFT JOIN (SELECT telegram_id, COUNT(*) purchases_count,
+                    COALESCE(SUM(status='active'),0) active_servers,
+                    COALESCE(SUM(status IN (${sqlIn(pending)})),0) pending_servers,
+                    COALESCE(SUM(status='deleted'),0) deleted_servers,
+                    MAX(created_at) last_purchase_at
+                FROM purchases GROUP BY telegram_id) pa ON pa.telegram_id = cu.telegram_id`;
+        const sort = adminUserSortSql(filters.sort);
+        const select = `SELECT cu.telegram_id, ${phoneExpr} phone, ${nationalExpr} national_id, ${shahkarExpr} shahkar_verified,
+                COALESCE(wl.wallet_balance,0) wallet_balance, COALESCE(wl.wallet_balance,0) wallet,
+                COALESCE(pa.purchases_count,0) purchases_count, COALESCE(pa.active_servers,0) active_servers,
+                COALESCE(pa.pending_servers,0) pending_servers, COALESCE(pa.deleted_servers,0) deleted_servers,
+                pa.last_purchase_at, wl.last_wallet_log_at, ${createdExpr} created_at, ${updatedExpr} updated_at,
+                GREATEST(COALESCE(pa.last_purchase_at,'1000-01-01'), COALESCE(wl.last_wallet_log_at,'1000-01-01'), COALESCE(${createdExpr},'1000-01-01'), COALESCE(${updatedExpr},'1000-01-01')) last_activity_at`;
+        const [rows] = await conn.query(`${select} ${baseFrom} ${whereSql} ORDER BY ${sort} ${dir}, cu.telegram_id ASC LIMIT ? OFFSET ?`, [...pending, ...params, pageSize, offset]);
+        const [[count]] = await conn.query(`SELECT COUNT(*) total ${baseFrom} ${whereSql}`, [...pending, ...params]);
+        rows.forEach(r => {
+            r.phone = maskLast4(r.phone);
+            r.phone_masked = r.phone;
+            r.national_id = maskLast4(r.national_id);
+            r.national_id_masked = r.national_id;
+            r.national_code_masked = r.national_id;
+            if (String(r.last_activity_at).startsWith('1000-01-01')) r.last_activity_at = null;
+        });
+        return { ok: true, page, pageSize, total: count.total, rows };
+    } finally { conn.release(); }
 }
 
 async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
