@@ -26,19 +26,12 @@ function ensureUserState(uid) {
 }
 // === Low-balance helpers ===
 async function getUserTopupTotal(userId) {
-  // مجموع همه شارژها (هیچ‌وقت کم نمی‌کنیم؛ فقط مقایسه)
   const logs = await getWalletLogs(userId, null) || [];
-  // اگر لاگ‌تایپ “approved” داری ازش استفاده کن؛ وگرنه هر amount مثبت
-  let sum = 0;
-  for (const l of logs) {
-    const amt = Number(l.amount || 0);
-    const type = String(l.type || '').toLowerCase();
-    if (amt > 0 && (type === 'approved' || type === 'deposit' || type === 'charge' || !l.type)) {
-      sum += amt;
-    }
-  }
-  return Math.max(0, Math.floor(sum));
+  const total = logs.reduce((sum, l) => sum + Number(l.amount || 0), 0);
+  return Math.max(0, Math.floor(total));
 }
+
+
 
 async function getProjectCost(userId, dc, projectId, downloadOnly, pricePerGb) {
   try {
@@ -1942,15 +1935,11 @@ bot.onText(/\/set_topup_base (\d+) (\d+)/, async (msg, m) => {
 
 async function getUserTopupTotal(userId) {
   const logs = await getWalletLogs(userId, null) || [];
-  let baseline = 0, deposits = 0;
-  for (const l of logs) {
-    const amt  = Number(l.amount || 0);
-    const type = String(l.type || '').toLowerCase();
-    if (type === 'topup_baseline') baseline += amt;
-    if (amt > 0 && (type === 'approved' || type === 'deposit')) deposits += amt;
-  }
-  return Math.max(0, Math.floor(baseline + deposits));
+  const total = logs.reduce((sum, l) => sum + Number(l.amount || 0), 0);
+  return Math.max(0, Math.floor(total));
 }
+
+
 
 async function handleFreeTrialRequest(chatId, userId, dcConfig) {
     sendMessage(chatId, `🚀 در حال بررسی و ساخت سرور تست در دیتاسنتر ${dcConfig.name}...`);
