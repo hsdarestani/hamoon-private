@@ -8,8 +8,10 @@
     "start": "node index.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
     "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
-    "validate:syntax": "node -c index.js && node -c db.js && node -c cloud-api.js && node -c Afracloud/afracloud-api.js && node -c services/passwords.js && node -c services/cloud-init.js && node -c services/ssh-reset-password.js",
-    "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js"
+    "validate:syntax": "node -c index.js && node -c db.js && node -c cloud-api.js && node -c dashboard-api.js && node -c server.js",
+    "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js",
+    "dashboard": "node server.js",
+    "validate:dashboard": "node scripts/validate-dashboard.js"
   },
   "keywords": [],
   "author": "",
