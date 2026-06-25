@@ -175,7 +175,29 @@ async function deleteKeyPair(config, tok, keyName) {
 
 
 
-async function createServer(config, tok, name, flavorRef, imageRef, keyName, meta, diskSize, bootMethod, isSnapshot = false) {
+async function ensureSshSecurityGroup(config, tok) {
+  const name = 'hamoon-servers';
+  const base = computeUrl(config);
+  const headers = { 'X-Auth-Token': tok, 'Content-Type': 'application/json' };
+  try {
+    const groups = await axios.get(`${base}/os-security-groups`, { headers });
+    let group = (groups.data.security_groups || []).find(g => g.name === name) || (groups.data.security_groups || []).find(g => g.name === 'default');
+    if (!group) {
+      const created = await axios.post(`${base}/os-security-groups`, { security_group: { name, description: 'Hamoon managed SSH access' } }, { headers });
+      group = created.data.security_group;
+    }
+    const hasSsh = (group.rules || []).some(r => Number(r.from_port) === 22 && Number(r.to_port) === 22 && String(r.ip_protocol || r.protocol).toLowerCase() === 'tcp' && (!r.ip_range || r.ip_range.cidr === '0.0.0.0/0'));
+    if (!hasSsh) {
+      await axios.post(`${base}/os-security-group-rules`, { security_group_rule: { parent_group_id: group.id, ip_protocol: 'tcp', from_port: 22, to_port: 22, cidr: '0.0.0.0/0' } }, { headers }).catch(e => { if (e.response?.status !== 409) throw e; });
+    }
+    return group.name;
+  } catch (e) {
+    console.warn(`[SECURITY_GROUP] could not ensure SSH rule for ${config.key}:`, e.message);
+    return 'default';
+  }
+}
+
+async function createServer(config, tok, name, flavorRef, imageRef, keyName, meta, diskSize, bootMethod, isSnapshot = false, options = {}) {
   try {
     const networkId = config.OS_NETWORK_ID;
     const serverDetails = {
@@ -186,7 +208,13 @@ async function createServer(config, tok, name, flavorRef, imageRef, keyName, met
       key_name: keyName || null,
     };
 
-    if (isSnapshot) {
+    if (options.user_data) serverDetails.user_data = Buffer.from(String(options.user_data), 'utf8').toString('base64');
+    if (Array.isArray(options.security_groups) && options.security_groups.length) serverDetails.security_groups = options.security_groups.map(name => ({ name }));
+
+    const forceImageBoot = config?.key === 'tebyan' && config.TEBYAN_ENABLE_BOOT_FROM_VOLUME !== true && !isSnapshot;
+    if (forceImageBoot) {
+      serverDetails.imageRef = imageRef;
+    } else if (isSnapshot) {
       // ✅ اسنپ‌شات Glance مثل image است
       serverDetails.block_device_mapping_v2 = [{
         boot_index: 0,
@@ -209,7 +237,9 @@ async function createServer(config, tok, name, flavorRef, imageRef, keyName, met
       serverDetails.imageRef = imageRef;
     }
 
-    console.log("🟡 [DEBUG] Final server body:", JSON.stringify({ server: serverDetails }, null, 2));
+    const logBody = JSON.parse(JSON.stringify({ server: serverDetails }));
+    if (logBody.server.user_data) logBody.server.user_data = '[redacted-cloud-init]';
+    console.log("🟡 [DEBUG] Final server body:", JSON.stringify(logBody, null, 2));
 
     const r = await axios.post(`${computeUrl(config)}/servers`, { server: serverDetails }, {
       headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' }
@@ -484,6 +514,6 @@ async function getServerDetails(dcConfig, token, serverId) {
 module.exports = {
     getToken, listFlavors, listImages, createKeyPair, deleteKeyPair,
     createServer, rebuildServer, getServer, deleteServer, listServers,
-    suspendServer, resumeServer, resetServerPassword,createSnapshot,listSnapshots,createServerFromSnapshot ,getServerDetails
+    suspendServer, resumeServer, resetServerPassword, createSnapshot, listSnapshots, createServerFromSnapshot, getServerDetails, ensureSshSecurityGroup
 };
 

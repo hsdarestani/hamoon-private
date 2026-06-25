@@ -123,11 +123,14 @@ async function initializeDatabase() {
                 action VARCHAR(128),
                 target_type VARCHAR(64),
                 target_id VARCHAR(128),
+                result VARCHAR(64) NULL,
                 metadata JSON NULL,
                 ip VARCHAR(64),
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
+
+        await ensureColumn(connection, 'admin_audit_logs', 'result', 'VARCHAR(64) NULL');
 
         // Wallet Logs table
         await connection.execute(`
@@ -325,12 +328,12 @@ async function getWalletLogs(telegramId, limit) {
     }
 }
 
-async function recordPurchase(telegramId, serverId, datacenter, serverName, flavorId, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0, sshKeyId = null) {
+async function recordPurchase(telegramId, serverId, datacenter, serverName, flavorId, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0, sshKeyId = null, status = 'active') {
     const conn = await pool.getConnection();
     try {
         const values = [
             serverId, String(telegramId), datacenter, serverName, flavorId, amount, duration,
-            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, 'active',
+            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, status,
             lastBilledTrafficGb, freeTrafficHourlyGb, freeTrafficDailyGb,
             freeTrafficWeeklyGb, freeTrafficMonthlyGb, sshKeyId
         ];
@@ -683,6 +686,7 @@ async function ensureAdminAuditLogsTable() {
             action VARCHAR(128),
             target_type VARCHAR(64),
             target_id VARCHAR(128),
+            result VARCHAR(64) NULL,
             metadata JSON NULL,
             ip VARCHAR(64),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -696,7 +700,7 @@ async function adminAuditLog(action, actor, target = {}, metadata = {}, ip = nul
     delete safeMeta.password; delete safeMeta.secret; delete safeMeta.token; delete safeMeta.rootPassword;
     const conn = await pool.getConnection();
     try {
-        await conn.execute('INSERT INTO admin_audit_logs (actor, action, target_type, target_id, metadata, ip) VALUES (?, ?, ?, ?, ?, ?)', [String(actor || 'admin'), String(action), String(target.type || target.target_type || 'unknown'), String(target.id || target.target_id || ''), JSON.stringify(safeMeta), ip]);
+        await conn.execute('INSERT INTO admin_audit_logs (actor, action, target_type, target_id, result, metadata, ip) VALUES (?, ?, ?, ?, ?, ?, ?)', [String(actor || 'admin'), String(action), String(target.type || target.target_type || 'unknown'), String(target.id || target.target_id || ''), String(metadata?.result || 'ok'), JSON.stringify(safeMeta), ip]);
     } finally { conn.release(); }
 }
 
@@ -765,8 +769,25 @@ async function listAdminUsers(filters = {}) {
 }
 
 async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
-async function listAdminServers(filters={}) { const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ? OR u.phone LIKE ?)');params.push(...Array(4).fill('%'+filters.search+'%'));} ['datacenter','status'].forEach(k=>{if(filters[k]){where.push('p.'+k+'=?');params.push(filters[k]);}}); if(filters.provider){where.push('p.datacenter=?');params.push(filters.provider);} if(filters.hasPassword==='yes')where.push("EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.hasPassword==='no')where.push("NOT EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT p.*, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
+async function listAdminServers(filters={}) {
+    const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[];
+    if(filters.search){ const q='%'+filters.search+'%'; where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ? OR p.datacenter LIKE ? OR p.status LIKE ? OR p.os_label LIKE ? OR p.flavor_id LIKE ? OR p.duration LIKE ? OR u.phone LIKE ?)'); params.push(q,q,q,q,q,q,q,q,q); }
+    ['datacenter','status','duration','flavor_id'].forEach(k=>{if(filters[k]){where.push('p.'+k+'=?');params.push(filters[k]);}});
+    if(filters.provider){where.push('p.datacenter=?');params.push(filters.provider);}
+    if(filters.hasPassword==='yes')where.push("EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')");
+    if(filters.hasPassword==='no')where.push("NOT EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')");
+    if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));}
+    const sortAllow={created_at:'p.created_at',server_id:'p.server_id',server_name:'p.server_name',telegram_id:'p.telegram_id',datacenter:'p.datacenter',status:'p.status',duration:'p.duration',amount:'p.amount'};
+    const sort=sortAllow[filters.sort]||'p.created_at'; const dir=String(filters.dir).toLowerCase()==='asc'?'ASC':'DESC';
+    const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection();
+    try{const [rows]=await conn.query(`SELECT p.*, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}
+}
 async function getAdminServerDetail(serverId){ const conn=await pool.getConnection(); try{const [[purchase]]=await conn.query("SELECT p.*,u.phone,u.wallet, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE p.server_id=?",[String(serverId)]); if(!purchase)return null; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? AND description LIKE ? ORDER BY timestamp DESC LIMIT 50',[String(purchase.telegram_id),'%'+serverId+'%']); return {purchase,user:{telegram_id:purchase.telegram_id,phone:purchase.phone,wallet:purchase.wallet},wallet_logs,password_stored:!!purchase.password_stored};}finally{conn.release();}}
+
+async function getAllActivePurchases() { const conn=await pool.getConnection(); try { const [rows]=await conn.query("SELECT * FROM purchases WHERE status = 'active'"); return rows; } finally { conn.release(); } }
+async function updatePurchaseTrafficBilled(serverId, billedGb) { const conn=await pool.getConnection(); try { await conn.execute('UPDATE purchases SET last_billed_traffic_gb=?, last_billed_at=NOW(), updated_at=CURRENT_TIMESTAMP WHERE server_id=?',[Number(billedGb)||0,String(serverId)]); } finally { conn.release(); } }
+async function adminUpdateBilling(serverId, values) { const fields=['price_per_gb','download_only','free_traffic_hourly_gb','free_traffic_daily_gb','free_traffic_weekly_gb','free_traffic_monthly_gb']; const sets=[]; const params=[]; for (const f of fields) if (values[f] !== undefined) { sets.push(`${f}=?`); params.push(Number(values[f])||0); } if(!sets.length) return getPurchaseByServerId(serverId); params.push(String(serverId)); const conn=await pool.getConnection(); try { await conn.execute(`UPDATE purchases SET ${sets.join(', ')}, updated_at=CURRENT_TIMESTAMP WHERE server_id=?`, params); } finally { conn.release(); } return getPurchaseByServerId(serverId); }
+
 async function listAdminPurchases(filters={}){return listAdminServers(filters);}
 async function listAdminWalletLogs(filters={}){const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(w.telegram_id LIKE ? OR w.description LIKE ?)');params.push('%'+filters.search+'%','%'+filters.search+'%');} if(filters.type){where.push('w.type=?');params.push(filters.type);} if(filters.from){where.push('w.timestamp>=?');params.push(filters.from);} if(filters.to){where.push('w.timestamp<=?');params.push(filters.to);} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT w.*,u.wallet current_balance FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id ${whereSql} ORDER BY w.timestamp DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM wallet_logs w ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
 async function adminCreditUser(telegramId, amount, description='شارژ کیف پول توسط ادمین'){ await creditUser(telegramId, Number(amount)); await recordWalletLog(telegramId, Number(amount), description, 'admin_credit'); return getUserWallet(telegramId); }
@@ -794,6 +815,9 @@ module.exports = {
     adminUpdatePurchaseStatus,
     adminAuditLog,
     listAdminAuditLogs,
+    getAllActivePurchases,
+    updatePurchaseTrafficBilled,
+    adminUpdateBilling,
     initializeDatabase,
     upsertUser,
     getUser,
