@@ -896,15 +896,45 @@ async function getAdminMetricDetails(metric, filters = {}) {
     } finally { conn.release(); }
 }
 
+
+const ADMIN_TEXT_COLLATE = 'utf8mb4_unicode_ci';
+const ADMIN_IP_FIELDS = ['public_ip','ip','server_ip','ipv4','access_ip_v4','accessIPv4','main_ip','ip_address'];
+function adminLikeExpr(expr) { return `CONVERT(${expr} USING utf8mb4) COLLATE ${ADMIN_TEXT_COLLATE} LIKE ?`; }
+function purchaseIpSql(cols, alias='p') {
+    const parts = ADMIN_IP_FIELDS.filter(c => cols.has(c)).map(c => `NULLIF(${alias}.${c}, '')`);
+    for (const raw of ['provider_response','provider_raw','raw_response','metadata','extra','details']) {
+        if (!cols.has(raw)) continue;
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.public_ip')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.ip')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.server_ip')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.ipv4')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.access_ip_v4')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.accessIPv4')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.main_ip')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.addresses.*[0].addr')), '')`);
+        parts.push(`NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.${raw}, '$.addresses.*[1].addr')), '')`);
+    }
+    return parts.length ? `COALESCE(${parts.join(', ')})` : 'NULL';
+}
+function attachPublicIp(row) { row.public_ip = row.public_ip || row.ip_address || row.ip || null; row.ip_address = row.public_ip; row.ip = row.public_ip; return row; }
 async function globalAdminSearch(q, limit = 8) {
     const text = String(q || '').trim();
     if (!text) return { users: [], servers: [], purchases: [] };
     const like = `%${text}%`;
+    const lim = toLimit(limit, 8, 20);
     const conn = await pool.getConnection();
     try {
-        const [users] = await conn.query('SELECT telegram_id, phone, wallet, created_at FROM users WHERE telegram_id LIKE ? OR phone LIKE ? OR national_code LIKE ? ORDER BY created_at DESC LIMIT ?', [like, like, like, toLimit(limit, 8, 20)]);
+        const userCols = await tableColumns(conn, 'users');
+        const purchaseCols = await tableColumns(conn, 'purchases');
+        const userSearch = ['telegram_id','phone','national_code','national_id','username','first_name','last_name'].filter(c => userCols.has(c)).map(c => `u.${c}`); if (userCols.has('first_name') && userCols.has('last_name')) userSearch.push("CONCAT_WS(' ', u.first_name, u.last_name)");
+        const userClauses = userSearch.map(adminLikeExpr);
+        const [users] = await conn.query(`SELECT u.telegram_id, u.phone, u.wallet, u.created_at FROM users u WHERE ${userClauses.join(' OR ')} ORDER BY u.created_at DESC LIMIT ?`, [...Array(userClauses.length).fill(like), lim]);
         users.forEach(r => { r.phone_masked = maskLast4(r.phone); delete r.phone; });
-        const [servers] = await conn.query("SELECT server_id, telegram_id, server_name, datacenter, status, created_at FROM purchases WHERE status NOT IN ('deleted','deletion_pending','provider_missing','manual_review') AND (server_id LIKE ? OR server_name LIKE ? OR telegram_id LIKE ? OR datacenter LIKE ?) ORDER BY created_at DESC LIMIT ?", [like, like, like, like, toLimit(limit, 8, 20)]);
+        const ipExpr = purchaseIpSql(purchaseCols, 'p');
+        const serverExprs = ['p.server_id','p.server_name','p.telegram_id','p.datacenter','p.status','p.os_label','p.flavor_id', ipExpr];
+        const serverClauses = serverExprs.map(adminLikeExpr);
+        const [servers] = await conn.query(`SELECT p.server_id, p.telegram_id, p.server_name, p.datacenter, p.status, p.os_label, p.flavor_id, p.created_at, ${ipExpr} public_ip FROM purchases p WHERE status NOT IN ('deleted','deletion_pending','provider_missing','manual_review') AND (${serverClauses.join(' OR ')}) ORDER BY p.created_at DESC LIMIT ?`, [...Array(serverClauses.length).fill(like), lim]);
+        servers.forEach(attachPublicIp);
         return { users, servers, purchases: servers };
     } finally { conn.release(); }
 }
@@ -934,7 +964,8 @@ async function listAdminUsers(filters = {}) {
             const like = `%${q}%`;
             const clauses = ['cu.telegram_id = ?', 'cu.telegram_id LIKE ?'];
             params.push(q, like);
-            for (const col of searchCols) { clauses.push(`u.${col} LIKE ?`); params.push(like); }
+            for (const col of searchCols) { clauses.push(adminLikeExpr(`u.${col}`)); params.push(like); }
+            clauses.push(`EXISTS (SELECT 1 FROM purchases ps WHERE ps.telegram_id = cu.telegram_id AND (${[adminLikeExpr('ps.server_id'), adminLikeExpr('ps.datacenter'), adminLikeExpr('ps.server_name')].join(' OR ')}))`); params.push(like, like, like);
             where.push(`(${clauses.join(' OR ')})`);
         }
         if (status) { where.push('EXISTS (SELECT 1 FROM purchases ps WHERE ps.telegram_id = cu.telegram_id AND ps.status = ?)'); params.push(status); }
@@ -971,28 +1002,23 @@ async function listAdminUsers(filters = {}) {
     } finally { conn.release(); }
 }
 
-async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const [purchases]=await conn.query('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 100',[String(telegramId)]); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
+async function getAdminUserDetail(telegramId) { const conn=await pool.getConnection(); try { const [[user]]=await conn.query('SELECT telegram_id,phone,wallet,step,national_code,shahkar_verified,shahkar_verified_at,created_at,updated_at FROM users WHERE telegram_id=?',[String(telegramId)]); if(!user)return null; user.national_code_masked=maskLast4(user.national_code); delete user.national_code; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 100',[String(telegramId)]); const purchaseCols=await tableColumns(conn,'purchases'); const ipExpr=purchaseIpSql(purchaseCols,'p'); const [purchases]=await conn.query(`SELECT p.*, ${ipExpr} public_ip FROM purchases p WHERE p.telegram_id=? ORDER BY p.created_at DESC LIMIT 100`,[String(telegramId)]); purchases.forEach(attachPublicIp); return { user, wallet_logs, purchases, servers:purchases, active_purchases:purchases.filter(p=>p.status!=='deleted') }; } finally {conn.release();} }
 async function listAdminServers(filters={}) {
-    const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[];
-    if(filters.search){ const q='%'+filters.search+'%'; where.push('(p.server_id LIKE ? OR p.server_name LIKE ? OR p.telegram_id LIKE ? OR p.datacenter LIKE ? OR p.status LIKE ? OR p.os_label LIKE ? OR p.flavor_id LIKE ? OR p.duration LIKE ? OR u.phone LIKE ?)'); params.push(q,q,q,q,q,q,q,q,q); }
+    const limit=toLimit(filters.pageSize || filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; const q=String(filters.q || filters.search || '').trim();
+    const conn=await pool.getConnection();
+    try{ const purchaseCols=await tableColumns(conn,'purchases'); const userCols=await tableColumns(conn,'users'); const ipExpr=purchaseIpSql(purchaseCols,'p');
+    if(q){ const like='%'+q+'%'; const exprs=['p.server_id','p.server_name','p.telegram_id','p.datacenter','p.status','p.os_label','p.flavor_id','p.duration','p.amount','p.created_at',ipExpr]; if(userCols.has('phone'))exprs.push('u.phone'); if(userCols.has('username'))exprs.push('u.username'); if(userCols.has('first_name'))exprs.push('u.first_name'); if(userCols.has('last_name'))exprs.push('u.last_name'); where.push('('+exprs.map(adminLikeExpr).join(' OR ')+')'); params.push(...Array(exprs.length).fill(like)); }
     ['datacenter','status','duration','flavor_id'].forEach(k=>{if(filters[k]){where.push('p.'+k+'=?');params.push(filters[k]);}});
-    if(filters.provider){where.push('p.datacenter=?');params.push(filters.provider);}
-    if(filters.hasPassword==='yes')where.push("EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')");
-    if(filters.hasPassword==='no')where.push("NOT EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')");
-    if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));}
-    const sortAllow={created_at:'p.created_at',server_id:'p.server_id',server_name:'p.server_name',telegram_id:'p.telegram_id',datacenter:'p.datacenter',status:'p.status',duration:'p.duration',amount:'p.amount'};
-    const sort=sortAllow[filters.sort]||'p.created_at'; const dir=String(filters.dir).toLowerCase()==='asc'?'ASC':'DESC';
-    const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection();
-    try{const [rows]=await conn.query(`SELECT p.*, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}
+    if(filters.provider){where.push('p.datacenter=?');params.push(filters.provider);} if(filters.hasPassword==='yes')where.push("EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.hasPassword==='no')where.push("NOT EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password')"); if(filters.userId){where.push('p.telegram_id=?');params.push(String(filters.userId));}
+    const sortAllow={created_at:'p.created_at',server_id:'p.server_id',server_name:'p.server_name',telegram_id:'p.telegram_id',datacenter:'p.datacenter',status:'p.status',duration:'p.duration',amount:'p.amount'}; const sort=sortAllow[filters.sort]||'p.created_at'; const dir=String(filters.dir).toLowerCase()==='asc'?'ASC':'DESC'; const whereSql=where.length?'WHERE '+where.join(' AND '):'';
+    const [rows]=await conn.query(`SELECT p.*, ${ipExpr} public_ip, u.phone, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id ${whereSql}`,params); rows.forEach(attachPublicIp); return {rows,page:Number(filters.page)||1,pageSize:limit,limit,total:count.total};}finally{conn.release();}
 }
-async function getAdminServerDetail(serverId){ const conn=await pool.getConnection(); try{const [[purchase]]=await conn.query("SELECT p.*,u.phone,u.wallet, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE p.server_id=?",[String(serverId)]); if(!purchase)return null; const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? AND description LIKE ? ORDER BY timestamp DESC LIMIT 50',[String(purchase.telegram_id),'%'+serverId+'%']); return {purchase,user:{telegram_id:purchase.telegram_id,phone:purchase.phone,wallet:purchase.wallet},wallet_logs,password_stored:!!purchase.password_stored};}finally{conn.release();}}
+async function getAdminServerDetail(serverId){ const conn=await pool.getConnection(); try{const purchaseCols=await tableColumns(conn,'purchases'); const ipExpr=purchaseIpSql(purchaseCols,'p'); const [[purchase]]=await conn.query(`SELECT p.*, ${ipExpr} public_ip,u.phone,u.wallet, EXISTS(SELECT 1 FROM server_secrets ss WHERE ss.server_id=p.server_id AND ss.secret_type='root_password') password_stored FROM purchases p LEFT JOIN users u ON u.telegram_id=p.telegram_id WHERE p.server_id=?`,[String(serverId)]); if(!purchase)return null; attachPublicIp(purchase); const [wallet_logs]=await conn.query('SELECT * FROM wallet_logs WHERE telegram_id=? AND description LIKE ? ORDER BY timestamp DESC LIMIT 50',[String(purchase.telegram_id),'%'+serverId+'%']); return {purchase,user:{telegram_id:purchase.telegram_id,phone:purchase.phone,wallet:purchase.wallet},wallet_logs,password_stored:!!purchase.password_stored};}finally{conn.release();}}
 
-async function getAllActivePurchases() { const conn=await pool.getConnection(); try { const [rows]=await conn.query("SELECT * FROM purchases WHERE status = 'active'"); return rows; } finally { conn.release(); } }
-async function updatePurchaseTrafficBilled(serverId, billedGb) { const conn=await pool.getConnection(); try { await conn.execute('UPDATE purchases SET last_billed_traffic_gb=?, last_billed_at=NOW(), updated_at=CURRENT_TIMESTAMP WHERE server_id=?',[Number(billedGb)||0,String(serverId)]); } finally { conn.release(); } }
-async function adminUpdateBilling(serverId, values) { const fields=['price_per_gb','download_only','free_traffic_hourly_gb','free_traffic_daily_gb','free_traffic_weekly_gb','free_traffic_monthly_gb']; const sets=[]; const params=[]; for (const f of fields) if (values[f] !== undefined) { sets.push(`${f}=?`); params.push(Number(values[f])||0); } if(!sets.length) return getPurchaseByServerId(serverId); params.push(String(serverId)); const conn=await pool.getConnection(); try { await conn.execute(`UPDATE purchases SET ${sets.join(', ')}, updated_at=CURRENT_TIMESTAMP WHERE server_id=?`, params); } finally { conn.release(); } return getPurchaseByServerId(serverId); }
 
 async function listAdminPurchases(filters={}){return listAdminServers(filters);}
-async function listAdminWalletLogs(filters={}){const limit=toLimit(filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; if(filters.search){where.push('(w.telegram_id LIKE ? OR w.description LIKE ?)');params.push('%'+filters.search+'%','%'+filters.search+'%');} if(filters.type){where.push('w.type=?');params.push(filters.type);} if(filters.from){where.push('w.timestamp>=?');params.push(filters.from);} if(filters.to){where.push('w.timestamp<=?');params.push(filters.to);} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT w.*,u.wallet current_balance FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id ${whereSql} ORDER BY w.timestamp DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM wallet_logs w ${whereSql}`,params); return {rows,page:Number(filters.page)||1,limit,total:count.total};}finally{conn.release();}}
+async function listAdminWalletLogs(filters={}){const limit=toLimit(filters.pageSize || filters.limit); const offset=pageOffset(filters.page,limit); const where=[]; const params=[]; const q=String(filters.q || filters.search || '').trim(); if(q){const like='%'+q+'%'; const exprs=['w.telegram_id','w.description','w.type','w.amount','w.timestamp','u.wallet']; where.push('('+exprs.map(adminLikeExpr).join(' OR ')+')');params.push(...Array(exprs.length).fill(like));} if(filters.type){where.push('w.type=?');params.push(filters.type);} if(filters.from){where.push('w.timestamp>=?');params.push(filters.from);} if(filters.to){where.push('w.timestamp<=?');params.push(filters.to);} const whereSql=where.length?'WHERE '+where.join(' AND '):''; const conn=await pool.getConnection(); try{const [rows]=await conn.query(`SELECT w.*,u.wallet current_balance FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id ${whereSql} ORDER BY w.timestamp DESC LIMIT ? OFFSET ?`,[...params,limit,offset]); const [[count]]=await conn.query(`SELECT COUNT(*) total FROM wallet_logs w LEFT JOIN users u ON u.telegram_id=w.telegram_id ${whereSql}`,params); return {rows,page:Number(filters.page)||1,pageSize:limit,limit,total:count.total};}finally{conn.release();}}
+
 async function adminCreditUser(telegramId, amount, description='شارژ کیف پول توسط ادمین'){ await creditUser(telegramId, Number(amount)); await recordWalletLog(telegramId, Number(amount), description, 'admin_credit'); return getUserWallet(telegramId); }
 async function adminDebitUser(telegramId, amount, description='کسر کیف پول توسط ادمین'){ const ok=await debitUser(telegramId, Number(amount)); if(!ok) throw new Error('INSUFFICIENT_BALANCE'); await recordWalletLog(telegramId, -Math.abs(Number(amount)), description, 'admin_debit'); return getUserWallet(telegramId); }
 async function adminUpdatePurchaseStatus(idOrServerId,status){ await updatePurchaseStatus(idOrServerId,status); return getPurchaseByServerId(idOrServerId); }
