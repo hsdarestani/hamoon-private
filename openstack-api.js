@@ -511,9 +511,103 @@ async function getServerDetails(dcConfig, token, serverId) {
   }
 }
 
+
+function resolveComputeUrlForStart(config) {
+  const key = String(config?.key || config?.datacenter || '').toLowerCase();
+
+  const url =
+    config?.OS_COMPUTE_URL ||
+    config?.NOVA_URL ||
+    config?.OS_NOVA_URL ||
+    config?.COMPUTE_URL ||
+    config?.compute_url ||
+    config?.nova_url ||
+    config?.computeUrl;
+
+  if (url) return String(url).replace(/\/+$/, '');
+
+  // Production fallback for Tebyan Nova endpoint
+  if (key === 'tebyan') return 'http://94.232.171.61:8774/v2.1';
+
+  return null;
+}
+
+async function startServer(config, token, serverId) {
+  const provider = String(config?.provider || config?.apiType || config?.key || '').toLowerCase();
+  const dcKey = String(config?.key || config?.datacenter || '').toLowerCase();
+
+  // Hetzner Cloud API
+  if (provider.includes('hetzner') || dcKey.includes('hetzner')) {
+    const hetznerToken =
+      config?.HETZNER_API_TOKEN ||
+      config?.HETZNER_TOKEN ||
+      config?.apiToken ||
+      config?.token ||
+      process.env.HETZNER_API_TOKEN ||
+      process.env.HETZNER_TOKEN ||
+      process.env.HCLOUD_TOKEN;
+
+    if (!hetznerToken) {
+      throw new Error('Hetzner API token is missing');
+    }
+
+    const res = await axios.post(
+      `https://api.hetzner.cloud/v1/servers/${serverId}/actions/poweron`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${hetznerToken}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000,
+        validateStatus: () => true
+      }
+    );
+
+    if (res.status >= 200 && res.status < 300) {
+      return res.data;
+    }
+
+    const msg = JSON.stringify(res.data || {}).slice(0, 500);
+    throw new Error(`Hetzner poweron failed HTTP ${res.status}: ${msg}`);
+  }
+
+  // OpenStack Nova
+  const baseUrl = resolveComputeUrlForStart(config);
+  if (!baseUrl) {
+    throw new Error(`Compute URL is missing for datacenter ${dcKey || '-'}`);
+  }
+
+  if (!token) {
+    throw new Error(`OpenStack token is missing for datacenter ${dcKey || '-'}`);
+  }
+
+  const res = await axios.post(
+    `${baseUrl}/servers/${serverId}/action`,
+    { 'os-start': null },
+    {
+      headers: {
+        'X-Auth-Token': token,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000,
+      validateStatus: () => true
+    }
+  );
+
+  if (res.status >= 200 && res.status < 300) {
+    return res.data || { ok: true };
+  }
+
+  const msg = JSON.stringify(res.data || {}).slice(0, 500);
+  throw new Error(`OpenStack start failed HTTP ${res.status}: ${msg}`);
+}
+
+
 module.exports = {
     getToken, listFlavors, listImages, createKeyPair, deleteKeyPair,
     createServer, rebuildServer, getServer, deleteServer, listServers,
-    suspendServer, resumeServer, resetServerPassword, createSnapshot, listSnapshots, createServerFromSnapshot, getServerDetails, ensureSshSecurityGroup
+    suspendServer, resumeServer, resetServerPassword, createSnapshot, listSnapshots, createServerFromSnapshot, getServerDetails, ensureSshSecurityGroup,
+  startServer,
 };
 

@@ -286,6 +286,7 @@ const {
     updatePurchaseCycle,
     updateUserShahkar,
     getUserActivePurchases,
+    getUserRestartablePurchases,
     upsertServerSecret,
     getServerSecret
 } = require('./db');
@@ -318,6 +319,7 @@ const mainMenu = {
             ['🛒 خرید سرور', '💰 افزایش اعتبار'],
             ['👛 کیف پول'],
             ['⚙️ مدیریت سرورها'],
+            ['⚡ روشن‌کردن سرورها'],
             ['📞 پشتیبانی']
         ]
     }
@@ -777,8 +779,10 @@ case '👛 کیف پول': {
 }
 
 
-
-
+        case '⚡ روشن‌کردن سرورها':
+        case '🔌 روشن کردن سرورها':
+        case 'روشن کردن سرورها':
+            return handleStartMySuspendedServers(effectiveChatId, effectiveUserId);
 
         case '⚙️ مدیریت سرورها':
            // sendMessage(effectiveChatId, 'در حال دریافت لیست سرورها از تمام دیتاسنترها...');
@@ -2354,6 +2358,104 @@ ${rawPrivateKey}
   }
 }
 
+
+
+
+async function handleStartMySuspendedServers(chatId, userId) {
+  try {
+    const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
+
+    if (wallet <= 0) {
+      return sendMessage(
+        chatId,
+        'کیف پول شما موجودی کافی ندارد. لطفاً ابتدا کیف پول را شارژ کنید و بعد دوباره گزینه «⚡ روشن‌کردن سرورها» را بزنید.'
+      );
+    }
+
+    const purchases = await getUserRestartablePurchases(userId);
+
+    if (!purchases || purchases.length === 0) {
+      return sendMessage(
+        chatId,
+        'در حال حاضر سرور خاموش/معلق قابل روشن‌کردن برای حساب شما پیدا نشد.'
+      );
+    }
+
+    const userDCs = getUserEffectiveDCs(String(userId)) || {};
+    const results = [];
+
+    await sendMessage(
+      chatId,
+      `در حال روشن‌کردن ${purchases.length} سرور خاموش/معلق شما... لطفاً چند لحظه صبر کنید.`
+    );
+
+    for (const purchase of purchases) {
+      const dcKey = String(purchase.datacenter || '').trim();
+      const dcConfig = userDCs[dcKey];
+
+      if (!dcConfig) {
+        results.push({
+          name: purchase.server_name || purchase.server_id,
+          ok: false,
+          error: `دیتاسنتر ${dcKey} در تنظیمات فعلی کاربر پیدا نشد`
+        });
+        continue;
+      }
+
+      try {
+        let token = null;
+        const providerText = String(dcConfig.provider || dcConfig.apiType || dcConfig.key || '').toLowerCase();
+        const isHetzner = providerText.includes('hetzner') || String(dcConfig.key || '').toLowerCase().includes('hetzner');
+
+        if (!isHetzner) {
+          token = await openstackApi.getToken(dcConfig);
+        }
+
+        await openstackApi.startServer(dcConfig, token, purchase.server_id);
+
+        await updatePurchaseStatus(purchase.server_id, 'active').catch(err => {
+          console.error('[START_MY_SERVERS] updatePurchaseStatus failed:', purchase.server_id, err.message);
+        });
+
+        results.push({ name: purchase.server_name || purchase.server_id, ok: true });
+      } catch (e) {
+        console.error('[START_MY_SERVERS] failed:', {
+          userId,
+          server_id: purchase.server_id,
+          server_name: purchase.server_name,
+          dcKey,
+          error: e.message
+        });
+        results.push({ name: purchase.server_name || purchase.server_id, ok: false, error: e.message });
+      }
+    }
+
+    const ok = results.filter(r => r.ok);
+    const failed = results.filter(r => !r.ok);
+    let text = '';
+
+    if (ok.length > 0) {
+      text += '✅ سرورهای زیر برای روشن‌شدن ارسال شدند:\n';
+      text += ok.map(r => `• ${r.name}`).join('\n');
+      text += '\n\n';
+    }
+
+    if (failed.length > 0) {
+      text += '⚠️ روشن‌کردن این سرورها ناموفق بود:\n';
+      text += failed.map(r => `• ${r.name}: ${String(r.error || 'خطای نامشخص').slice(0, 120)}`).join('\n');
+      text += '\n\nاگر موجودی کیف پول کافی است ولی خطا ادامه داشت، پشتیبانی بررسی می‌کند.';
+    }
+
+    if (!text.trim()) {
+      text = 'سروری برای روشن‌کردن پیدا نشد.';
+    }
+
+    return sendMessage(chatId, text.trim());
+  } catch (e) {
+    console.error('[START_MY_SERVERS] fatal:', e);
+    return sendMessage(chatId, '❌ خطایی در روشن‌کردن سرورها رخ داد. لطفاً چند دقیقه بعد دوباره تلاش کنید یا به پشتیبانی پیام دهید.');
+  }
+}
 
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
