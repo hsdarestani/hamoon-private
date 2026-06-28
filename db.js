@@ -1024,6 +1024,30 @@ async function adminDebitUser(telegramId, amount, description='کسر کیف پ�
 async function adminUpdatePurchaseStatus(idOrServerId,status){ await updatePurchaseStatus(idOrServerId,status); return getPurchaseByServerId(idOrServerId); }
 async function listAdminAuditLogs(limit=200){await ensureAdminAuditLogsTable(); const conn=await pool.getConnection(); try{const [rows]=await conn.query('SELECT * FROM admin_audit_logs ORDER BY created_at DESC LIMIT ?',[toLimit(limit,200,500)]); return rows;}finally{conn.release();}}
 
+
+async function getUserRestartablePurchases(telegramId) {
+  const [rows] = await pool.query(`
+    SELECT *
+    FROM purchases
+    WHERE telegram_id = ?
+      AND status IN (
+        'suspended',
+        'stopped',
+        'stop',
+        'shutoff',
+        'powered_off',
+        'poweroff',
+        'paused',
+        'shelved',
+        'shelved_offloaded'
+      )
+    ORDER BY updated_at DESC, created_at DESC
+  `, [telegramId]);
+
+  return rows;
+}
+
+
 module.exports = {
     pool,
     pingDatabase,
@@ -1075,5 +1099,6 @@ module.exports = {
     deleteTestServer,
     upsertServerSecret,
     getServerSecret,
+    getUserRestartablePurchases,
 };
 
