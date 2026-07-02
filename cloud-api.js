@@ -36,6 +36,11 @@ createServerFromSnapshot: (dc, ...a) =>
   deleteKeyPair:         (dc, ...a) => pick(dc).deleteKeyPair ? pick(dc).deleteKeyPair(dc, ...a) : Promise.reject(new Error('deleteKeyPair not supported')),
   getServerDetails:      (dc, ...a) => pick(dc).getServerDetails ? pick(dc).getServerDetails(dc, ...a) : Promise.reject(new Error('getServerDetails not supported')),
   ensureSshSecurityGroup:(dc, ...a) => pick(dc).ensureSshSecurityGroup ? pick(dc).ensureSshSecurityGroup(dc, ...a) : Promise.resolve('default'),
+  listHetznerServerTypes: (dc, ...a) => pick(dc).listHetznerServerTypes ? pick(dc).listHetznerServerTypes(dc, ...a) : Promise.reject(new Error('Hetzner server types not supported')),
+  changeHetznerServerType: (dc, ...a) => pick(dc).changeHetznerServerType ? pick(dc).changeHetznerServerType(dc, ...a) : Promise.reject(new Error('Hetzner change_type not supported')),
+  waitHetznerAction: (dc, ...a) => pick(dc).waitHetznerAction ? pick(dc).waitHetznerAction(dc, ...a) : Promise.reject(new Error('Hetzner actions not supported')),
+  powerOffHetznerServer: (dc, ...a) => pick(dc).powerOffHetznerServer ? pick(dc).powerOffHetznerServer(dc, ...a) : Promise.reject(new Error('Hetzner poweroff not supported')),
+  powerOnHetznerServer: (dc, ...a) => pick(dc).powerOnHetznerServer ? pick(dc).powerOnHetznerServer(dc, ...a) : Promise.reject(new Error('Hetzner poweron not supported')),
 
 };
 

@@ -6,10 +6,76 @@ const axios  = require('axios');
 
 const BASE = 'https://api.hetzner.cloud/v1';
 
+
+function getHetznerApiToken(config = {}) {
+  return config?.HETZNER_API_TOKEN || config?.HETZNER_TOKEN || config?.apiToken || config?.token ||
+    process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN || null;
+}
+
+async function hetznerRequest(config, method, reqPath, body) {
+  const token = getHetznerApiToken(config);
+  if (!token) throw new Error('Hetzner API token is missing');
+  const res = await axios({
+    baseURL: BASE,
+    url: reqPath,
+    method,
+    data: body,
+    timeout: 30000,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    validateStatus: () => true
+  });
+  if (res.status >= 200 && res.status < 300) return res.data;
+  const err = new Error(`Hetzner API ${method} ${reqPath} failed HTTP ${res.status}`);
+  err.status = res.status;
+  err.data = res.data;
+  throw err;
+}
+
+async function listHetznerServerTypes(config) {
+  const data = await hetznerRequest(config, 'GET', '/server_types');
+  return data.server_types || [];
+}
+
+async function getHetznerServer(config, serverId) {
+  const data = await hetznerRequest(config, 'GET', `/servers/${serverId}`);
+  return data.server;
+}
+
+async function powerOffHetznerServer(config, serverId) {
+  const data = await hetznerRequest(config, 'POST', `/servers/${serverId}/actions/poweroff`, {});
+  return data.action;
+}
+
+async function powerOnHetznerServer(config, serverId) {
+  const data = await hetznerRequest(config, 'POST', `/servers/${serverId}/actions/poweron`, {});
+  return data.action;
+}
+
+async function changeHetznerServerType(config, serverId, serverType, upgradeDisk = false) {
+  const data = await hetznerRequest(config, 'POST', `/servers/${serverId}/actions/change_type`, {
+    server_type: String(serverType).toLowerCase(),
+    upgrade_disk: !!upgradeDisk
+  });
+  return data.action;
+}
+
+async function waitHetznerAction(config, actionId, timeoutMs = 300000) {
+  if (!actionId) return null;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const data = await hetznerRequest(config, 'GET', `/actions/${actionId}`);
+    const action = data.action;
+    if (action?.status === 'success') return action;
+    if (action?.status === 'error') throw new Error(`Hetzner action ${actionId} failed: ${action.error?.message || 'unknown error'}`);
+    await new Promise(r => setTimeout(r, 5000));
+  }
+  throw new Error(`Hetzner action ${actionId} timed out`);
+}
+
 function client(tokenOrCfg) {
   const token = typeof tokenOrCfg === 'string'
     ? tokenOrCfg
-    : (tokenOrCfg?.token || process.env.HETZNER_API_TOKEN);
+    : (getHetznerApiToken(tokenOrCfg));
   return axios.create({
     baseURL: BASE,
     timeout: 15000,
@@ -249,6 +315,7 @@ async function listServers(dcConfig /*, token */) {
     id: String(s.id),
     name: s.name,
     status: s.status,
+    server_type: s.server_type?.name || s.server_type?.id || null,
     image: { name: s.image?.name || String(s.image?.id || '') },
     metadata: {
       user: s.labels?.user,
@@ -266,6 +333,7 @@ async function getServer(dcConfig, /*token*/ _t, serverId) {
     id: String(s.id),
     name: s.name,
     status: s.status,
+    server_type: s.server_type?.name || s.server_type?.id || null,
     image: { name: s.image?.name || String(s.image?.id || '') },
     metadata: {
       user: s.labels?.user,
@@ -318,6 +386,14 @@ async function resetServerPassword(dcConfig, /*token*/ _t, serverId) {
 
 
 module.exports = {
+  getHetznerApiToken,
+  hetznerRequest,
+  listHetznerServerTypes,
+  getHetznerServer,
+  powerOffHetznerServer,
+  powerOnHetznerServer,
+  changeHetznerServerType,
+  waitHetznerAction,
   getToken,
   listFlavors,
   listImages,

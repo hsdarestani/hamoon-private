@@ -410,6 +410,52 @@ async function getUserActivePurchases(telegramId) {
     }
 }
 
+async function getPurchaseForUserServer(telegramId, serverId, datacenter) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            'SELECT * FROM purchases WHERE telegram_id = ? AND server_id = ? AND datacenter = ? LIMIT 1',
+            [String(telegramId), String(serverId), datacenter]
+        );
+        return rows.length > 0 ? rows[0] : null;
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, amount) {
+    const conn = await pool.getConnection();
+    try {
+        const [res] = await conn.execute(
+            `UPDATE purchases
+             SET flavor_id = ?, amount = ?, status = 'active', updated_at = CURRENT_TIMESTAMP
+             WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`,
+            [flavorId, amount, String(telegramId), String(serverId), datacenter]
+        );
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function setPurchaseStatusForUser(telegramId, serverId, datacenter, status) {
+    const conn = await pool.getConnection();
+    try {
+        const [res] = await conn.execute(
+            'UPDATE purchases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ? AND server_id = ? AND datacenter = ?',
+            [status, String(telegramId), String(serverId), datacenter]
+        );
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function recordServerUpgradeLog(telegramId, serverId, oldFlavor, newFlavor, oldAmount, newAmount) {
+    const desc = `Server upgrade ${serverId}: ${oldFlavor} (${oldAmount}) -> ${newFlavor} (${newAmount})`;
+    return recordWalletLog(telegramId, 0, desc, 'server_upgrade');
+}
+
 async function hasUsedFreeTestServer(telegramId, datacenter) {
     const conn = await pool.getConnection();
     try {
@@ -1100,5 +1146,9 @@ module.exports = {
     upsertServerSecret,
     getServerSecret,
     getUserRestartablePurchases,
+    getPurchaseForUserServer,
+    updatePurchasePlan,
+    setPurchaseStatusForUser,
+    recordServerUpgradeLog,
 };
 
