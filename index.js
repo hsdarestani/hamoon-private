@@ -288,7 +288,11 @@ const {
     getUserActivePurchases,
     getUserRestartablePurchases,
     upsertServerSecret,
-    getServerSecret
+    getServerSecret,
+    getPurchaseForUserServer,
+    updatePurchasePlan,
+    setPurchaseStatusForUser,
+    recordServerUpgradeLog
 } = require('./db');
 
 // Environment variables
@@ -309,6 +313,7 @@ const bot = new TelegramBot(token, { polling: true });
 const state = {};
 const adminState = { impersonating: null };
 let orderCounter = 10000;
+const hetznerUpgradeLocks = new Map();
 
 // Main menu keyboard layout
 const mainMenu = {
@@ -1381,6 +1386,25 @@ case 'GET_TRAFFIC_RAW': {
         const manageDcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
         if (!manageDcConfig) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
         return handleServerManagement(effectiveChatId, effectiveUserId, serverId, manageDcConfig);
+      }
+
+      case 'HU': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
+        if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleHetznerUpgradeMenu(effectiveChatId, effectiveUserId, payload.serverId, dc);
+      }
+      case 'HUS': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
+        if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleHetznerUpgradeSelect(effectiveChatId, effectiveUserId, payload.serverId, dc, payload.targetFlavor);
+      }
+      case 'HUC': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
+        if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleHetznerUpgradeConfirm(effectiveChatId, effectiveUserId, payload.serverId, dc, payload.targetFlavor, !!payload.upgradeDisk);
+      }
+      case 'HUCANCEL': {
+        return sendMessage(effectiveChatId, 'عملیات ارتقا لغو شد.');
       }
 
       case 'GET_STORED_PASSWORD': {
@@ -2457,13 +2481,146 @@ async function handleStartMySuspendedServers(chatId, userId) {
   }
 }
 
+const HETZNER_UPGRADE_ALLOWED_STATUSES = new Set(['active', 'suspended', 'stopped', 'shutoff', 'pending_ssh']);
+const HETZNER_UPGRADE_BLOCKED_STATUSES = new Set(['deleted', 'deletion_pending', 'provider_missing', 'provisioning_failed', 'manual_review', 'upgrading']);
+
+function isHetznerDc(dcConfig) {
+  return String(dcConfig?.key || dcConfig?.__baseKey || '').split('__')[0].toLowerCase() === 'hetzner' ||
+    String(dcConfig?.provider || dcConfig?.apiType || '').toLowerCase() === 'hetzner';
+}
+
+function normalizeHetznerFlavorId(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function hetznerFlavorType(flavor) {
+  return normalizeHetznerFlavorId(flavor?.hetzner_type || flavor?.server_type || flavor?.name || flavor?.id);
+}
+
+function getFlavorRam(flavor) { return Number(flavor?.ram ?? flavor?.memory ?? 0); }
+function getFlavorCpu(flavor) { return Number(flavor?.cpu ?? flavor?.cores ?? flavor?.vcpus ?? 0); }
+function getFlavorDisk(flavor) { return Number(flavor?.disk ?? 0); }
+
+function findHetznerFlavor(dcConfig, flavorIdOrType) {
+  const key = normalizeHetznerFlavorId(flavorIdOrType);
+  return (dcConfig?.flavors || []).find(f => normalizeHetznerFlavorId(f.id) === key || hetznerFlavorType(f) === key);
+}
+
+function getSellableHetznerFlavors(dcConfig) {
+  return (dcConfig?.flavors || []).filter(f => f && !f.deprecated && f.available !== false && hetznerFlavorType(f));
+}
+
+function getHigherHetznerFlavors(dcConfig, currentFlavor, duration) {
+  const currentPrice = currentFlavor ? getFlavorCyclePrice(currentFlavor, duration) : 0;
+  return getSellableHetznerFlavors(dcConfig).filter(f => {
+    if (currentFlavor && normalizeHetznerFlavorId(f.id) === normalizeHetznerFlavorId(currentFlavor.id)) return false;
+    const price = getFlavorCyclePrice(f, duration);
+    if (currentFlavor && price <= currentPrice) return false;
+    if (!currentFlavor) return true;
+    return price > currentPrice || getFlavorCpu(f) > getFlavorCpu(currentFlavor) || getFlavorRam(f) > getFlavorRam(currentFlavor) || getFlavorDisk(f) > getFlavorDisk(currentFlavor);
+  }).sort((a, b) => getFlavorCyclePrice(a, duration) - getFlavorCyclePrice(b, duration));
+}
+
+async function resolveCurrentHetznerFlavor(dcConfig, purchase) {
+  let current = findHetznerFlavor(dcConfig, purchase?.flavor_id);
+  if (current) return { current, unknown: false };
+  try {
+    const providerServer = await openstackApi.getServer(dcConfig, null, purchase.server_id);
+    current = findHetznerFlavor(dcConfig, providerServer?.server_type?.name || providerServer?.server_type || providerServer?.type);
+  } catch (_) {}
+  return { current: current || null, unknown: !current };
+}
+
+async function handleHetznerUpgradeMenu(chatId, userId, serverId, dcConfig) {
+  const purchase = await getPurchaseForUserServer(userId, serverId, 'hetzner');
+  if (!purchase) return sendMessage(chatId, '❌ سرور موردنظر برای شما پیدا نشد.');
+  if (HETZNER_UPGRADE_BLOCKED_STATUSES.has(String(purchase.status || '').toLowerCase())) return sendMessage(chatId, '❌ این سرور در وضعیت قابل ارتقا نیست.');
+  const { current, unknown } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
+  const plans = getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly');
+  if (!plans.length) return sendMessage(chatId, 'پلن بالاتری برای ارتقای این سرور موجود نیست.');
+  const keyboard = plans.map(f => ([{ text: `${f.label || f.id} - ${formatToman(getFlavorCyclePrice(f, purchase.duration || 'monthly'))} تومان`, callback_data: makeShortCb(userId, { action: 'HUS', serverId, dcKey: 'hetzner', targetFlavor: f.id }) }]));
+  keyboard.push([{ text: '❌ انصراف', callback_data: makeShortCb(userId, { action: 'HUCANCEL', serverId, dcKey: 'hetzner' }) }]);
+  const warning = unknown ? '\n⚠️ پلن فعلی دقیقاً تشخیص داده نشد؛ لطفاً با دقت انتخاب کنید.' : '';
+  return sendMessage(chatId, `پلن جدید را برای ارتقای سرور انتخاب کنید:${warning}`, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+async function handleHetznerUpgradeSelect(chatId, userId, serverId, dcConfig, targetFlavorId) {
+  const purchase = await getPurchaseForUserServer(userId, serverId, 'hetzner');
+  if (!purchase) return sendMessage(chatId, '❌ سرور موردنظر برای شما پیدا نشد.');
+  const target = findHetznerFlavor(dcConfig, targetFlavorId);
+  const { current } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
+  if (!target) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
+  if (current && !getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly').some(f => f.id === target.id)) return sendMessage(chatId, '❌ پلن انتخاب‌شده بالاتر از پلن فعلی نیست.');
+  const oldAmount = Number(purchase.amount || (current ? getFlavorCyclePrice(current, purchase.duration || 'monthly') : 0));
+  const newAmount = getFlavorCyclePrice(target, purchase.duration || 'monthly');
+  const text = `شما در حال ارتقای سرور زیر هستید:\nسرور: ${purchase.server_name || serverId}\nپلن فعلی: ${current?.label || purchase.flavor_id || 'نامشخص'}\nپلن جدید: ${target.label || target.id}\nهزینه فعلی: ${formatToman(oldAmount)} تومان\nهزینه جدید: ${formatToman(newAmount)} تومان\nدوره پرداخت: ${getCycleLabel(purchase.duration || 'monthly')}\n\nتوجه: در زمان ارتقا ممکن است سرور برای چند دقیقه خاموش یا از دسترس خارج شود.\nارتقا ممکن است چند دقیقه زمان ببرد.\nافزایش دیسک اختیاری است و مسیر پیشنهادی، ارتقا بدون افزایش دیسک است.`;
+  return sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
+    [{ text: '✅ ارتقا بدون افزایش دیسک', callback_data: makeShortCb(userId, { action: 'HUC', serverId, dcKey: 'hetzner', targetFlavor: target.id, upgradeDisk: false }) }],
+    [{ text: '⚠️ ارتقا همراه افزایش دیسک', callback_data: makeShortCb(userId, { action: 'HUC', serverId, dcKey: 'hetzner', targetFlavor: target.id, upgradeDisk: true }) }],
+    [{ text: '❌ انصراف', callback_data: makeShortCb(userId, { action: 'HUCANCEL', serverId, dcKey: 'hetzner' }) }]
+  ] } });
+}
+
+async function handleHetznerUpgradeConfirm(chatId, userId, serverId, dcConfig, targetFlavorId, upgradeDisk) {
+  const lockKey = `${userId}:${serverId}`;
+  if (hetznerUpgradeLocks.has(lockKey)) return sendMessage(chatId, 'این سرور در حال ارتقا است...');
+  hetznerUpgradeLocks.set(lockKey, true);
+  let previousStatus = 'active';
+  let changeSucceeded = false;
+  try {
+    const purchase = await getPurchaseForUserServer(userId, serverId, 'hetzner');
+    if (!purchase) return sendMessage(chatId, '❌ سرور موردنظر برای شما پیدا نشد.');
+    previousStatus = purchase.status || 'active';
+    const status = String(previousStatus).toLowerCase();
+    if (!HETZNER_UPGRADE_ALLOWED_STATUSES.has(status) || HETZNER_UPGRADE_BLOCKED_STATUSES.has(status)) return sendMessage(chatId, '❌ این سرور در وضعیت قابل ارتقا نیست.');
+    const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
+    const minWallet = Number(process.env.HETZNER_UPGRADE_MIN_WALLET || 0);
+    if (wallet <= 0 || wallet < minWallet) return sendMessage(chatId, 'موجودی کیف پول برای ادامه سرویس کافی نیست. لطفاً ابتدا کیف پول را شارژ کنید.');
+    const target = findHetznerFlavor(dcConfig, targetFlavorId);
+    const { current } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
+    if (!target || (current && !getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly').some(f => f.id === target.id))) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
+
+    await setPurchaseStatusForUser(userId, serverId, 'hetzner', 'upgrading');
+    console.log('[HETZNER_UPGRADE]', { user: userId, server_id: serverId, old_flavor: purchase.flavor_id, new_flavor: target.id, upgrade_disk: !!upgradeDisk, status: 'started' });
+    let providerServer;
+    try { providerServer = await openstackApi.getServer(dcConfig, null, serverId); } catch (e) {
+      if (e.response?.status === 404 || e.status === 404) {
+        await setPurchaseStatusForUser(userId, serverId, 'hetzner', 'provider_missing');
+        return sendMessage(chatId, '❌ سرور در Hetzner پیدا نشد و ارتقا انجام نشد.');
+      }
+      throw e;
+    }
+    if (!['off', 'stopped'].includes(String(providerServer?.status || '').toLowerCase())) {
+      try { const a = await openstackApi.powerOffHetznerServer(dcConfig, serverId); await openstackApi.waitHetznerAction(dcConfig, a?.id); } catch (e) { if (!/already|offline|off/i.test(e.message)) throw e; }
+    }
+    const action = await openstackApi.changeHetznerServerType(dcConfig, serverId, hetznerFlavorType(target), !!upgradeDisk);
+    await openstackApi.waitHetznerAction(dcConfig, action?.id);
+    changeSucceeded = true;
+    const newAmount = getFlavorCyclePrice(target, purchase.duration || 'monthly');
+    await updatePurchasePlan(userId, serverId, 'hetzner', target.id, newAmount);
+    await recordServerUpgradeLog(userId, serverId, purchase.flavor_id, target.id, purchase.amount, newAmount).catch(() => {});
+    let powerMsg = '';
+    try { const p = await openstackApi.powerOnHetznerServer(dcConfig, serverId); await openstackApi.waitHetznerAction(dcConfig, p?.id, 180000); } catch (e) { powerMsg = '\n⚠️ ارتقا انجام شد اما روشن‌کردن خودکار نیاز به بررسی پشتیبانی دارد.'; console.warn('[HETZNER_UPGRADE] poweron failed', { user: userId, server_id: serverId, message: e.message }); }
+    console.log('[HETZNER_UPGRADE]', { user: userId, server_id: serverId, old_flavor: purchase.flavor_id, new_flavor: target.id, upgrade_disk: !!upgradeDisk, status: 'success' });
+    return sendMessage(chatId, `✅ درخواست ارتقای سرور با موفقیت انجام شد.\nپلن جدید در پنل ثبت شد و سرور در حال روشن‌شدن/آماده‌سازی است.${powerMsg}`);
+  } catch (e) {
+    console.error('[HETZNER_UPGRADE]', { user: userId, server_id: serverId, target_flavor: targetFlavorId, upgrade_disk: !!upgradeDisk, status: 'failed', message: e.message });
+    if (!changeSucceeded) await setPurchaseStatusForUser(userId, serverId, 'hetzner', previousStatus).catch(() => {});
+    return sendMessage(chatId, '❌ ارتقای سرور انجام نشد.\nهیچ تغییری در پلن و هزینه سرور شما ثبت نشد.');
+  } finally {
+    hetznerUpgradeLocks.delete(lockKey);
+  }
+}
+
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
     ensureUserState(userId);
 
     const tok = await openstackApi.getToken(dcConfig);
     const srv = await openstackApi.getServer(dcConfig, tok, serverId);
-    const purchase = await getPurchaseByServerId(serverId);
+    const purchase = isHetznerDc(dcConfig)
+      ? (await getPurchaseForUserServer(userId, serverId, 'hetzner').catch(() => null) || await getPurchaseByServerId(serverId))
+      : await getPurchaseByServerId(serverId);
 
     let ip = extractServerIp(srv) || '–';
 
@@ -2512,6 +2669,9 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
     }
     if (hasCapability(dcConfig, 'resumeServer') && ['shutoff', 'stopped', 'suspended'].some(x => stateText.includes(x))) {
       keyboard.push([{ text: '▶️ روشن کردن', callback_data: short('RESUME') }]);
+    }
+    if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId) && !HETZNER_UPGRADE_BLOCKED_STATUSES.has(String(purchase.status || '').toLowerCase())) {
+      keyboard.push([{ text: '⬆️ ارتقای سرور', callback_data: makeShortCb(userId, { action: 'HU', serverId: srv.id, dcKey: 'hetzner' }) }]);
     }
     if (hasCapability(dcConfig, 'deleteServer')) {
       keyboard.push([{ text: '❌ حذف سرور', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]);
@@ -2612,7 +2772,9 @@ async function getProjectTrafficSummary(chatId, userId, dcConfig, projectId) {
 
 
 async function askForDeletionConfirmation(chatId, userId, serverId, dcConfig) {
-    const purchase = await getPurchaseByServerId(serverId);
+    const purchase = isHetznerDc(dcConfig)
+      ? (await getPurchaseForUserServer(userId, serverId, 'hetzner').catch(() => null) || await getPurchaseByServerId(serverId))
+      : await getPurchaseByServerId(serverId);
     const serverName = purchase?.server_name || serverId;
     const messageText = `⚠️ آیا از حذف سرور *${escapeMarkdownV2(serverName)}* در دیتاسنتر *${escapeMarkdownV2(dcConfig.name)}* مطمئن هستید؟\nاین عملیات غیرقابل بازگشت است\\.`;
     const keyboard = [
@@ -2626,7 +2788,9 @@ async function handleServerDeletion(chatId, userId, serverId, dcConfig) {
     sendMessage(chatId, `🗑️ در حال حذف سرور از ${dcConfig.name}...`);
     try {
         const tok = await openstackApi.getToken(dcConfig);
-        const purchase = await getPurchaseByServerId(serverId);
+        const purchase = isHetznerDc(dcConfig)
+      ? (await getPurchaseForUserServer(userId, serverId, 'hetzner').catch(() => null) || await getPurchaseByServerId(serverId))
+      : await getPurchaseByServerId(serverId);
         const isTestServer = !purchase;
 
         await openstackApi.deleteServer(dcConfig, tok, serverId).catch(e => {
@@ -2822,7 +2986,9 @@ async function getTrafficInfoRaw(chatId, serverId, dcConfig) {
 async function getTrafficInfo(chatId, serverId, dcConfig) {
   sendMessage(chatId, `📊 در حال دریافت اطلاعات ترافیک از ${dcConfig.name}...`);
   try {
-    const purchase = await getPurchaseByServerId(serverId);
+    const purchase = isHetznerDc(dcConfig)
+      ? (await getPurchaseForUserServer(userId, serverId, 'hetzner').catch(() => null) || await getPurchaseByServerId(serverId))
+      : await getPurchaseByServerId(serverId);
     if (!purchase) {
       return sendMessage(chatId, 'اطلاعات خرید یافت نشد. این ممکن است یک سرور تست باشد.');
     }

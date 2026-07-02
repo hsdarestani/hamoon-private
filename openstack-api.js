@@ -1,6 +1,7 @@
 // openstack-api.js - Centralized OpenStack API functions for multiple datacenters
 
 const axios = require('axios');
+const hetznerApi = require('./Hetzner/hetzner-api');
 const prices = require('./prices');
 const http = require('http');
 const https = require('https');
@@ -609,5 +610,13 @@ module.exports = {
     createServer, rebuildServer, getServer, deleteServer, listServers,
     suspendServer, resumeServer, resetServerPassword, createSnapshot, listSnapshots, createServerFromSnapshot, getServerDetails, ensureSshSecurityGroup,
   startServer,
+  getHetznerApiToken: hetznerApi.getHetznerApiToken,
+  hetznerRequest: hetznerApi.hetznerRequest,
+  listHetznerServerTypes: hetznerApi.listHetznerServerTypes,
+  getHetznerServer: hetznerApi.getHetznerServer,
+  powerOffHetznerServer: hetznerApi.powerOffHetznerServer,
+  powerOnHetznerServer: hetznerApi.powerOnHetznerServer,
+  changeHetznerServerType: hetznerApi.changeHetznerServerType,
+  waitHetznerAction: hetznerApi.waitHetznerAction,
 };
 
