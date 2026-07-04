@@ -171,7 +171,7 @@ async function listFlavors(dcConfig) {
 
 async function listImages(dcConfig) {
   try {
-    const token = dcConfig?.token || process.env.HETZNER_API_TOKEN;
+    const token = dcConfig?.token || dcConfig?.HETZNER_API_TOKEN || dcConfig?.HETZNER_TOKEN || process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN;
     if (!token) {
       console.warn('[hetzner] listImages: Missing token');
       return (dcConfig.images || []).map(i => ({ id: String(i.id), label: i.label, name: i.id }));
@@ -290,7 +290,7 @@ async function createKeyPair(dcConfig, /*token*/ _t, keyName) {
 
   // 2) در Hetzner اگر همین public_key موجود باشد، 409 می‌دهد.
   //    پس از تابع createOrGetSshKey استفاده می‌کنیم.
-  const token = dcConfig?.token || process.env.HETZNER_API_TOKEN;
+  const token = dcConfig?.token || dcConfig?.HETZNER_API_TOKEN || dcConfig?.HETZNER_TOKEN || process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN;
   const sshKey = await createOrGetSshKey({
     token,
     name: keyName.slice(0, 63),
@@ -319,6 +319,34 @@ async function deleteKeyPair(dcConfig, /*token*/ _t, keyNameOrId) {
 }
 
 
+
+function getHetznerFallbackLocations(dcConfig = {}, preferredLocation = null) {
+  const first = preferredLocation || dcConfig.HETZNER_LOCATION || process.env.HETZNER_LOCATION || 'nbg1';
+  const raw = dcConfig.HETZNER_LOCATION_FALLBACKS || process.env.HETZNER_LOCATION_FALLBACKS || first;
+  const list = String(raw).split(',').map(x => x.trim()).filter(Boolean);
+  const out = [];
+  for (const loc of [first, ...list]) {
+    if (loc && !out.includes(loc)) out.push(loc);
+  }
+  return out.length ? out : [first];
+}
+
+function isHetznerPlacementUnavailableError(err) {
+  const responseStatus = err?.response?.status || err?.status || err?.statusCode;
+  const message = String(err?.response?.data?.error?.message || err?.message || '');
+  const code = String(err?.response?.data?.error?.code || err?.code || '');
+  const dataText = (() => { try { return JSON.stringify(err?.response?.data || {}); } catch { return ''; } })();
+  const status = Number(responseStatus) || (/HTTP\s+412/i.test(message) ? 412 : 0) || (/status code\s+412/i.test(message) ? 412 : 0);
+  return Number(status) === 412 && (
+    code.includes('resource_unavailable') ||
+    message.toLowerCase().includes('placement') ||
+    message.toLowerCase().includes('resource_unavailable') ||
+    dataText.toLowerCase().includes('placement') ||
+    dataText.toLowerCase().includes('resource_unavailable') ||
+    message.includes('HTTP 412')
+  );
+}
+
 function slugifyAscii(s = '') {
   return String(s)
     .normalize('NFKD')
@@ -341,11 +369,11 @@ async function createServer(dcConfig, _t, opts) {
 user_data     
   } = opts || {};
 
-  const token = dcConfig?.token || process.env.HETZNER_API_TOKEN;
+  const token = dcConfig?.token || dcConfig?.HETZNER_API_TOKEN || dcConfig?.HETZNER_TOKEN || process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN;
   if (!token) throw new Error('[hetzner] createServer: missing token');
   if (!serverType) throw new Error('[hetzner] createServer: serverType is required (e.g. "cx22")');
   if (!image)      throw new Error('[hetzner] createServer: image is required (e.g. "ubuntu-22.04" or numeric ID)');
-  const loc = location || dcConfig?.HETZNER_LOCATION || 'nbg1';
+  const loc = location || dcConfig?.HETZNER_LOCATION || process.env.HETZNER_LOCATION || 'nbg1';
   const c = client(token);
 
 
@@ -369,13 +397,23 @@ user_data
   };
 
 
-try {
-  const r = await c.post('/servers', payload);
-  return r.data.server;
-} catch (e) {
-  console.error('🚨 [Hetzner createServer error]', e.response?.status, e.response?.data || e.message);
-  throw e;
+let lastPlacementError = null;
+for (const locCandidate of getHetznerFallbackLocations(dcConfig, loc)) {
+  const attemptPayload = { ...payload, location: locCandidate };
+  console.log('[HETZNER_CREATE_ATTEMPT]', { location: locCandidate, server_type: serverType, image });
+  try {
+    const r = await c.post('/servers', attemptPayload);
+    return r.data.server;
+  } catch (e) {
+    console.error('🚨 [Hetzner createServer error]', e.response?.status, e.response?.data || e.message);
+    if (!isHetznerPlacementUnavailableError(e)) throw e;
+    lastPlacementError = e;
+  }
 }
+const placementError = new Error('ظرفیت این پلن در لوکیشن انتخاب‌شده موقتاً در دسترس نیست. لطفاً پلن دیگری انتخاب کنید یا بعداً دوباره تلاش کنید.');
+placementError.code = 'HETZNER_PLACEMENT_UNAVAILABLE';
+placementError.cause = lastPlacementError;
+throw placementError;
 
 
   // نکته: اگر ssh_keys خالی باشد و ایمیج اجازه بده، Hetzner root_password تولید می‌کند
@@ -464,6 +502,8 @@ async function resetServerPassword(dcConfig, /*token*/ _t, serverId) {
 module.exports = {
   getHetznerApiToken,
   hetznerRequest,
+  getHetznerFallbackLocations,
+  isHetznerPlacementUnavailableError,
   listHetznerServerTypes,
   normalizeHetznerServerTypes,
   getHetznerSellablePlans,
