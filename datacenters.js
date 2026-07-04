@@ -32,58 +32,92 @@ const {
   monthlyTomanToHourly,
 } = require('./prices');
 
+function createHetznerLocationDc({ key, label, flag, location, fallbackLocations, namePrefix }) {
+  const token = process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN;
+  const plansUSD = [
+    { id: 'CX23', hetzner_type: 'cx23', cores: 2, memory: 4,  disk: 40,  label: 'CX23 (2vCPU / 4GB / 40GB)',  usdMonthly: 4.9 },
+    { id: 'CX33', hetzner_type: 'cx33', cores: 4, memory: 8,  disk: 80,  label: 'CX33 (4vCPU / 8GB / 80GB)',  usdMonthly: 9.4 },
+    { id: 'CAX11', hetzner_type: 'cax11', cores: 2, memory: 4,  disk: 40,  label: 'CAX11 (2vCPU / 4GB / 40GB, ARM)', usdMonthly: 4.7 },
+    { id: 'CCX13', hetzner_type: 'ccx13', cores: 2, memory: 8,  disk: 80,  label: 'CCX13 (2ded vCPU / 8GB / 80GB)', usdMonthly: 14.3 },
+  ];
+
+  return {
+    key,
+    name: `${flag} ${label}`,
+    label: `${flag} ${label}`,
+    country: label,
+    provider: 'hetzner',
+    apiType: 'hetzner',
+    HETZNER_PASSWORD_ONLY: true,
+    HETZNER_API_TOKEN: token,
+    HETZNER_TOKEN: process.env.HETZNER_TOKEN || process.env.HETZNER_API_TOKEN || process.env.HCLOUD_TOKEN,
+    token,
+    HETZNER_LOCATION: location,
+    HETZNER_LOCATION_FALLBACKS: fallbackLocations || location,
+    namePrefix,
+    enabled: true,
+    dynamicPlans: true,
+    allowTest: false,
+    BILL_TRAFFIC: false,
+    TRAFFIC_API_BASE_URL: null,
+    TRAFFIC_API_KEY: null,
+    flavors: plansUSD.map(p => {
+      const monthlyToman = usdMonthlyToTomanWithMargin(p.usdMonthly);
+      const hourlyToman = monthlyTomanToHourly(monthlyToman);
+      return { id: p.id, hetzner_type: p.hetzner_type, label: p.label, price: hourlyToman, monthly_toman: monthlyToman, usd_monthly_raw: p.usdMonthly, disk: p.disk, cores: p.cores, memory: p.memory };
+    }),
+    images: [],
+  };
+}
+
 module.exports = {
 
 
-hetzner: {
+
+hetzner: createHetznerLocationDc({
   key: 'hetzner',
-  name: 'آلمان',
-  provider: 'hetzner',
+  label: 'آلمان - Hetzner',
+  flag: '🇩🇪',
+  location: process.env.HETZNER_LOCATION || 'nbg1',
+  fallbackLocations: process.env.HETZNER_LOCATION_FALLBACKS || 'nbg1,fsn1',
+  namePrefix: 'HET'
+}),
 
-  HETZNER_PASSWORD_ONLY: true,
-  HETZNER_API_TOKEN: process.env.HETZNER_API_TOKEN,
-  HETZNER_LOCATION: process.env.HETZNER_LOCATION || 'nbg1',
+'hetzner-finland': createHetznerLocationDc({
+  key: 'hetzner-finland',
+  label: 'فنلاند - Hetzner',
+  flag: '🇫🇮',
+  location: 'hel1',
+  fallbackLocations: 'hel1',
+  namePrefix: 'FIN'
+}),
 
-  allowTest: false,
-  BILL_TRAFFIC: false,
+'hetzner-us-east': createHetznerLocationDc({
+  key: 'hetzner-us-east',
+  label: 'آمریکا شرق - Hetzner',
+  flag: '🇺🇸',
+  location: 'ash',
+  fallbackLocations: 'ash',
+  namePrefix: 'USE'
+}),
 
-  // ===== قیمت‌ها =====
-  flavors: (() => {
-    const plansUSD = [
-      // CX family (shared vCPU)
-      { id: 'CX23', hetzner_type: 'cx23', cores: 2, memory: 4,  disk: 40,  label: 'CX23 (2vCPU / 4GB / 40GB)',  usdMonthly: 4.9 },
-      { id: 'CX33', hetzner_type: 'cx33', cores: 4, memory: 8,  disk: 80,  label: 'CX33 (4vCPU / 8GB / 80GB)',  usdMonthly: 9.4 },
+'hetzner-us-west': createHetznerLocationDc({
+  key: 'hetzner-us-west',
+  label: 'آمریکا غرب - Hetzner',
+  flag: '🇺🇸',
+  location: 'hil',
+  fallbackLocations: 'hil',
+  namePrefix: 'USW'
+}),
 
-      // ARM
-      { id: 'CAX11', hetzner_type: 'cax11', cores: 2, memory: 4,  disk: 40,  label: 'CAX11 (2vCPU / 4GB / 40GB, ARM)', usdMonthly: 4.7 },
-
-      // Dedicated vCPU
-      { id: 'CCX13', hetzner_type: 'ccx13', cores: 2, memory: 8,  disk: 80,  label: 'CCX13 (2ded vCPU / 8GB / 80GB)', usdMonthly: 14.3 },
-    ];
-
-    return plansUSD.map(p => {
-      const monthlyToman = usdMonthlyToTomanWithMargin(p.usdMonthly);
-      const hourlyToman  = monthlyTomanToHourly(monthlyToman);
-      return {
-        id: p.id,
-        hetzner_type: p.hetzner_type,
-        label: p.label,
-        price: hourlyToman,
-        monthly_toman: monthlyToman,
-        usd_monthly_raw: p.usdMonthly,
-        disk: p.disk,
-        cores: p.cores,
-        memory: p.memory,
-      };
-    });
-  })(),
-
-  images: [],
-  apiType: 'hetzner',
-
-  TRAFFIC_API_BASE_URL: null,
-  TRAFFIC_API_KEY: null,
-},
+'hetzner-singapore': createHetznerLocationDc({
+  key: 'hetzner-singapore',
+  label: 'سنگاپور - Hetzner',
+  flag: '🇸🇬',
+  location: 'sin',
+  fallbackLocations: 'sin',
+  namePrefix: 'SIN'
+}),
 
 
 

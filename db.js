@@ -1,6 +1,14 @@
 // db.js - Database utility functions using MySQL
 
 require('dotenv').config();
+const datacenters = require('./datacenters');
+const HETZNER_DATACENTER_KEYS = Object.keys(datacenters).filter(key => {
+  const dc = datacenters[key] || {};
+  const provider = String(dc.provider || '').toLowerCase();
+  const apiType = String(dc.apiType || '').toLowerCase();
+  return provider === 'hetzner' || apiType === 'hetzner' || key === 'hetzner' || key.startsWith('hetzner-') || !!dc.HETZNER_LOCATION;
+});
+const hetznerDatacenterSqlList = HETZNER_DATACENTER_KEYS.map(key => `'${key.replace(/'/g, "''")}'`).join(',') || "'hetzner'";
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
 
@@ -867,7 +875,7 @@ async function getAdminOverviewStats() {
         users.totalWalletBalance = walletTotal.totalWalletBalance;
         const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,
             COALESCE(SUM(status='deleted'),0) deletedServers, COUNT(*) totalPurchases,
-            COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter='hetzner'),0) hetznerServers,
+            COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter IN (${hetznerDatacenterSqlList})),0) hetznerServers,
             COALESCE(SUM(datacenter LIKE '%openstack%'),0) openstackServers, COALESCE(SUM(datacenter='tebyan'),0) tebyanServers,
             COALESCE(SUM(CASE WHEN status='active' THEN amount ELSE 0 END),0) estimatedMonthlyRevenue FROM purchases`);
         const [[purchases]] = await conn.query(`SELECT COALESCE(SUM(DATE(created_at)=CURDATE()),0) purchasesToday, COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')),0) purchasesThisMonth FROM purchases`);
@@ -954,7 +962,7 @@ function metricConfig(metric) {
         revenue_month: { title:'درآمد ماه', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_month','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
         revenue_30d: { title:'درآمد ۳۰ روز', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_30d','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
         datacenter_tebyan: { title:'سرورهای Tebyan', kind:'purchases', columns:purchaseCols, where:"p.datacenter='tebyan'" },
-        datacenter_hetzner: { title:'سرورهای Hetzner', kind:'purchases', columns:purchaseCols, where:"p.datacenter='hetzner'" },
+        datacenter_hetzner: { title:'سرورهای Hetzner', kind:'purchases', columns:purchaseCols, where:`p.datacenter IN (${hetznerDatacenterSqlList})` },
         datacenter_afracloud: { title:'سرورهای AfraCloud', kind:'purchases', columns:purchaseCols, where:"p.datacenter='afracloud'" },
         datacenter_openstack: { title:'سرورهای OpenStack', kind:'purchases', columns:purchaseCols, where:"p.datacenter LIKE '%openstack%'" },
         errors_24h: { title:'خطاهای ۲۴ ساعت', kind:'audit', columns:[{key:'actor',label:'ادمین'},{key:'action',label:'عملیات'},{key:'target_type',label:'نوع'},{key:'target_id',label:'هدف'},{key:'metadata',label:'جزئیات'},{key:'created_at',label:'زمان'}], where:"a.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND a.action LIKE '%failed%'" }
@@ -1170,7 +1178,7 @@ async function createApiClient({ telegramId, name, notes = null, maxServers = 2,
     return getApiClientById(r.insertId);
 }
 async function listApiClients() {
-    const [rows] = await pool.execute(`SELECT c.*, u.wallet, COUNT(DISTINCT CASE WHEN k.is_active=1 THEN k.id END) active_keys, MAX(k.last_used_at) last_used_at, COUNT(DISTINCT CASE WHEN p.status NOT IN ('deleted','deletion_pending','provider_missing') THEN p.server_id END) active_servers FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci LEFT JOIN api_keys k ON k.client_id=c.id LEFT JOIN purchases p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci AND p.datacenter='hetzner' GROUP BY c.id ORDER BY c.created_at DESC`);
+    const [rows] = await pool.execute(`SELECT c.*, u.wallet, COUNT(DISTINCT CASE WHEN k.is_active=1 THEN k.id END) active_keys, MAX(k.last_used_at) last_used_at, COUNT(DISTINCT CASE WHEN p.status NOT IN ('deleted','deletion_pending','provider_missing') THEN p.server_id END) active_servers FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci LEFT JOIN api_keys k ON k.client_id=c.id LEFT JOIN purchases p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci AND p.datacenter IN (${hetznerDatacenterSqlList}) GROUP BY c.id ORDER BY c.created_at DESC`);
     return rows;
 }
 async function getApiClientById(clientId) {
@@ -1201,8 +1209,8 @@ async function authenticateApiKey(rawKey) {
     return row;
 }
 async function recordApiRequestLog({ clientId=null, telegramId=null, keyPrefix=null, method='', path='', statusCode=null, ip='', userAgent='', requestId='', errorMessage=null }) { await pool.execute(`INSERT INTO api_request_logs (client_id,telegram_id,key_prefix,method,path,status_code,ip,user_agent,request_id,error_message) VALUES (?,?,?,?,?,?,?,?,?,?)`, [clientId, telegramId, keyPrefix, method, path, statusCode, ip, userAgent, requestId, errorMessage]); }
-async function getApiClientActiveServerCount(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COUNT(*) n FROM purchases WHERE telegram_id=? AND datacenter='hetzner' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
-async function getApiClientMonthlySpend(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COALESCE(SUM(amount),0) n FROM purchases WHERE telegram_id=? AND datacenter='hetzner' AND duration='monthly' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
+async function getApiClientActiveServerCount(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COUNT(*) n FROM purchases WHERE telegram_id=? AND datacenter IN (${hetznerDatacenterSqlList}) AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
+async function getApiClientMonthlySpend(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COALESCE(SUM(amount),0) n FROM purchases WHERE telegram_id=? AND datacenter IN (${hetznerDatacenterSqlList}) AND duration='monthly' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
 async function getApiClientUsageSummary(clientId) { return { active_servers: await getApiClientActiveServerCount(clientId), monthly_spend: await getApiClientMonthlySpend(clientId), client: await getApiClientById(clientId) }; }
 async function listApiClientLogs(clientId, limit=100) { const [rows]=await pool.execute(`SELECT * FROM api_request_logs WHERE client_id=? ORDER BY created_at DESC LIMIT ${Math.min(Number(limit)||100,500)}`, [clientId]); return rows; }
 
