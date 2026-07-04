@@ -32,11 +32,18 @@ function monthlyTomanToHourly(tomanMonthly) {
   return Math.ceil((tomanMonthly / 720));
 }
 
+async function getHetznerPlanCatalog(config) {
+  const { getHetznerSellablePlans } = require('./Hetzner/hetzner-api');
+  return getHetznerSellablePlans(config);
+}
+
 module.exports = {
   USD_TO_TOMAN,
   USD_MARGIN,
   usdMonthlyToTomanWithMargin,
   monthlyTomanToHourly,
 prices,
+getHetznerPlanCatalog,
+buildHetznerFlavorCatalog: getHetznerPlanCatalog,
 };
 

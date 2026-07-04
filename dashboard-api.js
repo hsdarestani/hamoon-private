@@ -98,6 +98,17 @@ function createDashboardApiRouter() {
   router.post('/users/:telegramId/traffic/test', async (req,res,next)=>{ try{const out=await billingSummary(req.params.telegramId); await audit(req,'traffic_test_user',{type:'user',id:req.params.telegramId},{count:out.length,result:'ok'}); jsonOk(res,out);}catch(e){next(e);} });
   router.get('/users/:telegramId/billing-summary', async (req,res,next)=>{ try{jsonOk(res, await billingSummary(req.params.telegramId));}catch(e){next(e);} });
 
+  router.get('/api-clients', async (_req,res,next)=>{ try{jsonOk(res, await db.listApiClients());}catch(e){next(e);} });
+  router.post('/api-clients', async (req,res,next)=>{ try{const c=await db.createApiClient(req.body||{}); await audit(req,'api_client_create',{type:'api_client',id:c.id},{telegram_id:c.telegram_id}); jsonOk(res,c);}catch(e){next(e);} });
+  router.get('/api-clients/:id', async (req,res,next)=>{ try{const c=await db.getApiClientById(req.params.id); c?jsonOk(res,c):jsonError(res,404,'API_CLIENT_NOT_FOUND','کلاینت API پیدا نشد.');}catch(e){next(e);} });
+  router.patch('/api-clients/:id', async (req,res,next)=>{ try{const c=await db.updateApiClient(req.params.id, req.body||{}); await audit(req,'api_client_update',{type:'api_client',id:req.params.id},{}); jsonOk(res,c);}catch(e){next(e);} });
+  router.post('/api-clients/:id/keys', async (req,res,next)=>{ try{const k=await db.createApiKey(req.params.id, req.body.label, req.body.scopes); await audit(req,'api_key_create',{type:'api_client',id:req.params.id},{prefix:k.key_prefix}); jsonOk(res,k);}catch(e){next(e);} });
+  router.get('/api-clients/:id/keys', async (req,res,next)=>{ try{jsonOk(res, await db.listApiKeys(req.params.id));}catch(e){next(e);} });
+  router.post('/api-keys/:id/revoke', async (req,res,next)=>{ try{await db.revokeApiKey(req.params.id); await audit(req,'api_key_revoke',{type:'api_key',id:req.params.id},{}); jsonOk(res,{revoked:true});}catch(e){next(e);} });
+  router.get('/api-clients/:id/usage', async (req,res,next)=>{ try{jsonOk(res, await db.getApiClientUsageSummary(req.params.id));}catch(e){next(e);} });
+  router.get('/api-clients/:id/logs', async (req,res,next)=>{ try{jsonOk(res, await db.listApiClientLogs(req.params.id, req.query.limit));}catch(e){next(e);} });
+  router.get('/hetzner/plans', async (_req,res,next)=>{ try{const { getHetznerSellablePlans } = require('./Hetzner/hetzner-api'); jsonOk(res, await getHetznerSellablePlans(datacenters.hetzner));}catch(e){next(e);} });
+
   router.get('/datacenters', (_req,res)=>jsonOk(res,Object.values(datacenters).filter(dc=>dc&&dc.key).map(safeDc)));
   router.get('/datacenters/:key/health', async (req,res)=>{ const dc=datacenters[req.params.key]; if(!dc)return jsonError(res,404,'DATACENTER_NOT_FOUND','دیتاسنتر پیدا نشد.'); const health={token:false,listFlavors:false,listServers:false}; try{const tok=await cloud.getToken(dc); health.token=true; try{await cloud.listFlavors(dc,tok); health.listFlavors=true;}catch{} try{await cloud.listServers(dc,tok); health.listServers=true;}catch{} jsonOk(res,health);}catch{jsonOk(res,health);} });
   router.get('/logs/server-events', (req,res)=>{ const file=path.join(__dirname,'server_events.log'); const limit=Math.min(parseInt(req.query.limit,10)||200,500); if(!fs.existsSync(file))return jsonOk(res,[]); const lines=fs.readFileSync(file,'utf8').split('\n').filter(Boolean).slice(-limit).map(l=>l.replace(/(password|token|secret)[^,}]*/ig,'$1:[redacted]')); jsonOk(res,lines); });

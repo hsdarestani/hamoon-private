@@ -132,6 +132,70 @@ async function initializeDatabase() {
 
         await ensureColumn(connection, 'admin_audit_logs', 'result', 'VARCHAR(64) NULL');
 
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS api_clients (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                telegram_id VARCHAR(64) NOT NULL,
+                name VARCHAR(191) NOT NULL,
+                notes TEXT NULL,
+                is_active TINYINT(1) DEFAULT 1,
+                max_servers INT DEFAULT 2,
+                max_monthly_spend DECIMAL(18,2) NULL,
+                max_hourly_spend DECIMAL(18,2) NULL,
+                allowed_datacenters TEXT NULL,
+                allowed_plans TEXT NULL,
+                allowed_images TEXT NULL,
+                allowed_locations TEXT NULL,
+                min_wallet_balance DECIMAL(18,2) DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                client_id BIGINT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash VARCHAR(128) NOT NULL,
+                label VARCHAR(191) NULL,
+                scopes TEXT NULL,
+                is_active TINYINT(1) DEFAULT 1,
+                last_used_at DATETIME NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                revoked_at DATETIME NULL,
+                UNIQUE KEY unique_key_hash (key_hash),
+                INDEX key_prefix_idx (key_prefix)
+            )
+        `);
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS api_request_logs (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                client_id BIGINT NULL,
+                telegram_id VARCHAR(64) NULL,
+                key_prefix VARCHAR(32) NULL,
+                method VARCHAR(16),
+                path VARCHAR(255),
+                status_code INT,
+                ip VARCHAR(64),
+                user_agent TEXT NULL,
+                request_id VARCHAR(64) NULL,
+                error_message TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await connection.execute(`
+            CREATE TABLE IF NOT EXISTS api_usage_events (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                client_id BIGINT NOT NULL,
+                telegram_id VARCHAR(64) NOT NULL,
+                event_type VARCHAR(64),
+                server_id VARCHAR(191) NULL,
+                amount DECIMAL(18,2) DEFAULT 0,
+                meta_json JSON NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // Wallet Logs table
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS wallet_logs (
@@ -1093,6 +1157,55 @@ async function getUserRestartablePurchases(telegramId) {
   return rows;
 }
 
+function apiKeyHash(rawKey) {
+    return crypto.createHash('sha256').update(String(rawKey || '')).digest('hex');
+}
+function parseCsvText(value) {
+    if (Array.isArray(value)) return value.filter(Boolean).join(',');
+    return value == null ? null : String(value);
+}
+async function createApiClient({ telegramId, name, notes = null, maxServers = 2, maxMonthlySpend = null, maxHourlySpend = null, allowedDatacenters = 'hetzner', allowedPlans = null, allowedImages = null, allowedLocations = null, minWalletBalance = 0, isActive = 1 }) {
+    await pool.execute(`INSERT IGNORE INTO users (telegram_id, wallet, step) VALUES (?, 0, 'READY')`, [String(telegramId)]);
+    const [r] = await pool.execute(`INSERT INTO api_clients (telegram_id,name,notes,is_active,max_servers,max_monthly_spend,max_hourly_spend,allowed_datacenters,allowed_plans,allowed_images,allowed_locations,min_wallet_balance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [String(telegramId), String(name || telegramId), notes, isActive ? 1 : 0, Number(maxServers || 2), maxMonthlySpend, maxHourlySpend, parseCsvText(allowedDatacenters), parseCsvText(allowedPlans), parseCsvText(allowedImages), parseCsvText(allowedLocations), Number(minWalletBalance || 0)]);
+    return getApiClientById(r.insertId);
+}
+async function listApiClients() {
+    const [rows] = await pool.execute(`SELECT c.*, u.wallet, COUNT(DISTINCT CASE WHEN k.is_active=1 THEN k.id END) active_keys, MAX(k.last_used_at) last_used_at, COUNT(DISTINCT CASE WHEN p.status NOT IN ('deleted','deletion_pending','provider_missing') THEN p.server_id END) active_servers FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci LEFT JOIN api_keys k ON k.client_id=c.id LEFT JOIN purchases p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci AND p.datacenter='hetzner' GROUP BY c.id ORDER BY c.created_at DESC`);
+    return rows;
+}
+async function getApiClientById(clientId) {
+    const [rows] = await pool.execute(`SELECT c.*, u.wallet FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci WHERE c.id=?`, [clientId]);
+    return rows[0] || null;
+}
+async function updateApiClient(clientId, fields = {}) {
+    const allowed = { name:'name', notes:'notes', isActive:'is_active', maxServers:'max_servers', maxMonthlySpend:'max_monthly_spend', maxHourlySpend:'max_hourly_spend', allowedDatacenters:'allowed_datacenters', allowedPlans:'allowed_plans', allowedImages:'allowed_images', allowedLocations:'allowed_locations', minWalletBalance:'min_wallet_balance' };
+    const sets=[]; const vals=[];
+    for (const [k,col] of Object.entries(allowed)) if (fields[k] !== undefined) { sets.push(`${col}=?`); vals.push(k.startsWith('allowed') ? parseCsvText(fields[k]) : fields[k]); }
+    if (sets.length) await pool.execute(`UPDATE api_clients SET ${sets.join(', ')} WHERE id=?`, [...vals, clientId]);
+    return getApiClientById(clientId);
+}
+async function createApiKey(clientId, label = null, scopes = null) {
+    const rawKey = `hm_live_${crypto.randomBytes(32).toString('base64url')}`;
+    const keyPrefix = rawKey.slice(0, 16);
+    await pool.execute(`INSERT INTO api_keys (client_id,key_prefix,key_hash,label,scopes) VALUES (?,?,?,?,?)`, [clientId, keyPrefix, apiKeyHash(rawKey), label, parseCsvText(scopes)]);
+    return { rawKey, key_prefix: keyPrefix };
+}
+async function listApiKeys(clientId) { const [rows] = await pool.execute(`SELECT id,client_id,key_prefix,label,scopes,is_active,last_used_at,created_at,revoked_at FROM api_keys WHERE client_id=? ORDER BY created_at DESC`, [clientId]); return rows; }
+async function revokeApiKey(keyId) { await pool.execute(`UPDATE api_keys SET is_active=0, revoked_at=COALESCE(revoked_at,NOW()) WHERE id=?`, [keyId]); return true; }
+async function authenticateApiKey(rawKey) {
+    const prefix = String(rawKey || '').slice(0, 16);
+    const [rows] = await pool.execute(`SELECT k.id key_id,k.key_prefix,k.scopes,k.is_active key_active,c.* FROM api_keys k JOIN api_clients c ON c.id=k.client_id WHERE k.key_prefix=? AND k.key_hash=? LIMIT 1`, [prefix, apiKeyHash(rawKey)]);
+    const row = rows[0];
+    if (!row || !row.key_active || !row.is_active) return null;
+    await pool.execute(`UPDATE api_keys SET last_used_at=NOW() WHERE id=?`, [row.key_id]).catch(()=>{});
+    return row;
+}
+async function recordApiRequestLog({ clientId=null, telegramId=null, keyPrefix=null, method='', path='', statusCode=null, ip='', userAgent='', requestId='', errorMessage=null }) { await pool.execute(`INSERT INTO api_request_logs (client_id,telegram_id,key_prefix,method,path,status_code,ip,user_agent,request_id,error_message) VALUES (?,?,?,?,?,?,?,?,?,?)`, [clientId, telegramId, keyPrefix, method, path, statusCode, ip, userAgent, requestId, errorMessage]); }
+async function getApiClientActiveServerCount(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COUNT(*) n FROM purchases WHERE telegram_id=? AND datacenter='hetzner' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
+async function getApiClientMonthlySpend(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COALESCE(SUM(amount),0) n FROM purchases WHERE telegram_id=? AND datacenter='hetzner' AND duration='monthly' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
+async function getApiClientUsageSummary(clientId) { return { active_servers: await getApiClientActiveServerCount(clientId), monthly_spend: await getApiClientMonthlySpend(clientId), client: await getApiClientById(clientId) }; }
+async function listApiClientLogs(clientId, limit=100) { const [rows]=await pool.execute(`SELECT * FROM api_request_logs WHERE client_id=? ORDER BY created_at DESC LIMIT ${Math.min(Number(limit)||100,500)}`, [clientId]); return rows; }
+
 
 module.exports = {
     pool,
@@ -1149,6 +1262,19 @@ module.exports = {
     getPurchaseForUserServer,
     updatePurchasePlan,
     setPurchaseStatusForUser,
+    createApiClient,
+    listApiClients,
+    getApiClientById,
+    updateApiClient,
+    createApiKey,
+    listApiKeys,
+    revokeApiKey,
+    authenticateApiKey,
+    recordApiRequestLog,
+    getApiClientActiveServerCount,
+    getApiClientMonthlySpend,
+    getApiClientUsageSummary,
+    listApiClientLogs,
     recordServerUpgradeLog,
 };
 

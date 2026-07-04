@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
+const { createCustomerApiRouter } = require('./customer-api');
 const app = express();
 const port = Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
 let dbStatus = 'unknown';
@@ -13,6 +14,7 @@ app.disable('x-powered-by');
 app.get('/health', async (_req,res)=>{ await checkDb(); res.json({ ok:true, app:'dashboard-server', db:dbStatus, time:new Date().toISOString() }); });
 app.get('/admin', (_req,res)=>res.redirect(302,'/dashboard'));
 app.use('/dashboard/api', createDashboardApiRouter());
+app.use('/api/v1', createCustomerApiRouter());
 const dashboardDir = path.join(__dirname, 'public', 'dashboard');
 function requireDashboardPage(req, res, next) {
   return requireAuth(req, { ...res, status(code) { if (code === 401) { res.redirect(302, '/dashboard/login'); return { json() {} }; } return res.status(code); } }, next);
