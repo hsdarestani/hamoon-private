@@ -32,8 +32,85 @@ async function hetznerRequest(config, method, reqPath, body) {
 }
 
 async function listHetznerServerTypes(config) {
-  const data = await hetznerRequest(config, 'GET', '/server_types');
+  const data = await hetznerRequest(config, 'GET', '/server_types?per_page=200');
   return data.server_types || [];
+}
+
+const SERVER_TYPE_CACHE_MS = Number(process.env.HETZNER_PLAN_CACHE_MS || 20 * 60 * 1000);
+let serverTypeCache = { expires: 0, plans: null };
+
+function roundPrice(value) {
+  const roundTo = Math.max(1, Number(process.env.HETZNER_PRICE_ROUND_TO || 1000));
+  return Math.max(roundTo, Math.ceil(Number(value || 0) / roundTo) * roundTo);
+}
+
+function firstPrice(serverType) {
+  const prices = Array.isArray(serverType?.prices) ? serverType.prices : [];
+  return prices.find(p => p?.price_hourly || p?.price_monthly) || prices[0] || {};
+}
+
+function hetznerFamily(name) {
+  return String(name || '').replace(/[0-9].*$/, '').toUpperCase() || 'OTHER';
+}
+
+function normalizeHetznerServerTypes(serverTypes = []) {
+  const eurToToman = Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
+  const baseMultiplier = Number(process.env.HETZNER_PRICE_MULTIPLIER || 1);
+  const hourlyMultiplier = Number(process.env.HETZNER_HOURLY_PRICE_MULTIPLIER || baseMultiplier);
+  const monthlyMultiplier = Number(process.env.HETZNER_MONTHLY_PRICE_MULTIPLIER || baseMultiplier);
+  const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
+  const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
+  return (serverTypes || [])
+    .filter(st => st && st.name && !st.deprecated && st.deprecation === null)
+    .map(st => {
+      const price = firstPrice(st);
+      const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
+      const monthlyEur = Number(price?.price_monthly?.gross || price?.price_monthly?.net || (hourlyEur * 720));
+      const hourlyToman = roundPrice(Math.max(minHourly, hourlyEur * eurToToman * hourlyMultiplier));
+      const monthlyToman = roundPrice(Math.max(minMonthly, monthlyEur * eurToToman * monthlyMultiplier));
+      const id = String(st.name).toLowerCase();
+      const family = hetznerFamily(id);
+      return {
+        id, hetzner_type: id, server_type: id,
+        label: `${id.toUpperCase()} - ${st.cores} vCPU / ${st.memory} GB RAM / ${st.disk} GB`,
+        family, cores: Number(st.cores || 0), memory: Number(st.memory || 0), disk: Number(st.disk || 0),
+        architecture: st.architecture || (family === 'CAX' ? 'arm' : 'x86'), storage_type: st.storage_type || null,
+        hourly_price_eur: hourlyEur, monthly_price_eur: monthlyEur,
+        hourly_price_toman: hourlyToman, monthly_price_toman: monthlyToman,
+        amount_hourly: hourlyToman, amount_monthly: monthlyToman,
+        price: hourlyToman, monthly_toman: monthlyToman, available: true
+      };
+    })
+    .sort((a,b) => (a.family.localeCompare(b.family) || a.monthly_toman - b.monthly_toman || a.id.localeCompare(b.id)));
+}
+
+function normalizeStaticHetznerPlans(config = {}) {
+  return (config.flavors || []).map(f => ({
+    id: String(f.hetzner_type || f.id).toLowerCase(),
+    hetzner_type: String(f.hetzner_type || f.id).toLowerCase(),
+    server_type: String(f.hetzner_type || f.id).toLowerCase(),
+    label: f.label || String(f.id), family: hetznerFamily(f.hetzner_type || f.id),
+    cores: Number(f.cores || f.cpu || 0), memory: Number(f.memory || f.ram || 0), disk: Number(f.disk || 0),
+    amount_hourly: Number(f.amount_hourly || f.price || 0), amount_monthly: Number(f.amount_monthly || f.monthly_toman || 0),
+    price: Number(f.price || f.amount_hourly || 0), monthly_toman: Number(f.monthly_toman || f.amount_monthly || 0), available: f.available !== false
+  }));
+}
+
+async function getHetznerSellablePlans(config = {}) {
+  const now = Date.now();
+  if (serverTypeCache.plans && serverTypeCache.expires > now) return serverTypeCache.plans;
+  try {
+    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config));
+    if (plans.length) {
+      serverTypeCache = { plans, expires: now + SERVER_TYPE_CACHE_MS };
+      return plans;
+    }
+  } catch (e) {
+    console.warn('[hetzner] using static plan fallback:', e.message);
+  }
+  const fallback = normalizeStaticHetznerPlans(config);
+  if (fallback.length) return fallback;
+  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
 }
 
 async function getHetznerServer(config, serverId) {
@@ -87,8 +164,7 @@ function client(tokenOrCfg) {
 async function getToken() { return null; } // لازم نیست
 
 async function listFlavors(dcConfig) {
-  // ما قبلاً از datacenters.js → dcConfig.flavors استفاده می‌کنیم
-  return dcConfig.flavors || [];
+  return getHetznerSellablePlans(dcConfig);
 }
 
 
@@ -389,6 +465,8 @@ module.exports = {
   getHetznerApiToken,
   hetznerRequest,
   listHetznerServerTypes,
+  normalizeHetznerServerTypes,
+  getHetznerSellablePlans,
   getHetznerServer,
   powerOffHetznerServer,
   powerOnHetznerServer,

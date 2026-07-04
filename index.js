@@ -2535,8 +2535,9 @@ async function handleHetznerUpgradeMenu(chatId, userId, serverId, dcConfig) {
   const purchase = await getPurchaseForUserServer(userId, serverId, 'hetzner');
   if (!purchase) return sendMessage(chatId, '❌ سرور موردنظر برای شما پیدا نشد.');
   if (HETZNER_UPGRADE_BLOCKED_STATUSES.has(String(purchase.status || '').toLowerCase())) return sendMessage(chatId, '❌ این سرور در وضعیت قابل ارتقا نیست.');
-  const { current, unknown } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
-  const plans = getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly');
+  const liveDc = { ...dcConfig, flavors: await openstackApi.listFlavors(dcConfig).catch(() => dcConfig.flavors || []) };
+  const { current, unknown } = await resolveCurrentHetznerFlavor(liveDc, purchase);
+  const plans = getHigherHetznerFlavors(liveDc, current, purchase.duration || 'monthly');
   if (!plans.length) return sendMessage(chatId, 'پلن بالاتری برای ارتقای این سرور موجود نیست.');
   const keyboard = plans.map(f => ([{ text: `${f.label || f.id} - ${formatToman(getFlavorCyclePrice(f, purchase.duration || 'monthly'))} تومان`, callback_data: makeShortCb(userId, { action: 'HUS', serverId, dcKey: 'hetzner', targetFlavor: f.id }) }]));
   keyboard.push([{ text: '❌ انصراف', callback_data: makeShortCb(userId, { action: 'HUCANCEL', serverId, dcKey: 'hetzner' }) }]);
@@ -2547,10 +2548,11 @@ async function handleHetznerUpgradeMenu(chatId, userId, serverId, dcConfig) {
 async function handleHetznerUpgradeSelect(chatId, userId, serverId, dcConfig, targetFlavorId) {
   const purchase = await getPurchaseForUserServer(userId, serverId, 'hetzner');
   if (!purchase) return sendMessage(chatId, '❌ سرور موردنظر برای شما پیدا نشد.');
-  const target = findHetznerFlavor(dcConfig, targetFlavorId);
-  const { current } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
+  const liveDc = { ...dcConfig, flavors: await openstackApi.listFlavors(dcConfig).catch(() => dcConfig.flavors || []) };
+  const target = findHetznerFlavor(liveDc, targetFlavorId);
+  const { current } = await resolveCurrentHetznerFlavor(liveDc, purchase);
   if (!target) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
-  if (current && !getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly').some(f => f.id === target.id)) return sendMessage(chatId, '❌ پلن انتخاب‌شده بالاتر از پلن فعلی نیست.');
+  if (current && !getHigherHetznerFlavors(liveDc, current, purchase.duration || 'monthly').some(f => f.id === target.id)) return sendMessage(chatId, '❌ پلن انتخاب‌شده بالاتر از پلن فعلی نیست.');
   const oldAmount = Number(purchase.amount || (current ? getFlavorCyclePrice(current, purchase.duration || 'monthly') : 0));
   const newAmount = getFlavorCyclePrice(target, purchase.duration || 'monthly');
   const text = `شما در حال ارتقای سرور زیر هستید:\nسرور: ${purchase.server_name || serverId}\nپلن فعلی: ${current?.label || purchase.flavor_id || 'نامشخص'}\nپلن جدید: ${target.label || target.id}\nهزینه فعلی: ${formatToman(oldAmount)} تومان\nهزینه جدید: ${formatToman(newAmount)} تومان\nدوره پرداخت: ${getCycleLabel(purchase.duration || 'monthly')}\n\nتوجه: در زمان ارتقا ممکن است سرور برای چند دقیقه خاموش یا از دسترس خارج شود.\nارتقا ممکن است چند دقیقه زمان ببرد.\nافزایش دیسک اختیاری است و مسیر پیشنهادی، ارتقا بدون افزایش دیسک است.`;
@@ -2576,9 +2578,10 @@ async function handleHetznerUpgradeConfirm(chatId, userId, serverId, dcConfig, t
     const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
     const minWallet = Number(process.env.HETZNER_UPGRADE_MIN_WALLET || 0);
     if (wallet <= 0 || wallet < minWallet) return sendMessage(chatId, 'موجودی کیف پول برای ادامه سرویس کافی نیست. لطفاً ابتدا کیف پول را شارژ کنید.');
-    const target = findHetznerFlavor(dcConfig, targetFlavorId);
-    const { current } = await resolveCurrentHetznerFlavor(dcConfig, purchase);
-    if (!target || (current && !getHigherHetznerFlavors(dcConfig, current, purchase.duration || 'monthly').some(f => f.id === target.id))) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
+    const liveDc = { ...dcConfig, flavors: await openstackApi.listFlavors(dcConfig).catch(() => dcConfig.flavors || []) };
+    const target = findHetznerFlavor(liveDc, targetFlavorId);
+    const { current } = await resolveCurrentHetznerFlavor(liveDc, purchase);
+    if (!target || (current && !getHigherHetznerFlavors(liveDc, current, purchase.duration || 'monthly').some(f => f.id === target.id))) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
 
     await setPurchaseStatusForUser(userId, serverId, 'hetzner', 'upgrading');
     console.log('[HETZNER_UPGRADE]', { user: userId, server_id: serverId, old_flavor: purchase.flavor_id, new_flavor: target.id, upgrade_disk: !!upgradeDisk, status: 'started' });
