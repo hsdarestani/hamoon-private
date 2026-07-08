@@ -269,6 +269,9 @@ const {
     debitUser,
     creditUser,
     recordPurchase,
+    setPurchaseAutoRenew,
+    setPurchaseRenewalStopped,
+    updatePurchaseSuspendReason,
     hasUsedFreeTestServer,
     recordTestServer,
     storeKeyPair,
@@ -1482,6 +1485,34 @@ case 'RESUME': {
   await sendMessage(effectiveChatId, '✅ دستور روشن کردن سرور ارسال شد.');
   return handleServerManagement(effectiveChatId, effectiveUserId, payload.serverId, dc);
 }
+case 'RENEW_OFF': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  return sendMessage(effectiveChatId, 'با غیرفعال کردن تمدید خودکار، این سرور تا پایان دوره فعلی فعال می‌ماند و بعد از آن تمدید نمی‌شود و متوقف خواهد شد. آیا مطمئن هستید؟', {
+    reply_markup: { inline_keyboard: [
+      [{ text: '✅ بله، تمدید خودکار را خاموش کن', callback_data: makeShortCb(effectiveUserId, { action: 'RENEW_OFF_CONFIRM', dcKey: payload.dcKey, serverId: payload.serverId }) }],
+      [{ text: '↩️ انصراف', callback_data: makeShortCb(effectiveUserId, { action: 'RENEW_CANCEL', dcKey: payload.dcKey, serverId: payload.serverId }) }]
+    ]}
+  });
+}
+case 'RENEW_OFF_CONFIRM': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  const ok = await setPurchaseAutoRenew(effectiveUserId, payload.serverId, payload.dcKey, false);
+  await sendMessage(effectiveChatId, ok ? '✅ تمدید خودکار این سرور غیرفعال شد. سرور تا پایان دوره فعلی فعال می‌ماند و بعد از آن تمدید نمی‌شود.' : '❌ خرید مربوط به این سرور پیدا نشد.');
+  return handleServerManagement(effectiveChatId, effectiveUserId, payload.serverId, dc);
+}
+case 'RENEW_ON': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+  return handlePurchaseAutoRenewEnable(effectiveChatId, effectiveUserId, payload.serverId, dc);
+}
+case 'RENEW_CANCEL': {
+  const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
+  await sendMessage(effectiveChatId, '↩️ عملیات لغو شد.');
+  if (dc) return handleServerManagement(effectiveChatId, effectiveUserId, payload.serverId, dc);
+  return;
+}
 
 case 'CONFIRM_DELETE': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
@@ -2633,6 +2664,34 @@ async function handleHetznerUpgradeConfirm(chatId, userId, serverId, dcConfig, t
   }
 }
 
+
+async function handlePurchaseAutoRenewEnable(chatId, userId, serverId, dcConfig) {
+  const purchase = await getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null) || await getPurchaseByServerId(serverId);
+  if (!purchase || String(purchase.telegram_id) !== String(userId) || String(purchase.datacenter) !== String(dcConfig.key)) {
+    return sendMessage(chatId, '❌ خرید مربوط به این سرور پیدا نشد.');
+  }
+
+  if (purchase.status === 'suspended' && purchase.suspend_reason === 'auto_renew_disabled') {
+    const cycleAmount = Number(purchase.amount || 0);
+    const wallet = await getUserWallet(userId);
+    if (wallet < cycleAmount) {
+      return sendMessage(chatId, 'برای فعال‌سازی مجدد، کیف پول شما باید حداقل به اندازه هزینه یک دوره شارژ داشته باشد.');
+    }
+    await debitUser(userId, cycleAmount);
+    await recordWalletLog(userId, -cycleAmount, `تمدید و فعال‌سازی مجدد سرور ${purchase.server_name || serverId}`, 'billing');
+    await setPurchaseAutoRenew(userId, serverId, dcConfig.key, true);
+    await updatePurchaseStatus(serverId, 'active', purchase.last_billed_traffic_gb, new Date());
+    const tok = await openstackApi.getToken(dcConfig);
+    await openstackApi.resumeServer(dcConfig, tok, serverId);
+    await sendMessage(chatId, '✅ تمدید خودکار فعال شد و سرور مجدداً فعال شد.');
+    return handleServerManagement(chatId, userId, serverId, dcConfig);
+  }
+
+  await setPurchaseAutoRenew(userId, serverId, dcConfig.key, true);
+  await sendMessage(chatId, '✅ تمدید خودکار فعال شد. از این به بعد هزینه سرور در موعد تمدید از کیف پول شما کسر می‌شود.');
+  return handleServerManagement(chatId, userId, serverId, dcConfig);
+}
+
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
     ensureUserState(userId);
@@ -2658,6 +2717,12 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
       `وضعیت: ${escapeMarkdownV2(srv.status || srv.state || 'N/A')}\n` +
       `سیستم عامل: ${escapeMarkdownV2(osLabel)}\n`;
 
+    if (purchase) {
+      messageText += Number(purchase.auto_renew ?? 1) === 1
+        ? '🔁 تمدید خودکار: روشن\n'
+        : '⏸ تمدید خودکار: خاموش\n';
+    }
+
     const keyboard = [];
     const short = (action, extra = {}) => makeShortCb(userId, { action, dcKey: dcConfig.key, serverId: srv.id, ...extra });
 
@@ -2678,6 +2743,10 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
     }
     if (hasCapability(dcConfig, 'snapshot')) {
       keyboard.push([{ text: '📸 Snapshot', callback_data: short('SNAPSHOT_ASK') }]);
+    }
+    if (purchase) {
+      const renewEnabled = Number(purchase.auto_renew ?? 1) === 1;
+      keyboard.push([{ text: renewEnabled ? '❌ غیرفعال کردن تمدید خودکار' : '✅ فعال کردن تمدید خودکار', callback_data: short(renewEnabled ? 'RENEW_OFF' : 'RENEW_ON') }]);
     }
     if (hasCapability(dcConfig, 'changeCycle') && purchase && getAllowedCycles(dcConfig).length > 1) {
       keyboard.push([{ text: '🔄 تغییر دوره پرداخت', callback_data: short('CHANGECYCLE_ASK') }]);
@@ -3273,7 +3342,8 @@ async function runHourlyBilling() {
 
     const {
       telegram_id, server_id, server_name, amount, duration,
-      status, last_billed_at, price_per_gb, last_billed_traffic_gb, created_at
+      status, last_billed_at, price_per_gb, last_billed_traffic_gb, created_at,
+      auto_renew, renewal_stopped_at, suspend_reason
     } = purchase;
 
     if (!server_id) {
@@ -3282,6 +3352,10 @@ async function runHourlyBilling() {
     }
 
     const userId = String(telegram_id);
+    if (status === 'suspended' && suspend_reason === 'auto_renew_disabled' && renewal_stopped_at) {
+      continue;
+    }
+
     let currentBalance = await getUserWallet(userId);
 
     const now = new Date();
@@ -3314,8 +3388,34 @@ async function runHourlyBilling() {
 
     // 💻 هزینهٔ خود سرور فقط در مرز سیکل
     let instanceCost = 0;
-    if (hoursSinceLastBill >= cycleHours) {
-      instanceCost = parseFloat(amount) * cycleHours; // amount = نرخ ساعتی
+    const cycleDue = hoursSinceLastBill >= cycleHours;
+    const autoRenewEnabled = Number(auto_renew ?? 1) === 1;
+    if (cycleDue && autoRenewEnabled) {
+      instanceCost = parseFloat(amount); // amount = هزینه دوره انتخاب‌شده
+    }
+
+    if (cycleDue && !autoRenewEnabled) {
+      if (trafficCost > 0 && currentBalance >= trafficCost) {
+        await debitUser(userId, trafficCost);
+        await recordWalletLog(userId, -trafficCost, `کسر هزینه ترافیک سرور ${server_name}`, 'billing');
+        await updatePurchaseStatus(server_id, status || 'active', billableFromCreationGb, lastBilledDate);
+        currentBalance -= trafficCost;
+      }
+      if (status === 'active') {
+        try {
+          const tok = await openstackApi.getToken(dcConfig);
+          await openstackApi.suspendServer(dcConfig, tok, server_id);
+        } catch (e) {
+          if (e.response?.status === 409) console.warn('[Billing] auto-renew-off suspend conflict ignored', { status: 409, server_id, datacenter: purchase.datacenter, message: e.message });
+          else console.warn('[Billing] auto-renew-off suspend failed', { status: e.response?.status, server_id, datacenter: purchase.datacenter, message: e.message });
+        }
+      }
+      await setPurchaseRenewalStopped(server_id, 'auto_renew_disabled');
+      const unpaidTrafficNote = trafficCost > 0 && currentBalance < trafficCost
+        ? '\n⚠️ همچنین موجودی کیف پول برای پرداخت هزینه ترافیک مصرف‌شده کافی نبود.'
+        : '';
+      await sendMessage(userId, `⏸ سرور شما به‌دلیل غیرفعال بودن تمدید خودکار، در پایان دوره متوقف شد. برای فعال‌سازی مجدد، تمدید خودکار را روشن کنید و کیف پول کافی داشته باشید.${unpaidTrafficNote}`);
+      continue;
     }
 
     const totalCost = trafficCost + instanceCost;
@@ -3349,6 +3449,7 @@ async function runHourlyBilling() {
           const tok = await openstackApi.getToken(dcConfig);
           await openstackApi.suspendServer(dcConfig, tok, server_id);
           await updatePurchaseStatus(server_id, 'suspended');
+          await updatePurchaseSuspendReason(server_id, 'insufficient_balance');
           sendMessage(userId, `⚠️ موجودی شما برای پرداخت هزینه سرور ${escapeMarkdownV2(server_name)} کافی نیست و سرور معلق شد.`);
         } catch (e) {
           if (e.response?.status === 409) console.warn('[Billing] suspend conflict ignored', { status: 409, server_id, datacenter: purchase.datacenter, message: e.message });
