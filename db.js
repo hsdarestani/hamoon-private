@@ -79,6 +79,10 @@ async function initializeDatabase() {
                 boot_method VARCHAR(50) NOT NULL,
                 os_label VARCHAR(255) NULL,
                 status VARCHAR(50) NOT NULL,
+                auto_renew TINYINT(1) NOT NULL DEFAULT 1,
+                auto_renew_disabled_at DATETIME NULL,
+                renewal_stopped_at DATETIME NULL,
+                suspend_reason VARCHAR(64) NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 last_billed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -94,6 +98,13 @@ async function initializeDatabase() {
 
         await connection.execute('ALTER TABLE purchases MODIFY amount DECIMAL(14, 6) NOT NULL').catch(err => {
             console.warn('Could not widen purchases.amount:', err.message);
+        });
+        await ensureColumn(connection, 'purchases', 'auto_renew', 'TINYINT(1) NOT NULL DEFAULT 1');
+        await ensureColumn(connection, 'purchases', 'auto_renew_disabled_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'renewal_stopped_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'suspend_reason', 'VARCHAR(64) NULL');
+        await connection.execute('UPDATE purchases SET auto_renew = 1 WHERE auto_renew IS NULL').catch(err => {
+            console.warn('Could not backfill purchases.auto_renew:', err.message);
         });
 
 
@@ -454,6 +465,60 @@ async function recordPurchase(telegramId, serverId, datacenter, serverName, flav
     } finally {
         conn.release();
     }
+}
+
+async function setPurchaseAutoRenew(telegramId, serverId, datacenter, enabled) {
+  const conn = await pool.getConnection();
+  try {
+    const sql = enabled
+      ? `UPDATE purchases
+         SET auto_renew = 1,
+             auto_renew_disabled_at = NULL,
+             renewal_stopped_at = NULL,
+             suspend_reason = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`
+      : `UPDATE purchases
+         SET auto_renew = 0,
+             auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`;
+    const [result] = await conn.execute(sql, [String(telegramId), serverId, datacenter]);
+    return result.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
+}
+
+async function setPurchaseRenewalStopped(serverId, reason = 'auto_renew_disabled') {
+  const conn = await pool.getConnection();
+  try {
+    const [result] = await conn.execute(
+      `UPDATE purchases
+       SET status = 'suspended',
+           renewal_stopped_at = NOW(),
+           suspend_reason = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE server_id = ?`,
+      [reason, serverId]
+    );
+    return result.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
+}
+
+async function updatePurchaseSuspendReason(serverId, reason) {
+  const conn = await pool.getConnection();
+  try {
+    const [result] = await conn.execute(
+      `UPDATE purchases SET suspend_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE server_id = ?`,
+      [reason, serverId]
+    );
+    return result.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
 }
 
 async function getPurchaseByServerId(serverId) {
@@ -1247,6 +1312,9 @@ module.exports = {
     debitUser,
     creditUser,
     recordPurchase,
+    setPurchaseAutoRenew,
+    setPurchaseRenewalStopped,
+    updatePurchaseSuspendReason,
     hasUsedFreeTestServer,
     recordTestServer,
     storeKeyPair,
