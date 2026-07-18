@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          show-progress: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -35,7 +37,7 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --loglevel=error
 
       - name: Run repository validations
         run: npm test
@@ -49,6 +51,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          show-progress: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -57,7 +61,7 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --loglevel=error
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
