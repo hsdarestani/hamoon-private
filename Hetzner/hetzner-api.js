@@ -60,8 +60,15 @@ function normalizeHetznerServerTypes(serverTypes = []) {
   const monthlyMultiplier = Number(process.env.HETZNER_MONTHLY_PRICE_MULTIPLIER || baseMultiplier);
   const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
   const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
+  const allowedHetznerTypesRaw = String(process.env.HETZNER_ALLOWED_SERVER_TYPES || '')
+    .split(',')
+    .map(x => x.trim().toLowerCase())
+    .filter(Boolean);
+  const allowedHetznerTypes = allowedHetznerTypesRaw.length ? new Set(allowedHetznerTypesRaw) : null;
+
   return (serverTypes || [])
     .filter(st => st && st.name && !st.deprecated && st.deprecation === null)
+    .filter(st => !allowedHetznerTypes || allowedHetznerTypes.has(String(st.name || '').toLowerCase()))
     .map(st => {
       const price = firstPrice(st);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
@@ -78,7 +85,17 @@ function normalizeHetznerServerTypes(serverTypes = []) {
         hourly_price_eur: hourlyEur, monthly_price_eur: monthlyEur,
         hourly_price_toman: hourlyToman, monthly_price_toman: monthlyToman,
         amount_hourly: hourlyToman, amount_monthly: monthlyToman,
-        price: hourlyToman, monthly_toman: monthlyToman, available: true
+        price: hourlyToman,
+        monthly_toman: monthlyToman,
+        monthly_price: monthlyToman,
+        monthlyPrice: monthlyToman,
+        pricesByCycle: {
+          hourly: hourlyToman,
+          daily: Math.round(hourlyToman * 24),
+          weekly: Math.round(hourlyToman * 168),
+          monthly: monthlyToman
+        },
+        available: true
       };
     })
     .sort((a,b) => (a.family.localeCompare(b.family) || a.monthly_toman - b.monthly_toman || a.id.localeCompare(b.id)));

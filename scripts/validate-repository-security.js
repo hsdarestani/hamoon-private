@@ -30,7 +30,10 @@ if (fs.existsSync(envPath)) {
 }
 
 if (fs.existsSync(path.join(__dirname, '..', '.env.example'))) {
+  const example = read('.env.example');
   pass('.env.example exists');
+  if (/^ZIBAL_MERCHANT=$/m.test(example)) pass('.env.example documents ZIBAL_MERCHANT');
+  else fail('.env.example is missing ZIBAL_MERCHANT');
 } else {
   fail('.env.example is missing');
 }
@@ -47,15 +50,20 @@ if (fs.existsSync(path.join(__dirname, '..', '.gitignore'))) {
 }
 
 const datacenters = read('datacenters.js');
-const forbiddenPatterns = [
-  [/\bOS_PASSWORD\s*:\s*['"][^'"]+['"]/, 'hard-coded OpenStack password'],
-  [/\bOS_USERNAME\s*:\s*['"][^'"]+['"]/, 'hard-coded OpenStack username'],
-  [/\bTRAFFIC_API_KEY\s*:\s*process\.env\.[A-Z0-9_]+\s*\|\|\s*['"][^'"]+['"]/, 'hard-coded traffic API key fallback'],
-  [/\b(?:TELEGRAM_BOT_TOKEN|HETZNER_API_TOKEN|AFRACLOUD_SECRET_KEY|DB_PASSWORD)\s*=\s*[^\s]+/, 'credential assignment in source']
+const server = read('server.js');
+const index = read('index.js');
+
+const checks = [
+  [datacenters, /\bOS_PASSWORD\s*:\s*['"][^'"]+['"]/, 'hard-coded OpenStack password'],
+  [datacenters, /\bOS_USERNAME\s*:\s*['"][^'"]+['"]/, 'hard-coded OpenStack username'],
+  [datacenters, /\bTRAFFIC_API_KEY\s*:\s*process\.env\.[A-Z0-9_]+\s*\|\|\s*['"][^'"]+['"]/, 'hard-coded traffic API key fallback'],
+  [datacenters, /\b(?:TELEGRAM_BOT_TOKEN|HETZNER_API_TOKEN|AFRACLOUD_SECRET_KEY|DB_PASSWORD)\s*=\s*[^\s]+/, 'credential assignment in datacenter source'],
+  [server + '\n' + index, /\bZIBAL_(?:MERCHANT|MERCHANT_ID|MERCHANT_KEY)\s*=\s*[^\s]+/, 'hard-coded Zibal merchant assignment'],
+  [server, /merchant\s*:\s*['"][^'"]+['"]/, 'hard-coded Zibal merchant literal']
 ];
 
-for (const [pattern, label] of forbiddenPatterns) {
-  if (pattern.test(datacenters)) fail(label);
+for (const [text, pattern, label] of checks) {
+  if (pattern.test(text)) fail(label);
   else pass(`no ${label}`);
 }
 

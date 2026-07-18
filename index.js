@@ -274,6 +274,7 @@ const {
     updatePurchaseSuspendReason,
     hasUsedFreeTestServer,
     recordTestServer,
+    getUserActiveTestServers,
     storeKeyPair,
     getKeyPair,
     deleteKeyPairFromDb,
@@ -353,13 +354,41 @@ function getAllowedCycles(dcConfig) {
 function getCycleLabel(cycle) { return formatBillingCycleFa(cycle); }
 
 function getFlavorCyclePrice(flavor, cycle) {
-  if (flavor?.pricesByCycle && Number(flavor.pricesByCycle[cycle]) > 0) {
-    return Math.round(Number(flavor.pricesByCycle[cycle]));
+  const n = (v) => {
+    const x = Number(v);
+    return Number.isFinite(x) && x > 0 ? x : 0;
+  };
+
+  const selectedCycle = HOURS_IN_CYCLE[cycle] ? cycle : 'hourly';
+
+  if (flavor?.pricesByCycle && n(flavor.pricesByCycle[selectedCycle]) > 0) {
+    return Math.round(n(flavor.pricesByCycle[selectedCycle]));
   }
-  if (cycle === 'monthly' && Number(flavor?.monthly_price || flavor?.monthlyPrice) > 0) {
-    return Math.round(Number(flavor.monthly_price || flavor.monthlyPrice));
+
+  const hourly =
+    n(flavor?.amount_hourly) ||
+    n(flavor?.hourly_price_toman) ||
+    n(flavor?.price);
+
+  const monthly =
+    n(flavor?.monthly_price) ||
+    n(flavor?.monthlyPrice) ||
+    n(flavor?.monthly_toman) ||
+    n(flavor?.amount_monthly) ||
+    n(flavor?.monthly_price_toman);
+
+  if (selectedCycle === 'monthly' && monthly > 0) return Math.round(monthly);
+  if (selectedCycle === 'hourly' && hourly > 0) return Math.round(hourly);
+
+  if (hourly > 0) return Math.round(hourly * HOURS_IN_CYCLE[selectedCycle]);
+
+  if (monthly > 0) {
+    if (selectedCycle === 'daily') return Math.round(monthly * 0.08);
+    if (selectedCycle === 'weekly') return Math.round(monthly * 0.30);
+    if (selectedCycle === 'hourly') return Math.ceil(monthly / 720);
   }
-  return Math.round(Number(flavor?.price || 0) * HOURS_IN_CYCLE[cycle]);
+
+  return 0;
 }
 
 function formatToman(n) {
@@ -810,11 +839,65 @@ case '👛 کیف پول': {
  const userPurchases = await getUserActivePurchases(effectiveUserId);
  const purchaseByServerId = new Map();
  const purchaseIdsByDc = new Map();
+ const hetznerManageDcKeys = datacenterKeys.filter(k => isHetznerDc(userDCs[k] || k));
+
+ function addManagePurchaseId(dcKey, id) {
+   if (!dcKey || !id) return;
+   const key = String(dcKey);
+   if (!purchaseIdsByDc.has(key)) purchaseIdsByDc.set(key, new Set());
+   purchaseIdsByDc.get(key).add(String(id));
+ }
+
  for (const p of userPurchases) {
    const ids = [p.server_id, p.boot_volume_id].filter(Boolean).map(String);
-   if (!purchaseIdsByDc.has(p.datacenter)) purchaseIdsByDc.set(p.datacenter, new Set());
-   for (const id of ids) { purchaseIdsByDc.get(p.datacenter).add(id); purchaseByServerId.set(id, p); }
+   const purchaseDc = String(p.datacenter || '').trim();
+   const targetDcKeys = new Set([purchaseDc]);
+
+   // Hetzner Cloud API is global; after multi-location support, old purchases may be
+   // stored as "hetzner" while live list is read via "hetzner-finland/us-east/...".
+   // Put Hetzner purchase IDs into every Hetzner management bucket.
+   if (isHetznerDc(userDCs[purchaseDc] || purchaseDc)) {
+     for (const hk of hetznerManageDcKeys) targetDcKeys.add(hk);
+   }
+
+   for (const id of ids) {
+     purchaseByServerId.set(id, p);
+     for (const dcKeyForPurchase of targetDcKeys) addManagePurchaseId(dcKeyForPurchase, id);
+   }
  }
+
+ const userTestServers = await getUserActiveTestServers(effectiveUserId).catch(error => {
+   console.error('[MANAGE] getUserActiveTestServers failed:', error.message);
+   return [];
+ });
+
+ for (const t of userTestServers) {
+   const ids = [t.server_id, t.boot_volume_id].filter(Boolean).map(String);
+   const testDc = String(t.datacenter || '').trim();
+   const targetDcKeys = new Set([testDc]);
+
+   if (isHetznerDc(userDCs[testDc] || testDc)) {
+     for (const hk of hetznerManageDcKeys) targetDcKeys.add(hk);
+   }
+
+   for (const id of ids) {
+     const pseudoPurchase = {
+       server_id: id,
+       boot_volume_id: t.boot_volume_id || null,
+       server_name: `Test-${id}`,
+       telegram_id: String(effectiveUserId),
+       datacenter: testDc,
+       status: 'test',
+       is_test_server: true,
+       auto_renew: 0
+     };
+
+     if (!purchaseByServerId.has(id)) purchaseByServerId.set(id, pseudoPurchase);
+     for (const dcKeyForTest of targetDcKeys) addManagePurchaseId(dcKeyForTest, id);
+   }
+ }
+
+ console.log('[MANAGE] test servers for user', effectiveUserId, '=', userTestServers.length);
  const promises = datacenterKeys.map(dcKey => {
 const dcConfig = userDCs[dcKey];
 console.log('[MANAGE] begin DC', dcKey, 'name =', dcConfig?.name);
@@ -845,7 +928,52 @@ console.error(`Could not fetch servers from ${dcConfig?.name || dcKey}: ${error.
             });
 
             const results = await Promise.all(promises);
-            const userServers = results.flat();
+            let userServers = results.flat();
+
+            // Deduplicate Hetzner live results. Hetzner Cloud list is global, so the same
+            // server may appear under multiple location DC keys.
+            const dedupedManageServers = [];
+            const seenManageServerIds = new Set();
+
+            for (const srv of userServers) {
+              const sid = String(srv?.id || srv?.uuid || '').trim();
+              if (!sid) {
+                dedupedManageServers.push(srv);
+                continue;
+              }
+              if (seenManageServerIds.has(sid)) continue;
+              seenManageServerIds.add(sid);
+              dedupedManageServers.push(srv);
+            }
+
+            userServers = dedupedManageServers;
+
+            // DB fallback for Hetzner purchases:
+            // If live filtering misses a Hetzner server because of datacenter key/location mismatch,
+            // still show it in management based on purchases table.
+            for (const p of userPurchases) {
+              const sid = String(p.server_id || '').trim();
+              if (!sid || seenManageServerIds.has(sid)) continue;
+
+              const purchaseDc = String(p.datacenter || '').trim();
+              const isHetznerPurchase = isHetznerDc(userDCs[purchaseDc] || purchaseDc);
+              if (!isHetznerPurchase) continue;
+
+              const displayDcKey = userDCs[purchaseDc] ? purchaseDc : (hetznerManageDcKeys[0] || purchaseDc);
+              if (!userDCs[displayDcKey]) continue;
+
+              userServers.push({
+                id: sid,
+                uuid: sid,
+                name: p.server_name || sid,
+                status: p.status || 'active',
+                datacenter: displayDcKey,
+                purchase: p,
+                __dbFallback: true
+              });
+
+              seenManageServerIds.add(sid);
+            }
   console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);
 
             if (userServers.length === 0) {
@@ -890,14 +1018,20 @@ await sendMessage(
     `💳 مبلغ قابل پرداخت: ${payableToman} تومان`
 );
         const orderId = ++orderCounter;
+        const zibalOrderId = `${effectiveUserId}-${orderId}-${originalAmount}`;
         state[effectiveUserId] = { step: 'READY' };
         try {
             const axios = require('axios');
+const zibalMerchant = String(process.env.ZIBAL_MERCHANT || process.env.ZIBAL_MERCHANT_ID || process.env.ZIBAL_MERCHANT_KEY || '').trim();
+if (!zibalMerchant) {
+    console.error('[ZIBAL_REQUEST] merchant is not configured');
+    return sendMessage(effectiveChatId, '❌ تنظیمات درگاه پرداخت کامل نیست. لطفاً با پشتیبانی تماس بگیرید.');
+}
 const res = await axios.post('https://gateway.zibal.ir/v1/request', {
-    merchant: "68985f4ba45c72000bcfd5a2",
+    merchant: zibalMerchant,
     amount: payableRial,
-    callbackUrl: "https://pay.hamooncloud.ir/zibal/callback",
-    orderId: `${effectiveUserId}-${orderId}-${originalAmount}`, // ← مبلغ اصلی را در orderId قرار بده
+    callbackUrl: `https://pay.hamooncloud.ir/zibal/callback?orderId=${encodeURIComponent(zibalOrderId)}`,
+    orderId: zibalOrderId, // مبلغ اصلی داخل orderId ذخیره شده
     description: "شارژ کیف پول (با مالیات)"
 });
 
@@ -1280,7 +1414,7 @@ async function handleBuildSnapshotConfirm(chatId, userId, dcConfig, snapshotId, 
       flavor.id,
       snapshotId,
       null, // ✅ دیگه network ID نیست
-      { user: userId, fromSnapshot: true },
+      { user: userId, fromSnapshot: 'true' },
       flavor.disk,
       "volume"
     );
@@ -1908,7 +2042,7 @@ bot.onText(/\/debit (\d+) (\d+) (.+)/, async (msg, match) => {
 bot.onText(/\/run_billing/, async (msg) => {
     if (String(msg.from.id) !== String(SUPPORT_ID)) return;
     sendMessage(msg.chat.id, '⚙️ فرآیند صورتحساب به صورت دستی آغاز شد.');
-    await runHourlyBilling();
+    await runHourlyBilling({ force: true });
     sendMessage(msg.chat.id, '✅ فرآیند صورتحساب به پایان رسید.');
 });
 
@@ -2051,6 +2185,19 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
         let ip = await pollForIp(dcConfig, tok, srv.id);
         let rootPassword = srv.adminPass;
 
+        // store test server root password if provider returns it
+        if (rootPassword) {
+            await upsertServerSecret({
+                telegramId: userId,
+                serverId: srv.id,
+                datacenter: dcConfig.key,
+                secretType: 'root_password',
+                secretValue: rootPassword
+            }).catch(err => {
+                console.warn('[TEST_SERVER_SECRET_STORE_FAILED]', { server_id: srv.id, datacenter: dcConfig.key, message: err.message });
+            });
+        }
+
 
         const privateKeyText = `-----BEGIN RSA PRIVATE KEY-----\n${rawPrivateKey}\n-----END RSA PRIVATE KEY-----`;
 
@@ -2063,7 +2210,23 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
             `🔑 **کلید خصوصی شما \\(برای اتصال SSH\\):**\n\`\`\`\n${escapeMarkdownV2(privateKeyText)}\n\`\`\``;
 
 
-        sendMessage(chatId, messageText, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ حذف', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]] } });
+        const testKeyboard = [
+            [{ text: '⚙️ مدیریت سرور', callback_data: makeShortCb(userId, { action: 'M', dcKey: dcConfig.key, serverId: srv.id }) }]
+        ];
+
+        if (isAfraDc(dcConfig)) {
+            testKeyboard.push([{ text: '🔑 دریافت رمز عبور', callback_data: makeShortCb(userId, { action: 'GET_STORED_PASSWORD', dcKey: dcConfig.key, serverId: srv.id }) }]);
+            testKeyboard.push([{ text: '♻️ ریست رمز عبور', callback_data: makeShortCb(userId, { action: 'RESET_PASSWORD_SSH_ASK', dcKey: dcConfig.key, serverId: srv.id }) }]);
+        } else if (hasCapability(dcConfig, 'resetPassword')) {
+            testKeyboard.push([{ text: getCapabilityLabel(dcConfig, 'resetPassword', '🔑 ریست پسورد'), callback_data: makeShortCb(userId, { action: 'ASK_RESETPW', dcKey: dcConfig.key, serverId: srv.id }) }]);
+        }
+
+        testKeyboard.push([{ text: '❌ حذف', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]);
+
+        sendMessage(chatId, messageText, {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: testKeyboard }
+        });
         logServerEvent({ type: 'test_server_created', server_id: srv.id, user_id: userId, datacenter: dcConfig.key });
 
     } catch (e) {
@@ -2072,22 +2235,83 @@ async function handleFreeTrialRequest(chatId, userId, dcConfig) {
     }
 }
 
-async function handleCycleSelection(chatId, userId, messageId, selectedCycle, dcConfig) {
-    const allowedCycles = getAllowedCycles(dcConfig);
-    if (!allowedCycles.includes(selectedCycle)) {
-      return showBillingCycleSelection(chatId, userId, messageId, dcConfig);
+async function handleCycleSelection(chatId, userId, messageId, cycle, dcConfig) {
+  if (!dcConfig) return sendMessage(chatId, '❌ دیتاسنتر نامعتبر است.');
+  if (!HOURS_IN_CYCLE[cycle]) return sendMessage(chatId, '❌ سیکل پرداخت نامعتبر است.');
+
+  state[userId] = {
+    ...(state[userId] || {}),
+    step: 'SELECT_FLAVOR',
+    selectedCycle: cycle,
+    selectedDatacenterConfig: dcConfig
+  };
+
+  try {
+    let flavors = await openstackApi.listFlavors(dcConfig);
+    if (!Array.isArray(flavors)) flavors = [];
+
+    const isHetzner =
+      dcConfig?.provider === 'hetzner' ||
+      dcConfig?.apiType === 'hetzner' ||
+      String(dcConfig?.key || '').startsWith('hetzner');
+
+    if (isHetzner) {
+      const allowed = String(process.env.HETZNER_ALLOWED_SERVER_TYPES || '')
+        .split(',')
+        .map(x => x.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (allowed.length) {
+        const allowedSet = new Set(allowed);
+        flavors = flavors.filter(f => {
+          const id = String(f.id || f.hetzner_type || f.server_type || '').toLowerCase();
+          return allowedSet.has(id);
+        });
+      }
     }
 
-    state[userId].selectedCycle = selectedCycle;
-    state[userId].step = 'SELECT_FLAVOR';
+    flavors = flavors.filter(f => f && f.available !== false);
 
-    const flavors = await openstackApi.listFlavors(dcConfig);
-    const keyboard = flavors.map(f => {
-        const totalCyclePrice = getFlavorCyclePrice(f, selectedCycle);
-        return [{ text: `${f.label} — ${formatToman(totalCyclePrice)} تومان`, callback_data: `FLAVOR_${f.id}` }];
+    if (!flavors.length) {
+      return sendMessage(chatId, '❌ فعلاً پلنی برای این دیتاسنتر قابل نمایش نیست.');
+    }
+
+    const cycleLabel = getCycleLabel(cycle);
+
+    const keyboard = flavors.map(flavor => {
+      const id = String(flavor.id || flavor.hetzner_type || flavor.server_type || flavor.name);
+      const name = String(flavor.hetzner_type || flavor.server_type || flavor.id || flavor.name || '').toUpperCase();
+      const cores = flavor.cores || flavor.cpu || flavor.vcpus || '?';
+      const memory = flavor.memory || flavor.ram || '?';
+      const disk = flavor.disk || flavor.ssd || '?';
+      const price = getFlavorCyclePrice(flavor, cycle);
+
+      let text;
+      if (isHetzner) {
+        text = `${name} - ${cores} vCPU / ${memory} GB RAM / ${disk} GB — ${formatToman(price)} تومان / ${cycleLabel}`;
+      } else {
+        const label = flavor.label || flavor.name || id;
+        text = `${label} — ${formatToman(price)} تومان / ${cycleLabel}`;
+      }
+
+      if (text.length > 120) text = text.slice(0, 117) + '...';
+
+      return [{ text, callback_data: `FLAVOR_${id}` }];
     });
+
     keyboard.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
-    bot.editMessageText('🔹 نوع سرور را انتخاب کنید:', { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: keyboard } });
+
+    const text = `🔹 پلن مورد نظر را انتخاب کنید:\n💳 سیکل انتخابی: ${cycleLabel}`;
+
+    return bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: keyboard }
+    }).catch(() => sendMessage(chatId, text, { reply_markup: { inline_keyboard: keyboard } }));
+  } catch (e) {
+    console.error('[handleCycleSelection] failed:', e);
+    return sendMessage(chatId, '❌ خطا در دریافت لیست پلن‌ها.');
+  }
 }
 
 async function handleFlavorSelection(chatId, userId, messageId, selectedFlavorId, dcConfig) {
@@ -2305,7 +2529,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
       let bootMethod = 'volume';
       if (isAfra || isTebyan) {
         generatedRootPassword = generateStrongPassword();
-        serverMeta.passwordManagedByBot = true;
+        serverMeta.passwordManagedByBot = 'true';
       }
       if (isAfra) serverMeta.rootPassword = generatedRootPassword;
       if (isTebyan) {
@@ -3246,10 +3470,24 @@ const DEFAULT_MIN_ALERT_TOMAN = 100000;
 function isBillingEligiblePurchase(purchase) {
   const status = String(purchase?.status || '').toLowerCase();
   if (status === 'active') return true;
-  return status === 'suspended' && String(purchase?.suspend_reason || '').toLowerCase() === 'insufficient_balance';
+  return status === 'suspended' &&
+    String(purchase?.suspend_reason || '').toLowerCase() === 'insufficient_balance';
 }
 
-async function runHourlyBilling() {
+let hourlyBillingRunning = false;
+
+async function runHourlyBilling(options = {}) {
+  if (hourlyBillingRunning) {
+    console.log('[BILLING] previous run still in progress; skipping');
+    return;
+  }
+  hourlyBillingRunning = true;
+  try {
+    const forceBillingRun = !!options.force;
+    if (!forceBillingRun && (process.env.DISABLE_AUTO_BILLING || '1') !== '0') {
+      console.log('[BILLING] hourly billing disabled by recovery mode');
+      return;
+    }
   console.log('--- Starting hourly billing process ---');
   const allPurchases = await getAllPurchases();
 
@@ -3466,6 +3704,9 @@ async function runHourlyBilling() {
   }
 
   console.log('--- Hourly billing process completed ---');
+  } finally {
+    hourlyBillingRunning = false;
+  }
 }
 
 

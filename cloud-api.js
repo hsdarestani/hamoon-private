@@ -1,3 +1,19 @@
+
+function normalizeNovaMetadataValues(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const meta = obj?.server?.metadata || obj?.metadata;
+  if (!meta || typeof meta !== 'object') return obj;
+
+  for (const [k, v] of Object.entries(meta)) {
+    if (v === undefined || v === null) {
+      delete meta[k];
+    } else if (typeof v !== 'string') {
+      meta[k] = String(v);
+    }
+  }
+  return obj;
+}
+
 // cloud-api.js
 const openstack = require('./openstack-api');
 const hetzner   = require('./Hetzner/hetzner-api');

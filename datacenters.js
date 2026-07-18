@@ -72,6 +72,8 @@ function createHetznerLocationDc({ key, label, flag, location, fallbackLocations
 
 module.exports = {
 
+
+
 hetzner: createHetznerLocationDc({
   key: 'hetzner',
   label: 'آلمان - Hetzner',
@@ -117,6 +119,8 @@ hetzner: createHetznerLocationDc({
   namePrefix: 'SIN'
 }),
 
+
+
 afracloud: {
   key: 'afracloud',
   name: 'افراکلود',
@@ -130,8 +134,8 @@ afracloud: {
   API_KEY: process.env.AFRACLOUD_API_KEY,
   SECRET_KEY: process.env.AFRACLOUD_SECRET_KEY,
 
-  ZONE_UUID: process.env.AFRACLOUD_ZONE_UUID || '55a14e1b-024c-4ea4-8dcc-826eacde15e0',
-  NETWORK_UUID: process.env.AFRACLOUD_NETWORK_UUID || 'd292caad-3d08-4ac1-b91a-695c499b39f8',
+  ZONE_UUID: '55a14e1b-024c-4ea4-8dcc-826eacde15e0',
+  NETWORK_UUID: 'd292caad-3d08-4ac1-b91a-695c499b39f8',
 
   allowTest: false,
   BILL_TRAFFIC: false,
@@ -170,52 +174,55 @@ afracloud: {
   ],
 },
 
-tebyan: {
-  key: 'tebyan',
-  name: 'تبیان',
-  OS_AUTH_URL: process.env.TEBYAN_OS_AUTH_URL || 'http://94.232.171.61:5000',
-  OS_PROJECT_ID: process.env.TEBYAN_OS_PROJECT_ID,
-  OS_USER_DOMAIN_NAME: process.env.TEBYAN_OS_USER_DOMAIN_NAME || 'Default',
-  OS_PROJECT_DOMAIN_ID: process.env.TEBYAN_OS_PROJECT_DOMAIN_ID || 'default',
-  OS_USERNAME: process.env.TEBYAN_OS_USERNAME,
-  OS_PASSWORD: process.env.TEBYAN_OS_PASSWORD,
-  OS_NETWORK_ID: process.env.TEBYAN_OS_NETWORK_ID,
-  OS_TEST_FLAVOR_ID: process.env.TEBYAN_OS_TEST_FLAVOR_ID || 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
-  OS_TEST_IMAGE_ID: process.env.TEBYAN_OS_TEST_IMAGE_ID || 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
-  TRAFFIC_API_BASE_URL: process.env.TEBYAN_TRAFFIC_API_BASE_URL || 'https://netbill.tebyansmart.com/traffic/',
-  TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || null,
-  TEBYAN_DEFAULT_BOOT_METHOD: process.env.TEBYAN_DEFAULT_BOOT_METHOD || 'image',
-  TEBYAN_ENABLE_BOOT_FROM_VOLUME: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
-  TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN: process.env.TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN !== 'false',
-  TEBYAN_PURCHASE_HEALTH_GATE: process.env.TEBYAN_PURCHASE_HEALTH_GATE !== 'false',
-  BILL_TRAFFIC: true,
-  capabilities: {
-    bootFromVolume: false, resetPassword: false, traffic: true, projectTraffic: true,
-    rootPasswordLogin: true, passwordLogin: true, sshUser: 'root', createKeyPair: true, deleteKeyPair: true,
-    createServer: true, deleteServer: true, suspendServer: true, resumeServer: true, rebuild: false
-  },
-  flavors: [
-      { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 340000 },
-      { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 600000 },
-      { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "2162d6cc-305c-415f-b4b7-7bd0bc5575f0", monthly_price: 770625 },
-      { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "72955761-999f-4bb3-bf58-f24e73fe4b47", monthly_price: 1120000 },
-      { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "16f7cfbb-4502-41bc-985f-6f12386f2dd3", monthly_price: 1640000 },
-      { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "5b444500-5a08-4a9b-808d-bd913014d0da", monthly_price: 1461250 },
-      { name: "Thunder  Advanced- 16 Cores - 64 GB RAM - 750 GB SSD", id: "a44c6d5d-9b69-483d-9ac6-906add8b0228", monthly_price: 9230375 },
-  ],
-  images: [
-      { name: "Debian-12", id: "a10db8cb-5831-4a96-b826-2f21886ed694" },
-      { name: "Debian-11", id: "24903df2-90f7-4bf4-ba28-5ad8931ba86b" },
-      { name: "Mikrotik", id: "78e950c1-58cc-4c35-8f3c-76270c6241f3" },
-      { name: "Ubuntu-24.04", id: "f24e6327-450b-4339-b79a-1abb08083c95" },
-      { name: "Ubuntu-22.04", id: "58e1c167-94cc-4537-8fca-68cb79f0f602" },
-      { name: "Ubuntu-20.04", id: "af76b2b6-f017-46c3-a38e-5dec6daa344c" },
-      { name: "Fedora", id: "65409c35-3989-4775-8f17-471ee4a7e82d" },
-      // No Alma-9 in Tebyan list
-      { name: "Alma-8", id: "b76d0cc9-4f7e-4f59-af5b-39e26944f8e2" },
-      { name: "Rocky-9", id: "e5ab87f0-abfa-4586-a716-f5bdc4862e42" },
-      { name: "Rocky-8", id: "9e753d09-19d5-4b8f-820b-5c3b381207a7" },
-      // No pfSense in Tebyan list
-  ]
-}
+
+
+  tebyan: {
+    enabled: false, // temporarily disabled: auth endpoint timeout
+    key: 'tebyan',
+    name: 'تبیان',
+    OS_AUTH_URL: process.env.TEBYAN_OS_AUTH_URL || 'http://94.232.171.61:5000',
+    OS_PROJECT_ID: process.env.TEBYAN_OS_PROJECT_ID,
+    OS_USER_DOMAIN_NAME: process.env.TEBYAN_OS_USER_DOMAIN_NAME || 'Default',
+    OS_PROJECT_DOMAIN_ID: process.env.TEBYAN_OS_PROJECT_DOMAIN_ID || 'default',
+    OS_USERNAME: process.env.TEBYAN_OS_USERNAME,
+    OS_PASSWORD: process.env.TEBYAN_OS_PASSWORD,
+    OS_NETWORK_ID: process.env.TEBYAN_OS_NETWORK_ID,
+    OS_TEST_FLAVOR_ID: process.env.TEBYAN_OS_TEST_FLAVOR_ID || 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
+    OS_TEST_IMAGE_ID: process.env.TEBYAN_OS_TEST_IMAGE_ID || 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
+    TRAFFIC_API_BASE_URL: process.env.TEBYAN_TRAFFIC_API_BASE_URL || 'https://netbill.tebyansmart.com/traffic/',
+    TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || null,
+    TEBYAN_DEFAULT_BOOT_METHOD: process.env.TEBYAN_DEFAULT_BOOT_METHOD || 'image',
+    TEBYAN_ENABLE_BOOT_FROM_VOLUME: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
+    TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN: process.env.TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN !== 'false',
+    TEBYAN_PURCHASE_HEALTH_GATE: process.env.TEBYAN_PURCHASE_HEALTH_GATE !== 'false',
+    BILL_TRAFFIC: true,
+    capabilities: {
+      bootFromVolume: false, resetPassword: true, traffic: true, projectTraffic: true,
+      rootPasswordLogin: true, passwordLogin: true, sshUser: 'root', createKeyPair: true, deleteKeyPair: true,
+      createServer: true, deleteServer: true, suspendServer: true, resumeServer: true, rebuild: false
+    },
+    flavors: [
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 540000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 960000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "2162d6cc-305c-415f-b4b7-7bd0bc5575f0", monthly_price: 1232000 },
+        { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "72955761-999f-4bb3-bf58-f24e73fe4b47", monthly_price: 1780000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "16f7cfbb-4502-41bc-985f-6f12386f2dd3", monthly_price: 2625000 },
+        { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "5b444500-5a08-4a9b-808d-bd913014d0da", monthly_price: 2340000 },
+        { name: "Thunder  Advanced- 16 Cores - 64 GB RAM - 750 GB SSD", id: "a44c6d5d-9b69-483d-9ac6-906add8b0228", monthly_price: 14800000 },
+    ],
+    images: [
+        { name: "Debian-12", id: "a10db8cb-5831-4a96-b826-2f21886ed694" },
+        { name: "Debian-11", id: "24903df2-90f7-4bf4-ba28-5ad8931ba86b" },
+        { name: "Mikrotik", id: "78e950c1-58cc-4c35-8f3c-76270c6241f3" },
+        { name: "Ubuntu-24.04", id: "f24e6327-450b-4339-b79a-1abb08083c95" },
+        { name: "Ubuntu-22.04", id: "58e1c167-94cc-4537-8fca-68cb79f0f602" },
+        { name: "Ubuntu-20.04", id: "af76b2b6-f017-46c3-a38e-5dec6daa344c" },
+        { name: "Fedora", id: "65409c35-3989-4775-8f17-471ee4a7e82d" },
+        // No Alma-9 in Tebyan list
+        { name: "Alma-8", id: "b76d0cc9-4f7e-4f59-af5b-39e26944f8e2" },
+        { name: "Rocky-9", id: "e5ab87f0-abfa-4586-a716-f5bdc4862e42" },
+        { name: "Rocky-8", id: "9e753d09-19d5-4b8f-820b-5c3b381207a7" },
+        // No pfSense in Tebyan list
+    ]
+  }
 };

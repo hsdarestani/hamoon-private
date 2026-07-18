@@ -617,6 +617,25 @@ async function recordTestServer(telegramId, datacenter, serverId, bootVolumeId) 
     }
 }
 
+
+async function getUserActiveTestServers(telegramId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT telegram_id, datacenter, server_id, boot_volume_id, used_at
+             FROM test_servers
+             WHERE telegram_id = ?
+               AND server_id IS NOT NULL
+               AND server_id <> ''
+             ORDER BY used_at DESC`,
+            [String(telegramId)]
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
 async function deleteTestServer(serverId) {
     const conn = await pool.getConnection();
     try {
@@ -1243,7 +1262,37 @@ async function createApiClient({ telegramId, name, notes = null, maxServers = 2,
     return getApiClientById(r.insertId);
 }
 async function listApiClients() {
-    const [rows] = await pool.execute(`SELECT c.*, u.wallet, COUNT(DISTINCT CASE WHEN k.is_active=1 THEN k.id END) active_keys, MAX(k.last_used_at) last_used_at, COUNT(DISTINCT CASE WHEN p.status NOT IN ('deleted','deletion_pending','provider_missing') THEN p.server_id END) active_servers FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci LEFT JOIN api_keys k ON k.client_id=c.id LEFT JOIN purchases p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci AND p.datacenter IN (${hetznerDatacenterSqlList}) GROUP BY c.id ORDER BY c.created_at DESC`);
+    const [rows] = await pool.execute(`
+        SELECT
+            c.*,
+            COALESCE(u.wallet, 0) AS wallet,
+            COALESCE(k.active_keys, 0) AS active_keys,
+            k.last_used_at,
+            COALESCE(p.active_servers, 0) AS active_servers
+        FROM api_clients c
+        LEFT JOIN users u
+          ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci
+        LEFT JOIN (
+            SELECT
+                client_id,
+                COUNT(DISTINCT CASE WHEN is_active = 1 THEN id END) AS active_keys,
+                MAX(last_used_at) AS last_used_at
+            FROM api_keys
+            GROUP BY client_id
+        ) k ON k.client_id = c.id
+        LEFT JOIN (
+            SELECT
+                telegram_id,
+                COUNT(DISTINCT CASE
+                    WHEN status NOT IN ('deleted','deletion_pending','provider_missing')
+                    THEN server_id
+                END) AS active_servers
+            FROM purchases
+            WHERE datacenter IN (${hetznerDatacenterSqlList})
+            GROUP BY telegram_id
+        ) p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci
+        ORDER BY c.created_at DESC
+    `);
     return rows;
 }
 async function getApiClientById(clientId) {
@@ -1279,6 +1328,92 @@ async function getApiClientMonthlySpend(clientId) { const c=await getApiClientBy
 async function getApiClientUsageSummary(clientId) { return { active_servers: await getApiClientActiveServerCount(clientId), monthly_spend: await getApiClientMonthlySpend(clientId), client: await getApiClientById(clientId) }; }
 async function listApiClientLogs(clientId, limit=100) { const [rows]=await pool.execute(`SELECT * FROM api_request_logs WHERE client_id=? ORDER BY created_at DESC LIMIT ${Math.min(Number(limit)||100,500)}`, [clientId]); return rows; }
 
+
+
+async function getAllActivePurchases() {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT * FROM purchases
+             WHERE status = 'active'
+             ORDER BY created_at DESC`
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseTrafficBilled(serverId, lastBilledTrafficGb, lastBilledAt = undefined) {
+    const conn = await pool.getConnection();
+    try {
+        let sql = 'UPDATE purchases SET last_billed_traffic_gb = ?, updated_at = CURRENT_TIMESTAMP';
+        const params = [Number(lastBilledTrafficGb || 0)];
+        if (lastBilledAt !== undefined && lastBilledAt !== null) {
+            const formattedDate = lastBilledAt instanceof Date
+                ? lastBilledAt.toISOString().slice(0, 19).replace('T', ' ')
+                : lastBilledAt;
+            sql += ', last_billed_at = ?';
+            params.push(formattedDate);
+        }
+        sql += ' WHERE server_id = ?';
+        params.push(String(serverId));
+        const [res] = await conn.execute(sql, params);
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function adminUpdateBilling(serverId, updates = {}) {
+    const conn = await pool.getConnection();
+    try {
+        const fields = [];
+        const params = [];
+
+        if (Object.prototype.hasOwnProperty.call(updates, 'price_per_gb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.price_per_gb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'pricePerGb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.pricePerGb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'download_only')) {
+            fields.push('download_only = ?');
+            params.push(updates.download_only ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'downloadOnly')) {
+            fields.push('download_only = ?');
+            params.push(updates.downloadOnly ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'duration')) {
+            fields.push('duration = ?');
+            params.push(String(updates.duration));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'amount')) {
+            fields.push('amount = ?');
+            params.push(Number(updates.amount || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'auto_renew')) {
+            fields.push('auto_renew = ?');
+            params.push(updates.auto_renew ? 1 : 0);
+        }
+
+        if (!fields.length) return false;
+
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+        params.push(String(serverId));
+
+        const [res] = await conn.execute(
+            `UPDATE purchases SET ${fields.join(', ')} WHERE server_id = ?`,
+            params
+        );
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
 
 module.exports = {
     pool,
@@ -1317,6 +1452,7 @@ module.exports = {
     updatePurchaseSuspendReason,
     hasUsedFreeTestServer,
     recordTestServer,
+    getUserActiveTestServers,
     storeKeyPair,
     getKeyPair,
     deleteKeyPairFromDb,
