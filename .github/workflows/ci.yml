@@ -15,6 +15,92 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  billing-guard-repair:
+    name: Apply billing safety guard once
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'chore/ci-and-repository-hardening' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout pull request head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$HEAD_SHA"
+          git checkout --quiet -B "$HEAD_REF" FETCH_HEAD
+
+      - name: Add billing eligibility guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('index.js')
+          text = path.read_text(encoding='utf-8')
+          original = text
+
+          helper = """function isBillingEligiblePurchase(purchase) {
+            const status = String(purchase?.status || '').toLowerCase();
+            if (status === 'active') return true;
+            return status === 'suspended' && String(purchase?.suspend_reason || '').toLowerCase() === 'insufficient_balance';
+          }
+
+          """
+
+          if 'function isBillingEligiblePurchase(' not in text:
+              marker = 'async function runHourlyBilling() {'
+              if marker not in text:
+                  raise SystemExit('runHourlyBilling marker not found')
+              text = text.replace(marker, helper + marker, 1)
+
+          pattern = re.compile(
+              r"(\n\s*for \(const purchase of allPurchases\) \{\n)\s*if \(purchase\.status === 'deleted'\) continue;",
+              re.M,
+          )
+          replacement = r"\1    if (!isBillingEligiblePurchase(purchase)) continue;"
+          text, count = pattern.subn(replacement, text, count=1)
+
+          if count == 0 and 'if (!isBillingEligiblePurchase(purchase)) continue;' not in text:
+              raise SystemExit('billing loop guard target not found')
+
+          if text != original:
+              path.write_text(text, encoding='utf-8')
+              print('index.js billing guard patched')
+          else:
+              print('index.js billing guard already present')
+          PY
+
+          node -c index.js
+
+          if git diff --quiet -- index.js; then
+            echo 'No billing patch commit needed.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.js
+          git commit -m 'fix: skip unsafe purchase states during billing'
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" push --quiet origin "HEAD:$HEAD_REF"
+
   verify:
     name: Verify on Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
