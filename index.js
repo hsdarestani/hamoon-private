@@ -3243,6 +3243,12 @@ if (!dcConfig || dcConfig.apiType === 'hetzner' || !dcConfig.TRAFFIC_API_BASE_UR
 
 const DEFAULT_MIN_ALERT_TOMAN = 100000;
 
+function isBillingEligiblePurchase(purchase) {
+  const status = String(purchase?.status || '').toLowerCase();
+  if (status === 'active') return true;
+  return status === 'suspended' && String(purchase?.suspend_reason || '').toLowerCase() === 'insufficient_balance';
+}
+
 async function runHourlyBilling() {
   console.log('--- Starting hourly billing process ---');
   const allPurchases = await getAllPurchases();
@@ -3331,7 +3337,7 @@ async function runHourlyBilling() {
 
   // 💳 حلقه‌ی صورتحساب سرورها
   for (const purchase of allPurchases) {
-    if (purchase.status === 'deleted') continue;
+    if (!isBillingEligiblePurchase(purchase)) continue;
 
     const dcsForUser = getUserEffectiveDCs(String(purchase.telegram_id));
     const dcConfig = dcsForUser?.[purchase.datacenter];
