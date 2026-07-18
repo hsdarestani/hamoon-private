@@ -474,7 +474,31 @@ async function resumeServer(dcConfig, /*token*/ _t, serverId) {
 
 async function rebuildServer(dcConfig, /*token*/ _t, serverId, imageId) {
   const http = client(dcConfig);
-  await http.post(`/servers/${serverId}/actions/rebuild`, { image: imageId });
+  const { data } = await http.post(`/servers/${serverId}/actions/rebuild`, { image: imageId });
+  return {
+    action: data?.action || null,
+    root_password: data?.root_password || null,
+  };
+}
+
+async function startServer(dcConfig, token, serverId) {
+  return resumeServer(dcConfig, token, serverId);
+}
+
+async function createPrimaryIpv4(dcConfig, location) {
+  const data = await hetznerRequest(dcConfig, 'POST', '/primary_ips', { type: 'ipv4', datacenter: location, assignee_type: 'server', auto_delete: false });
+  return data.primary_ip;
+}
+async function assignPrimaryIp(dcConfig, primaryIpId, serverId) {
+  const data = await hetznerRequest(dcConfig, 'POST', `/primary_ips/${primaryIpId}/actions/assign`, { assignee_id: Number(serverId), assignee_type: 'server' });
+  return data.action;
+}
+async function unassignPrimaryIp(dcConfig, primaryIpId) {
+  const data = await hetznerRequest(dcConfig, 'POST', `/primary_ips/${primaryIpId}/actions/unassign`, {});
+  return data.action;
+}
+async function deletePrimaryIp(dcConfig, primaryIpId) {
+  return hetznerRequest(dcConfig, 'DELETE', `/primary_ips/${primaryIpId}`);
 }
 
 async function resetServerPassword(dcConfig, /*token*/ _t, serverId) {
@@ -491,9 +515,6 @@ async function resetServerPassword(dcConfig, /*token*/ _t, serverId) {
     hasRootPassword: !!newPass
   });
 
-  if (process.env.DEBUG_PASSWORDS === '1') {
-    console.log('[hetzner] root_password =', newPass);
-  }
 
   return newPass;
 }
@@ -523,7 +544,12 @@ module.exports = {
   deleteServer,
   suspendServer,
   resumeServer,
+  startServer,
   rebuildServer,
+  createPrimaryIpv4,
+  assignPrimaryIp,
+  unassignPrimaryIp,
+  deletePrimaryIp,
   resetServerPassword,
   createOrGetSshKey,
   deleteSshKey,
