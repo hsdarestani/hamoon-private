@@ -1,18 +1,20 @@
 {
   "name": "hamooncloud",
   "version": "1.0.0",
-  "description": "",
+  "description": "HamoonCloud Telegram bot, dashboard and reseller API",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run ci",
+    "ci": "npm run validate:syntax && npm run validate:provider-capabilities && npm run validate:afracloud-pricing && npm run validate:dashboard && npm run validate:production-patch && npm run validate:afracloud-flow && npm run validate:repo-security",
     "start": "node index.js",
-    "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
-    "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
-    "validate:syntax": "node -c index.js && node -c db.js && node -c scheduler.js && node -c dashboard-api.js && node -c server.js",
-    "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js",
     "dashboard": "node server.js",
+    "validate:syntax": "node -c index.js && node -c db.js && node -c scheduler.js && node -c dashboard-api.js && node -c customer-api.js && node -c cloud-api.js && node -c Hetzner/hetzner-api.js && node -c server.js",
+    "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
+    "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
+    "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js",
     "validate:dashboard": "node scripts/validate-dashboard.js",
     "validate:production-patch": "node scripts/validate-production-patch.js",
+    "validate:repo-security": "node scripts/validate-repository-security.js",
     "reconcile:tebyan": "node scripts/reconcile-tebyan.js --dry-run",
     "test:traffic": "node scripts/test-traffic-api.js tebyan"
   },
@@ -20,6 +22,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "axios": "^1.6.7",
     "body-parser": "^2.2.0",
