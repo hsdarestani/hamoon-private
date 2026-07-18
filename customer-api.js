@@ -53,19 +53,59 @@ async function userPurchase(req, res, next) {
 
 function createCustomerApiRouter() {
   const router = express.Router();
-  router.use(express.json({ limit: '64kb' }));
+  router.use((req, res, next) => {
+    if (!['POST','PUT','PATCH'].includes(req.method)) {
+      req.body = {};
+      return next();
+    }
+
+    let raw = '';
+    let done = false;
+
+    req.setEncoding('utf8');
+
+    req.on('data', chunk => {
+      raw += chunk;
+      if (raw.length > 65536 && !done) {
+        done = true;
+        return apiError(res, 413, 'PAYLOAD_TOO_LARGE', 'حجم درخواست بیش از حد مجاز است.');
+      }
+    });
+
+    req.on('end', () => {
+      if (done) return;
+
+      const text = String(raw || '').trim();
+      if (!text) {
+        req.body = {};
+        req.rawBodyText = '';
+        return next();
+      }
+
+      try {
+        req.body = JSON.parse(text);
+        req.rawBodyText = text;
+        return next();
+      } catch {
+        return apiError(res, 400, 'INVALID_JSON', 'بدنه JSON نامعتبر است.');
+      }
+    });
+
+    req.on('error', next);
+  });
+
   router.use(auth);
-  router.get('/me', (req,res)=>res.json({ ok:true, client:{ id:req.apiClient.id, telegram_id:req.apiClient.telegram_id, name:req.apiClient.name, max_servers:req.apiClient.max_servers, min_wallet_balance:req.apiClient.min_wallet_balance } }));
+  router.get('/me', (req,res)=>res.json({ ok:true, client:{ id:req.apiClient.id, telegram_id:req.apiClient.telegram_id, name:req.apiClient.name, is_active:req.apiClient.is_active, max_servers:req.apiClient.max_servers, max_monthly_spend:req.apiClient.max_monthly_spend, max_hourly_spend:req.apiClient.max_hourly_spend, allowed_datacenters:req.apiClient.allowed_datacenters, allowed_plans:req.apiClient.allowed_plans, allowed_images:req.apiClient.allowed_images, allowed_locations:req.apiClient.allowed_locations, min_wallet_balance:req.apiClient.min_wallet_balance } }));
   router.get('/wallet', async (req,res,next)=>{ try{res.json({ ok:true, wallet:{ balance: await db.getUserWallet(req.apiClient.telegram_id) } });}catch(e){next(e);} });
   router.get('/prices', async (_req,res,next)=>{ try{res.json({ ok:true, plans: await getHetznerSellablePlans(datacenters.hetzner) });}catch(e){next(e);} });
   router.get('/usage', async (req,res,next)=>{ try{res.json({ ok:true, usage: await db.getApiClientUsageSummary(req.apiClient.id) });}catch(e){next(e);} });
   router.get('/servers', async (req,res,next)=>{ try{const data=await db.listAdminServers({ userId:req.apiClient.telegram_id, limit:200 }); res.json({ ok:true, servers:data.rows.filter(r=>isHetznerDc(r.datacenter)) });}catch(e){next(e);} });
   router.get('/servers/:id', userPurchase, (req,res)=>res.json({ ok:true, server:req.purchase }));
   router.post('/servers', async (req,res,next)=>{ try{
-    const client=req.apiClient; const body=req.body||{}; const dcKey=String(body.datacenter||'hetzner').trim().toLowerCase(); const dc=datacenters[dcKey]; if(!dc || !isHetznerDc(dc)) return apiError(res,503,'HETZNER_UNAVAILABLE','دیتاسنتر هتزنر فعال نیست.');
+    const client=req.apiClient; const body={...(req.query||{}), ...((req.body && typeof req.body==='object' && !Array.isArray(req.body)) ? req.body : {})}; console.log('[CUSTOMER_API_CREATE_BODY]', JSON.stringify({contentType:req.headers['content-type'], rawBodyType:typeof req.body, rawBodyKeys:Object.keys((req.body&&typeof req.body==='object')?req.body:{}), query:req.query, body})); const dcKey=String(body.datacenter||'hetzner').trim().toLowerCase(); const dc=datacenters[dcKey]; if(!dc || !isHetznerDc(dc)) return apiError(res,503,'HETZNER_UNAVAILABLE','دیتاسنتر هتزنر فعال نیست.');
     const duration=['hourly','monthly'].includes(body.duration)?body.duration:'hourly';
-    const plans=await getHetznerSellablePlans(dc); const plan=plans.find(p=>p.id===String(body.server_type||'').toLowerCase() || p.hetzner_type===String(body.server_type||'').toLowerCase());
-    if(!plan || plan.available===false) return apiError(res,400,'INVALID_PLAN','پلن انتخاب‌شده معتبر نیست.');
+    const planCatalogDc = datacenters.hetzner || dc; const plans=await getHetznerSellablePlans(planCatalogDc); const requestedPlan=String(body.server_type||'').trim().toLowerCase(); const planMap=new Map(); for(const pl of plans){ for(const key of [pl.id,pl.hetzner_type,pl.server_type]){ const k=String(key||'').trim().toLowerCase(); if(k && !planMap.has(k)) planMap.set(k,pl); } } const plan=planMap.get(requestedPlan); console.log('[CUSTOMER_API_PLAN_LOOKUP]', JSON.stringify({ requestedPlan, hasPlan:!!plan, planId:plan?.id, hetznerType:plan?.hetzner_type, available:plan?.available, catalogCount:plans.length, hasCx23:planMap.has('cx23'), hasCx33:planMap.has('cx33'), sample:plans.slice(0,30).map(p=>({id:p.id,hetzner_type:p.hetzner_type,server_type:p.server_type,available:p.available})) }));
+    if(!plan || plan.available===false) return apiError(res,400,'INVALID_PLAN',`پلن انتخاب‌شده معتبر نیست. requested=${requestedPlan} found=${!!plan} available=${plan?.available} پلن‌های موجود: ${plans.slice(0,30).map(p=>p.id).join(', ')}`);
     const image=String(body.image||'ubuntu-24.04').trim(); const location=String(body.location||dc.HETZNER_LOCATION||'nbg1').trim().toLowerCase();
     if(!isAllowed(client.allowed_datacenters,dcKey)||!isAllowed(client.allowed_plans,plan.id)||!isAllowed(client.allowed_images,image)||!isAllowed(client.allowed_locations,location)) return apiError(res,403,'NOT_ALLOWED','این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
     const wallet=Number(await db.getUserWallet(client.telegram_id)||0); if(wallet < Number(client.min_wallet_balance||0)) return apiError(res,402,'INSUFFICIENT_WALLET','موجودی کیف پول کافی نیست.');

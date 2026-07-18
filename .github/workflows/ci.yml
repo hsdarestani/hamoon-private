@@ -1,0 +1,99 @@
+name: Hamoon CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify on Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Quiet checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git checkout --quiet FETCH_HEAD
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Remove accidentally tracked dependencies
+        run: rm -rf node_modules
+
+      - name: Install locked dependencies
+        run: npm ci --loglevel=error
+
+      - name: Run repository validations
+        shell: bash
+        run: |
+          set +e
+          npm test > /tmp/hamoon-test.log 2>&1
+          STATUS=$?
+          if [ "$STATUS" -ne 0 ]; then
+            echo '===== validation failures ====='
+            grep -E 'FAIL|Validation failed|AssertionError|Error:' /tmp/hamoon-test.log || true
+            echo '===== validation log tail ====='
+            tail -80 /tmp/hamoon-test.log
+            exit "$STATUS"
+          fi
+          tail -60 /tmp/hamoon-test.log
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+
+    steps:
+      - name: Quiet checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git checkout --quiet FETCH_HEAD
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - name: Remove accidentally tracked dependencies
+        run: rm -rf node_modules
+
+      - name: Install locked dependencies
+        run: npm ci --loglevel=error
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high

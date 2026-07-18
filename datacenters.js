@@ -177,37 +177,38 @@ afracloud: {
 
 
   tebyan: {
+    enabled: false, // temporarily disabled: auth endpoint timeout
     key: 'tebyan',
     name: 'تبیان',
-    OS_AUTH_URL: 'http://94.232.171.61:5000',
-    OS_PROJECT_ID: '0098ed7d85d04a298a79cc9a1ae30947',
-    OS_USER_DOMAIN_NAME: 'Default',
-    OS_PROJECT_DOMAIN_ID: 'default',
-    OS_USERNAME: 'hb_client_3199_3',
-    OS_PASSWORD: 'ivbrLrp1',
-    OS_NETWORK_ID:'6a7c5354-d64d-41f7-aa90-7f76bd788087',
-    OS_TEST_FLAVOR_ID: 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
-    OS_TEST_IMAGE_ID: 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
-    TRAFFIC_API_BASE_URL: 'https://netbill.tebyansmart.com/traffic/',
-    TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || '107Y1f1W5bNHvV7nNUtN7RN3Q27n9bJdXYDRp6wvzGn52FIeByRn7oWZVKvE6TEN',
+    OS_AUTH_URL: process.env.TEBYAN_OS_AUTH_URL || 'http://94.232.171.61:5000',
+    OS_PROJECT_ID: process.env.TEBYAN_OS_PROJECT_ID,
+    OS_USER_DOMAIN_NAME: process.env.TEBYAN_OS_USER_DOMAIN_NAME || 'Default',
+    OS_PROJECT_DOMAIN_ID: process.env.TEBYAN_OS_PROJECT_DOMAIN_ID || 'default',
+    OS_USERNAME: process.env.TEBYAN_OS_USERNAME,
+    OS_PASSWORD: process.env.TEBYAN_OS_PASSWORD,
+    OS_NETWORK_ID: process.env.TEBYAN_OS_NETWORK_ID,
+    OS_TEST_FLAVOR_ID: process.env.TEBYAN_OS_TEST_FLAVOR_ID || 'b9885607-6b52-401f-856d-c5e743336435', // 2-2-40
+    OS_TEST_IMAGE_ID: process.env.TEBYAN_OS_TEST_IMAGE_ID || 'f24e6327-450b-4339-b79a-1abb08083c95', // Ubuntu 24
+    TRAFFIC_API_BASE_URL: process.env.TEBYAN_TRAFFIC_API_BASE_URL || 'https://netbill.tebyansmart.com/traffic/',
+    TRAFFIC_API_KEY: process.env.TEBYAN_TRAFFIC_API_KEY || null,
     TEBYAN_DEFAULT_BOOT_METHOD: process.env.TEBYAN_DEFAULT_BOOT_METHOD || 'image',
     TEBYAN_ENABLE_BOOT_FROM_VOLUME: process.env.TEBYAN_ENABLE_BOOT_FROM_VOLUME === 'true',
     TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN: process.env.TEBYAN_ENABLE_ROOT_PASSWORD_LOGIN !== 'false',
     TEBYAN_PURCHASE_HEALTH_GATE: process.env.TEBYAN_PURCHASE_HEALTH_GATE !== 'false',
     BILL_TRAFFIC: true,
     capabilities: {
-      bootFromVolume: false, resetPassword: false, traffic: true, projectTraffic: true,
+      bootFromVolume: false, resetPassword: true, traffic: true, projectTraffic: true,
       rootPasswordLogin: true, passwordLogin: true, sshUser: 'root', createKeyPair: true, deleteKeyPair: true,
       createServer: true, deleteServer: true, suspendServer: true, resumeServer: true, rebuild: false
     },
     flavors: [
-        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 340000 },
-        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 600000 },
-        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "2162d6cc-305c-415f-b4b7-7bd0bc5575f0", monthly_price: 770625 },
-        { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "72955761-999f-4bb3-bf58-f24e73fe4b47", monthly_price: 1120000 },
-        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "16f7cfbb-4502-41bc-985f-6f12386f2dd3", monthly_price: 1640000 },
-        { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "5b444500-5a08-4a9b-808d-bd913014d0da", monthly_price: 1461250 },
-        { name: "Thunder  Advanced- 16 Cores - 64 GB RAM - 750 GB SSD", id: "a44c6d5d-9b69-483d-9ac6-906add8b0228", monthly_price: 9230375 },
+        { name: "Cloud basic - 1 Core - 1 GB RAM - 20 GB SSD", id: "5fbbf7e9-7326-41b1-81db-fdca847a83e1", monthly_price: 540000 },
+        { name: "Cloud Medium - 2 Cores - 2 GB RAM - 40 GB SSD", id: "b9885607-6b52-401f-856d-c5e743336435", monthly_price: 960000 },
+        { name: "Cloud advance - 2 Cores - 4 GB RAM - 50 GB SSD", id: "2162d6cc-305c-415f-b4b7-7bd0bc5575f0", monthly_price: 1232000 },
+        { name: "Thunder basic- 4 Cores - 4 GB RAM - 80 GB SSD", id: "72955761-999f-4bb3-bf58-f24e73fe4b47", monthly_price: 1780000 },
+        { name: "Thunder Pro - 6 Cores - 6 GB RAM - 120 GB SSD", id: "16f7cfbb-4502-41bc-985f-6f12386f2dd3", monthly_price: 2625000 },
+        { name: "Thunder  Medium- 4 Cores - 8 GB RAM - 100 GB SSD", id: "5b444500-5a08-4a9b-808d-bd913014d0da", monthly_price: 2340000 },
+        { name: "Thunder  Advanced- 16 Cores - 64 GB RAM - 750 GB SSD", id: "a44c6d5d-9b69-483d-9ac6-906add8b0228", monthly_price: 14800000 },
     ],
     images: [
         { name: "Debian-12", id: "a10db8cb-5831-4a96-b826-2f21886ed694" },

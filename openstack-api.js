@@ -1,3 +1,19 @@
+
+function normalizeNovaMetadataValues(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const meta = obj?.server?.metadata || obj?.metadata;
+  if (!meta || typeof meta !== 'object') return obj;
+
+  for (const [k, v] of Object.entries(meta)) {
+    if (v === undefined || v === null) {
+      delete meta[k];
+    } else if (typeof v !== 'string') {
+      meta[k] = String(v);
+    }
+  }
+  return obj;
+}
+
 // openstack-api.js - Centralized OpenStack API functions for multiple datacenters
 
 const axios = require('axios');
@@ -106,7 +122,7 @@ async function createSnapshot(config, tok, serverId, snapshotName, ownerUserId) 
   };
 
   try {
-    const res = await axios.post(url, body, {
+    const res = await axios.post(url, normalizeNovaMetadataValues(body), {
       headers: { 'X-Auth-Token': tok, 'Content-Type': 'application/json' }
     });
 
