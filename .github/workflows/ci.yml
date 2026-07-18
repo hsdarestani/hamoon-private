@@ -15,58 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lockfile-repair:
-    name: Repair lockfile once
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'chore/ci-and-repository-hardening' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout pull request head
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          git init -q .
-          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$HEAD_SHA"
-          git checkout --quiet -B "$HEAD_REF" FETCH_HEAD
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-          cache: npm
-
-      - name: Regenerate and commit lockfile when needed
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          rm -rf node_modules
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund --loglevel=error
-          if git diff --quiet -- package-lock.json; then
-            echo 'package-lock.json is already synchronized.'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add package-lock.json
-          git commit -m 'chore: synchronize npm lockfile'
-          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -c http.extraheader="AUTHORIZATION: basic $AUTH" push --quiet origin "HEAD:$HEAD_REF"
-
   verify:
     name: Verify on Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
@@ -99,14 +47,7 @@ jobs:
         run: rm -rf node_modules
 
       - name: Install locked dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          npm ci --loglevel=error 2>&1 | tee /tmp/npm-ci.log || {
-            echo '===== npm ci failure ====='
-            tail -120 /tmp/npm-ci.log
-            exit 1
-          }
+        run: npm ci --loglevel=error
 
       - name: Run repository validations
         run: npm test
@@ -140,14 +81,7 @@ jobs:
         run: rm -rf node_modules
 
       - name: Install locked dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          npm ci --loglevel=error 2>&1 | tee /tmp/npm-ci.log || {
-            echo '===== npm ci failure ====='
-            tail -120 /tmp/npm-ci.log
-            exit 1
-          }
+        run: npm ci --loglevel=error
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
