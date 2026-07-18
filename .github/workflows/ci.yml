@@ -50,7 +50,19 @@ jobs:
         run: npm ci --loglevel=error
 
       - name: Run repository validations
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test > /tmp/hamoon-test.log 2>&1
+          STATUS=$?
+          if [ "$STATUS" -ne 0 ]; then
+            echo '===== validation failures ====='
+            grep -E 'FAIL|Validation failed|AssertionError|Error:' /tmp/hamoon-test.log || true
+            echo '===== validation log tail ====='
+            tail -80 /tmp/hamoon-test.log
+            exit "$STATUS"
+          fi
+          tail -60 /tmp/hamoon-test.log
 
   dependency-audit:
     name: Dependency audit
