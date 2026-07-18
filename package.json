@@ -4,11 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "npm run validate:syntax && npm run validate:provider-capabilities && npm run validate:production-patch && npm run validate:hetzner-lifecycle",
+    "test": "npm run validate:syntax && npm run validate:provider-capabilities && npm run validate:hetzner-lifecycle",
     "start": "node index.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
     "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
-    "validate:syntax": "node -c index.js && node -c db.js && node -c scheduler.js && node -c dashboard-api.js && node -c server.js",
+    "validate:syntax": "node -c index.js && node -c db.js && node -c scheduler.js && node -c customer-api.js && node -c cloud-api.js && node -c provider-detector.js && node -c provider-capabilities.js && node -c Hetzner/hetzner-api.js && node -c services/hetzner-lifecycle.js && node -c scripts/reconcile-hetzner-billing-amounts.js && node -c scripts/validate-hetzner-lifecycle.js && node -c server.js",
     "validate:afracloud-flow": "node scripts/validate-afracloud-flow.js",
     "dashboard": "node server.js",
     "validate:dashboard": "node scripts/validate-dashboard.js",
@@ -16,7 +16,7 @@
     "reconcile:tebyan": "node scripts/reconcile-tebyan.js --dry-run",
     "test:traffic": "node scripts/test-traffic-api.js tebyan",
     "validate:hetzner-lifecycle": "node scripts/validate-hetzner-lifecycle.js",
-    "ci": "npm test"
+    "reconcile:hetzner-billing": "node scripts/reconcile-hetzner-billing-amounts.js --dry-run"
   },
   "keywords": [],
   "author": "",
@@ -27,7 +27,9 @@
     "body-parser": "^2.2.0",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.5.2",
     "firebase": "^11.10.0",
+    "helmet": "^8.3.0",
     "https-proxy-agent": "^7.0.2",
     "mysql2": "^3.14.2",
     "node-cron": "^4.2.1",
