@@ -25,10 +25,17 @@ jobs:
         node-version: [18.x, 20.x]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          show-progress: false
+      - name: Quiet checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git checkout --quiet FETCH_HEAD
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -59,10 +66,17 @@ jobs:
     continue-on-error: true
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          show-progress: false
+      - name: Quiet checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH" fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git checkout --quiet FETCH_HEAD
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
