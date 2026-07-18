@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run validate:syntax && npm run validate:provider-capabilities && npm run validate:production-patch && npm run validate:hetzner-lifecycle",
     "start": "node index.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
     "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
@@ -14,7 +14,9 @@
     "validate:dashboard": "node scripts/validate-dashboard.js",
     "validate:production-patch": "node scripts/validate-production-patch.js",
     "reconcile:tebyan": "node scripts/reconcile-tebyan.js --dry-run",
-    "test:traffic": "node scripts/test-traffic-api.js tebyan"
+    "test:traffic": "node scripts/test-traffic-api.js tebyan",
+    "validate:hetzner-lifecycle": "node scripts/validate-hetzner-lifecycle.js",
+    "ci": "npm test"
   },
   "keywords": [],
   "author": "",

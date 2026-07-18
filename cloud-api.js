@@ -2,16 +2,22 @@
 const openstack = require('./openstack-api');
 const hetzner   = require('./Hetzner/hetzner-api');
 const afracloud = require('./Afracloud/afracloud-api');
+const { providerName, isHetznerConfig, isAfraCloudConfig, isOpenStackConfig } = require('./provider-detector');
 
-function pick(dcConfig) {
-  if (dcConfig.provider === 'hetzner') return hetzner;
-  if (dcConfig.provider === 'afracloud') return afracloud;
+function pick(dcConfig = {}) {
+  const provider = providerName(dcConfig);
+  if (provider === 'hetzner') return hetzner;
+  if (provider === 'afracloud') return afracloud;
   return openstack;
 }
 
 const safeNoopCreateKeyPair = async (_dc, _tok, _name, _publicKey) => ({ id: null, name: _name || null });
 
 module.exports = {
+  pick,
+  isHetznerConfig,
+  isAfraCloudConfig,
+  isOpenStackConfig,
   getToken:              (dc, ...a) => pick(dc).getToken(dc, ...a),
   listFlavors:           (dc, ...a) => pick(dc).listFlavors(dc, ...a),
   listImages:            (dc, ...a) => pick(dc).listImages(dc, ...a),
@@ -23,6 +29,7 @@ module.exports = {
   resetServerPassword:   (dc, ...a) => pick(dc).resetServerPassword ? pick(dc).resetServerPassword(dc, ...a) : Promise.reject(new Error('reset password not supported')),
   suspendServer:         (dc, ...a) => pick(dc).suspendServer ? pick(dc).suspendServer(dc, ...a) : Promise.reject(new Error('suspend not supported')),
   resumeServer:          (dc, ...a) => pick(dc).resumeServer ? pick(dc).resumeServer(dc, ...a) : Promise.reject(new Error('resume not supported')),
+  startServer:           (dc, ...a) => pick(dc).startServer ? pick(dc).startServer(dc, ...a) : (pick(dc).resumeServer ? pick(dc).resumeServer(dc, ...a) : Promise.reject(new Error('start/resume not supported'))),
   createSnapshot: (dc, ...a) => pick(dc).createSnapshot ? pick(dc).createSnapshot(dc, ...a) : Promise.reject(new Error('snapshot not supported')),
   listSnapshots: (dc, ...a) => pick(dc).listSnapshots ? pick(dc).listSnapshots(dc, ...a) : Promise.reject(new Error('listSnapshots not supported')),
 

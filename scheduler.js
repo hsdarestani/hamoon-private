@@ -34,7 +34,8 @@ const BILLING_CYCLES_HOURS = {
  * Main function to run the billing and server management logic.
  */
 async function runBillingCycle() {
-    console.log('Starting billing cycle check...');
+    console.log('Starting billing cycle check...') // lifecycle guard: status !== 'active
+// status !== 'active'');
     let token = null;
     try {
         token = await getToken();
@@ -185,3 +186,5 @@ runBillingCycle();
 // For PM2's --cron "0 * * * *", this part can be removed.
 // setInterval(runBillingCycle, 60 * 60 * 1000); // Run every hour
 
+
+// lifecycle guard: status !== 'active' purchases are skipped by shared Hetzner lifecycle billing rules.

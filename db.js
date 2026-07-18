@@ -96,6 +96,18 @@ async function initializeDatabase() {
             )
         `);
 
+        
+        for (const [column, ddl] of [
+            ['deleted_at', 'DATETIME NULL'],
+            ['delivered_at', 'DATETIME NULL'],
+            ['provider_action_id', 'VARCHAR(255) NULL'],
+            ['public_ip', 'VARCHAR(64) NULL'],
+            ['lifecycle_error_code', 'VARCHAR(64) NULL'],
+            ['lifecycle_updated_at', 'DATETIME NULL'],
+        ]) {
+            await ensureColumn(connection, 'purchases', column, ddl);
+        }
+
         await connection.execute('ALTER TABLE purchases MODIFY amount DECIMAL(14, 6) NOT NULL').catch(err => {
             console.warn('Could not widen purchases.amount:', err.message);
         });
@@ -1280,7 +1292,41 @@ async function getApiClientUsageSummary(clientId) { return { active_servers: awa
 async function listApiClientLogs(clientId, limit=100) { const [rows]=await pool.execute(`SELECT * FROM api_request_logs WHERE client_id=? ORDER BY created_at DESC LIMIT ${Math.min(Number(limit)||100,500)}`, [clientId]); return rows; }
 
 
+
+
+async function getPurchaseForOwner(telegramId, serverId, datacenter) {
+  const conn = await pool.getConnection();
+  try { const [rows] = await conn.execute('SELECT * FROM purchases WHERE telegram_id = ? AND server_id = ? AND datacenter = ? LIMIT 1', [String(telegramId), String(serverId), String(datacenter)]); return rows[0] || null; } finally { conn.release(); }
+}
+async function markDeletionPending(telegramId, serverId, datacenter) {
+  const conn = await pool.getConnection();
+  try { await conn.execute("UPDATE purchases SET status = 'deletion_pending', auto_renew = 0, auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()), lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?", [String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+}
+async function markDeleted(telegramId, serverId, datacenter) {
+  const conn = await pool.getConnection();
+  try { await conn.execute("UPDATE purchases SET status = 'deleted', deleted_at = COALESCE(deleted_at, NOW()), lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?", [String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+}
+async function restorePurchaseStatus(telegramId, serverId, datacenter, status) {
+  const conn = await pool.getConnection();
+  try { await conn.execute('UPDATE purchases SET status = ?, lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?', [status, String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+}
+async function updateScopedStatus(telegramId, serverId, datacenter, status) { return restorePurchaseStatus(telegramId, serverId, datacenter, status); }
+async function listDeletionPending() {
+  const conn = await pool.getConnection();
+  try { const [rows] = await conn.execute("SELECT * FROM purchases WHERE status = 'deletion_pending'"); return rows; } finally { conn.release(); }
+}
+async function updatePublicIp(telegramId, serverId, datacenter, publicIp) {
+  const conn = await pool.getConnection();
+  try { await conn.execute('UPDATE purchases SET public_ip = ?, lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?', [publicIp, String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+}
 module.exports = {
+    getPurchaseForOwner,
+    markDeletionPending,
+    markDeleted,
+    restorePurchaseStatus,
+    updateScopedStatus,
+    listDeletionPending,
+    updatePublicIp,
     pool,
     pingDatabase,
     ensureAdminAuditLogsTable,

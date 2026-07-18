@@ -227,6 +227,7 @@ function getUserEffectiveDCs(userId) {
 
 const prices = require('./prices');
 const { formatBillingAmountLabel, formatBillingCycleFa } = require('./billing-utils');
+const hetznerLifecycle = require('./services/hetzner-lifecycle');
 function mdCodeBlock(s = '') {
   return String(s)
     .replace(/&/g, '&amp;')
@@ -1905,6 +1906,26 @@ bot.onText(/\/debit (\d+) (\d+) (.+)/, async (msg, match) => {
   await sendMessage(parseInt(userId), `⚠️ مبلغ ${amount} تومان بابت "${reason}" از کیف پول شما کسر شد. موجودی جدید: ${newBalance} تومان`);
 });
 
+
+async function handleRebuildAsk(chatId, userId, serverId, dcConfig, messageId) {
+  const images = await openstackApi.listImages(dcConfig, null);
+  const serverType = state[userId]?.selectedFlavor?.id || '';
+  const compatible = hetznerLifecycle.filterCompatibleImages(images, serverType);
+  state[userId] = { ...(state[userId] || {}), rebuildInfo: { serverId, dcConfig } };
+  const keyboard = compatible.slice(0, 20).map(img => [{ text: img.label || img.name || String(img.id), callback_data: `rebuild:IMG:${img.id}` }]);
+  return bot.sendMessage(chatId, '⚠️ بازسازی سیستم‌عامل دیسک فعلی را پاک می‌کند. ایمیج سازگار را انتخاب کنید:', { reply_markup: { inline_keyboard: keyboard } });
+}
+async function handleRebuildConfirm(chatId, userId, serverId, imageId, dcConfig) {
+  try {
+    const result = await hetznerLifecycle.rebuildServerLifecycle({ db: require('./db'), dc: dcConfig, telegramId: userId, serverId, datacenter: dcConfig.key || dcConfig.__baseKey || 'hetzner', imageId });
+    const passNote = result.root_password ? '\nرمز جدید فقط در همین پیام نمایش داده شد.' : '';
+    await bot.sendMessage(chatId, `✅ بازسازی تکمیل شد و SSH در دسترس است.${passNote}`);
+  } catch (e) {
+    console.warn('[HETZNER_REBUILD_FAILED]', { server_id: serverId, code: e.code || e.message });
+    await bot.sendMessage(chatId, hetznerLifecycle.safeProviderMessage(e));
+  }
+}
+
 bot.onText(/\/run_billing/, async (msg) => {
     if (String(msg.from.id) !== String(SUPPORT_ID)) return;
     sendMessage(msg.chat.id, '⚙️ فرآیند صورتحساب به صورت دستی آغاز شد.');
@@ -2466,7 +2487,7 @@ async function handleStartMySuspendedServers(chatId, userId) {
           token = await openstackApi.getToken(dcConfig);
         }
 
-        await openstackApi.startServer(dcConfig, token, purchase.server_id);
+        await openstackApi.resumeServer(dcConfig, token, purchase.server_id);
 
         await updatePurchaseStatus(purchase.server_id, 'active').catch(err => {
           console.error('[START_MY_SERVERS] updatePurchaseStatus failed:', purchase.server_id, err.message);
@@ -3331,7 +3352,7 @@ async function runHourlyBilling() {
 
   // 💳 حلقه‌ی صورتحساب سرورها
   for (const purchase of allPurchases) {
-    if (purchase.status === 'deleted') continue;
+    if (!hetznerLifecycle.isBillablePurchase(purchase)) continue;
 
     const dcsForUser = getUserEffectiveDCs(String(purchase.telegram_id));
     const dcConfig = dcsForUser?.[purchase.datacenter];
