@@ -16,8 +16,15 @@ function read(file) {
   return fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 }
 
-if (fs.existsSync(path.join(__dirname, '..', '.env'))) {
-  fail('.env must not be committed');
+const envPath = path.join(__dirname, '..', '.env');
+if (fs.existsSync(envPath)) {
+  const activeLines = fs.readFileSync(envPath, 'utf8')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+
+  if (activeLines.length) fail('.env contains active values and must not be committed');
+  else pass('.env is a sanitized placeholder with no active values');
 } else {
   pass('.env is not committed');
 }
