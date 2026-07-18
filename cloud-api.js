@@ -1,53 +1,193 @@
-// cloud-api.js
+'use strict';
+
+function normalizeNovaMetadataValues(object) {
+  if (!object || typeof object !== 'object') return object;
+
+  const metadata =
+    object?.server?.metadata ||
+    object?.metadata;
+
+  if (!metadata || typeof metadata !== 'object') {
+    return object;
+  }
+
+  for (const [key, value] of Object.entries(metadata)) {
+    if (value === undefined || value === null) {
+      delete metadata[key];
+    } else if (typeof value !== 'string') {
+      metadata[key] = String(value);
+    }
+  }
+
+  return object;
+}
+
 const openstack = require('./openstack-api');
-const hetzner   = require('./Hetzner/hetzner-api');
+const hetzner = require('./Hetzner/hetzner-api');
 const afracloud = require('./Afracloud/afracloud-api');
-const { providerName, isHetznerConfig, isAfraCloudConfig, isOpenStackConfig } = require('./provider-detector');
+const {
+  providerName,
+  isHetznerConfig,
+  isAfraCloudConfig,
+  isOpenStackConfig
+} = require('./provider-detector');
 
 function pick(dcConfig = {}) {
   const provider = providerName(dcConfig);
+
   if (provider === 'hetzner') return hetzner;
   if (provider === 'afracloud') return afracloud;
   return openstack;
 }
 
-const safeNoopCreateKeyPair = async (_dc, _tok, _name, _publicKey) => ({ id: null, name: _name || null });
+function unsupported(message) {
+  return Promise.reject(new Error(message));
+}
+
+const safeNoopCreateKeyPair = async (
+  _dc,
+  _token,
+  name
+) => ({
+  id: null,
+  name: name || null
+});
 
 module.exports = {
   pick,
+  providerName,
   isHetznerConfig,
   isAfraCloudConfig,
   isOpenStackConfig,
-  getToken:              (dc, ...a) => pick(dc).getToken(dc, ...a),
-  listFlavors:           (dc, ...a) => pick(dc).listFlavors(dc, ...a),
-  listImages:            (dc, ...a) => pick(dc).listImages(dc, ...a),
-  createServer:          (dc, ...a) => pick(dc).createServer(dc, ...a),
-  getServer:             (dc, ...a) => pick(dc).getServer(dc, ...a),
-  listServers:           (dc, ...a) => pick(dc).listServers(dc, ...a),
-  deleteServer:          (dc, ...a) => pick(dc).deleteServer(dc, ...a),
-  rebuildServer:         (dc, ...a) => pick(dc).rebuildServer ? pick(dc).rebuildServer(dc, ...a) : Promise.reject(new Error('rebuild not supported')),
-  resetServerPassword:   (dc, ...a) => pick(dc).resetServerPassword ? pick(dc).resetServerPassword(dc, ...a) : Promise.reject(new Error('reset password not supported')),
-  suspendServer:         (dc, ...a) => pick(dc).suspendServer ? pick(dc).suspendServer(dc, ...a) : Promise.reject(new Error('suspend not supported')),
-  resumeServer:          (dc, ...a) => pick(dc).resumeServer ? pick(dc).resumeServer(dc, ...a) : Promise.reject(new Error('resume not supported')),
-  startServer:           (dc, ...a) => pick(dc).startServer ? pick(dc).startServer(dc, ...a) : (pick(dc).resumeServer ? pick(dc).resumeServer(dc, ...a) : Promise.reject(new Error('start/resume not supported'))),
-  createSnapshot: (dc, ...a) => pick(dc).createSnapshot ? pick(dc).createSnapshot(dc, ...a) : Promise.reject(new Error('snapshot not supported')),
-  listSnapshots: (dc, ...a) => pick(dc).listSnapshots ? pick(dc).listSnapshots(dc, ...a) : Promise.reject(new Error('listSnapshots not supported')),
+  normalizeNovaMetadataValues,
 
-createServerFromSnapshot: (dc, ...a) =>
-  pick(dc).createServerFromSnapshot
-    ? pick(dc).createServerFromSnapshot(dc, ...a)
-    : Promise.reject(new Error('createServerFromSnapshot not supported')),
+  getToken: (dc, ...args) =>
+    pick(dc).getToken(dc, ...args),
 
-  // 👇 این خط مشکل شما را حل می‌کند:
-  createKeyPair:         (dc, ...a) => (pick(dc).createKeyPair ? pick(dc).createKeyPair(dc, ...a) : safeNoopCreateKeyPair(dc, ...a)),
-  deleteKeyPair:         (dc, ...a) => pick(dc).deleteKeyPair ? pick(dc).deleteKeyPair(dc, ...a) : Promise.reject(new Error('deleteKeyPair not supported')),
-  getServerDetails:      (dc, ...a) => pick(dc).getServerDetails ? pick(dc).getServerDetails(dc, ...a) : Promise.reject(new Error('getServerDetails not supported')),
-  ensureSshSecurityGroup:(dc, ...a) => pick(dc).ensureSshSecurityGroup ? pick(dc).ensureSshSecurityGroup(dc, ...a) : Promise.resolve('default'),
-  listHetznerServerTypes: (dc, ...a) => pick(dc).listHetznerServerTypes ? pick(dc).listHetznerServerTypes(dc, ...a) : Promise.reject(new Error('Hetzner server types not supported')),
-  changeHetznerServerType: (dc, ...a) => pick(dc).changeHetznerServerType ? pick(dc).changeHetznerServerType(dc, ...a) : Promise.reject(new Error('Hetzner change_type not supported')),
-  waitHetznerAction: (dc, ...a) => pick(dc).waitHetznerAction ? pick(dc).waitHetznerAction(dc, ...a) : Promise.reject(new Error('Hetzner actions not supported')),
-  powerOffHetznerServer: (dc, ...a) => pick(dc).powerOffHetznerServer ? pick(dc).powerOffHetznerServer(dc, ...a) : Promise.reject(new Error('Hetzner poweroff not supported')),
-  powerOnHetznerServer: (dc, ...a) => pick(dc).powerOnHetznerServer ? pick(dc).powerOnHetznerServer(dc, ...a) : Promise.reject(new Error('Hetzner poweron not supported')),
+  listFlavors: (dc, ...args) =>
+    pick(dc).listFlavors(dc, ...args),
 
+  listImages: (dc, ...args) =>
+    pick(dc).listImages(dc, ...args),
+
+  createServer: (dc, ...args) =>
+    pick(dc).createServer(dc, ...args),
+
+  getServer: (dc, ...args) =>
+    pick(dc).getServer(dc, ...args),
+
+  listServers: (dc, ...args) =>
+    pick(dc).listServers(dc, ...args),
+
+  deleteServer: (dc, ...args) =>
+    pick(dc).deleteServer(dc, ...args),
+
+  rebuildServer: (dc, ...args) =>
+    pick(dc).rebuildServer
+      ? pick(dc).rebuildServer(dc, ...args)
+      : unsupported('rebuild not supported'),
+
+  resetServerPassword: (dc, ...args) =>
+    pick(dc).resetServerPassword
+      ? pick(dc).resetServerPassword(dc, ...args)
+      : unsupported('reset password not supported'),
+
+  suspendServer: (dc, ...args) =>
+    pick(dc).suspendServer
+      ? pick(dc).suspendServer(dc, ...args)
+      : unsupported('suspend not supported'),
+
+  resumeServer: (dc, ...args) =>
+    pick(dc).resumeServer
+      ? pick(dc).resumeServer(dc, ...args)
+      : unsupported('resume not supported'),
+
+  startServer: (dc, ...args) =>
+    pick(dc).startServer
+      ? pick(dc).startServer(dc, ...args)
+      : (
+          pick(dc).resumeServer
+            ? pick(dc).resumeServer(dc, ...args)
+            : unsupported('start/resume not supported')
+        ),
+
+  createSnapshot: (dc, ...args) =>
+    pick(dc).createSnapshot
+      ? pick(dc).createSnapshot(dc, ...args)
+      : unsupported('snapshot not supported'),
+
+  listSnapshots: (dc, ...args) =>
+    pick(dc).listSnapshots
+      ? pick(dc).listSnapshots(dc, ...args)
+      : unsupported('listSnapshots not supported'),
+
+  createServerFromSnapshot: (dc, ...args) =>
+    pick(dc).createServerFromSnapshot
+      ? pick(dc).createServerFromSnapshot(dc, ...args)
+      : unsupported('createServerFromSnapshot not supported'),
+
+  createKeyPair: (dc, ...args) =>
+    pick(dc).createKeyPair
+      ? pick(dc).createKeyPair(dc, ...args)
+      : safeNoopCreateKeyPair(dc, ...args),
+
+  deleteKeyPair: (dc, ...args) =>
+    pick(dc).deleteKeyPair
+      ? pick(dc).deleteKeyPair(dc, ...args)
+      : unsupported('deleteKeyPair not supported'),
+
+  getServerDetails: (dc, ...args) =>
+    pick(dc).getServerDetails
+      ? pick(dc).getServerDetails(dc, ...args)
+      : unsupported('getServerDetails not supported'),
+
+  ensureSshSecurityGroup: (dc, ...args) =>
+    pick(dc).ensureSshSecurityGroup
+      ? pick(dc).ensureSshSecurityGroup(dc, ...args)
+      : Promise.resolve('default'),
+
+  listHetznerServerTypes: (dc, ...args) =>
+    pick(dc).listHetznerServerTypes
+      ? pick(dc).listHetznerServerTypes(dc, ...args)
+      : unsupported('Hetzner server types not supported'),
+
+  changeHetznerServerType: (dc, ...args) =>
+    pick(dc).changeHetznerServerType
+      ? pick(dc).changeHetznerServerType(dc, ...args)
+      : unsupported('Hetzner change_type not supported'),
+
+  waitHetznerAction: (dc, ...args) =>
+    pick(dc).waitHetznerAction
+      ? pick(dc).waitHetznerAction(dc, ...args)
+      : unsupported('Hetzner actions not supported'),
+
+  powerOffHetznerServer: (dc, ...args) =>
+    pick(dc).powerOffHetznerServer
+      ? pick(dc).powerOffHetznerServer(dc, ...args)
+      : unsupported('Hetzner poweroff not supported'),
+
+  powerOnHetznerServer: (dc, ...args) =>
+    pick(dc).powerOnHetznerServer
+      ? pick(dc).powerOnHetznerServer(dc, ...args)
+      : unsupported('Hetzner poweron not supported'),
+
+  createPrimaryIpv4: (dc, ...args) =>
+    pick(dc).createPrimaryIpv4
+      ? pick(dc).createPrimaryIpv4(dc, ...args)
+      : unsupported('Primary IPv4 creation not supported'),
+
+  assignPrimaryIp: (dc, ...args) =>
+    pick(dc).assignPrimaryIp
+      ? pick(dc).assignPrimaryIp(dc, ...args)
+      : unsupported('Primary IP assignment not supported'),
+
+  unassignPrimaryIp: (dc, ...args) =>
+    pick(dc).unassignPrimaryIp
+      ? pick(dc).unassignPrimaryIp(dc, ...args)
+      : unsupported('Primary IP unassignment not supported'),
+
+  deletePrimaryIp: (dc, ...args) =>
+    pick(dc).deletePrimaryIp
+      ? pick(dc).deletePrimaryIp(dc, ...args)
+      : unsupported('Primary IP deletion not supported')
 };
-
