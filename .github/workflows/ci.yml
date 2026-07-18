@@ -36,8 +36,18 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
+      - name: Remove accidentally tracked dependencies
+        run: rm -rf node_modules
+
       - name: Install locked dependencies
-        run: npm ci --loglevel=error
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --loglevel=error 2>&1 | tee /tmp/npm-ci.log || {
+            echo '===== npm ci failure ====='
+            tail -120 /tmp/npm-ci.log
+            exit 1
+          }
 
       - name: Run repository validations
         run: npm test
@@ -60,8 +70,18 @@ jobs:
           node-version: 20.x
           cache: npm
 
+      - name: Remove accidentally tracked dependencies
+        run: rm -rf node_modules
+
       - name: Install locked dependencies
-        run: npm ci --loglevel=error
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci --loglevel=error 2>&1 | tee /tmp/npm-ci.log || {
+            echo '===== npm ci failure ====='
+            tail -120 /tmp/npm-ci.log
+            exit 1
+          }
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
