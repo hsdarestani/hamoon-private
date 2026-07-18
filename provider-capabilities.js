@@ -14,6 +14,7 @@ const DEFAULT_CAPABILITIES = {
   listSnapshots: true,
   buildFromSnapshot: true,
   changeCycle: true,
+  changeIp: false,
   createKeyPair: true,
   deleteKeyPair: true
 };
@@ -38,7 +39,7 @@ const PROVIDER_CAPABILITIES = {
     createKeyPair: false,
     deleteKeyPair: false
   },
-  hetzner: {},
+  hetzner: { changeIp: true },
   openstack: {}
 };
 
