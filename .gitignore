@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data and logs
+*.log
+logs/
+server_events.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Process managers
+.pm2/
+
+# Local databases and generated data
+*.sqlite
+*.sqlite3
+*.db
+
+# Backups created during production patches
+*.bak
+*.backup
+*.before_*
+*.before-*
+*~
+
+# Coverage and temporary files
+coverage/
+.tmp/
+tmp/
+.cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
