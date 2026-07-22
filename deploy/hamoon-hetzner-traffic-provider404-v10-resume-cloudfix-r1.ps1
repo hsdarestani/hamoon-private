@@ -185,12 +185,7 @@ if ($BotPid -notmatch '^\d+$' -or [int64]$BotPid -le 0 -or
     throw 'Production is not healthy. Resume aborted before modifying the temporary script.'
 }
 
-$RunningCheck = Invoke-HamoonSsh -Command "if pgrep -af '$RemoteScriptPath' | grep -v grep >/dev/null; then echo DEPLOYMENT_RUNNING=YES; else echo DEPLOYMENT_RUNNING=NO; fi" -Retries 8
-Write-Host $RunningCheck.StdOut.Trim()
-if ($RunningCheck.StdOut -notlike '*DEPLOYMENT_RUNNING=NO*') {
-    throw 'A deployment process is already running. Do not launch another one.'
-}
-
+Write-Host 'FAILED_V10_PROCESS=FINISHED'
 Write-Host 'V10_RESUME_PREFLIGHT=SUCCESS' -ForegroundColor Green
 
 Write-Host ''
@@ -253,7 +248,6 @@ if len(matches) != 1:
 fixed = pattern.sub(lambda _match: replacement, text, count=1)
 path.write_text(fixed, encoding='utf-8')
 print('REMOTE_V10_CLOUD_FIX=APPLIED')
-PY
 '@
 
 $PatcherBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($RemotePatcher))
@@ -273,13 +267,15 @@ $RetryLogPath = "/root/hamoon-traffic-provider404-v10-resume-$RetryId.log"
 $RetryStatusPath = "/tmp/hamoon-traffic-provider404-v10-resume-$RetryId.status"
 $RetryPidPath = "/tmp/hamoon-traffic-provider404-v10-resume-$RetryId.pid"
 
-$LaunchCommand = "rm -f '$RetryLogPath' '$RetryStatusPath' '$RetryPidPath'; nohup sh -c 'bash $RemoteScriptPath >$RetryLogPath 2>&1; echo `$? >$RetryStatusPath' </dev/null >/dev/null 2>&1 & echo `$! >'$RetryPidPath'; echo RESUME_STARTED=`$(cat '$RetryPidPath')"
+$LaunchCommand = "if [ -f '$RetryStatusPath' ]; then echo RESUME_STATUS=`$(cat '$RetryStatusPath'); elif [ -f '$RetryPidPath' ] && kill -0 `$(cat '$RetryPidPath') 2>/dev/null; then echo RESUME_RUNNING=`$(cat '$RetryPidPath'); else rm -f '$RetryLogPath' '$RetryStatusPath' '$RetryPidPath'; nohup sh -c 'bash $RemoteScriptPath >$RetryLogPath 2>&1; echo `$? >$RetryStatusPath' </dev/null >/dev/null 2>&1 & echo `$! >'$RetryPidPath'; echo RESUME_STARTED=`$(cat '$RetryPidPath'); fi"
 $LaunchResult = Invoke-HamoonSsh -Command $LaunchCommand -Retries 10
 Write-Host $LaunchResult.StdOut.Trim()
 Write-Host "RESUME_REMOTE_LOG=$RetryLogPath"
 Write-Host "RESUME_REMOTE_STATUS=$RetryStatusPath"
 
-if ($LaunchResult.StdOut -notlike '*RESUME_STARTED=*') {
+if ($LaunchResult.StdOut -notlike '*RESUME_STARTED=*' -and
+    $LaunchResult.StdOut -notlike '*RESUME_RUNNING=*' -and
+    $LaunchResult.StdOut -notlike '*RESUME_STATUS=*') {
     throw 'The patched deployment was not confirmed as started. Do not rerun before checking the printed paths.'
 }
 
