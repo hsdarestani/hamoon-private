@@ -30,21 +30,43 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Discover secret names referenced by repository files
-        continue-on-error: true
+      - name: Inspect pricing implementation
         shell: bash
         run: |
-          set -u
-          echo "WORKFLOW_FILES_BEGIN"
-          find .github/workflows -maxdepth 2 -type f -print 2>/dev/null | sort || true
-          echo "WORKFLOW_FILES_END"
-          echo "REFERENCED_SECRET_NAMES_BEGIN"
-          grep -RhoE 'secrets\.[A-Za-z_][A-Za-z0-9_]*' . \
-            --exclude-dir=.git --exclude-dir=node_modules 2>/dev/null \
-            | sed 's/^secrets\.//' | sort -u || true
-          echo "REFERENCED_SECRET_NAMES_END"
+          python3 - <<'PY'
+          from pathlib import Path
 
-      - name: Audit production CX23 purchases
+          targets = {
+              'Hetzner/hetzner-api.js': ['firstPrice(', 'serverTypeCache', 'normalizeHetznerServerTypes(', 'getHetznerSellablePlans('],
+              'services/hetzner-lifecycle.js': ['getFlavorCyclePrice(', 'normalizeStoredCycleAmount('],
+              'index.js': ['getFlavorCyclePrice(', 'formatBillingAmountLabel(', 'purchase.amount', 'مدیریت سرورها', 'هزینه فعلی'],
+              'scripts/reconcile-hetzner-billing-amounts.js': ['getHetznerSellablePlans(', 'updatePurchasePlan('],
+          }
+          for filename, patterns in targets.items():
+              path = Path(filename)
+              if not path.exists():
+                  continue
+              lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+              matches = []
+              for i, line in enumerate(lines, 1):
+                  if any(p in line for p in patterns):
+                      matches.append(i)
+              print(f'FILE_CONTEXT_BEGIN {filename}')
+              emitted = set()
+              for line_no in matches[:30]:
+                  start = max(1, line_no - 6)
+                  end = min(len(lines), line_no + 10)
+                  key = (start, end)
+                  if key in emitted:
+                      continue
+                  emitted.add(key)
+                  print(f'--- lines {start}-{end} ---')
+                  for n in range(start, end + 1):
+                      print(f'{n:05d}: {lines[n-1]}')
+              print(f'FILE_CONTEXT_END {filename}')
+          PY
+
+      - name: Audit production CX23 purchases when deployment credentials are available
         shell: bash
         run: |
           set -euo pipefail
@@ -54,8 +76,8 @@ jobs:
           port="${SSH_PORT:-22}"
 
           if [[ -z "${SSH_PRIVATE_KEY:-}" && -z "${SSH_PASSWORD:-}" ]]; then
-            echo "No supported SSH key or password secret was found."
-            exit 2
+            echo "PRODUCTION_AUDIT_SKIPPED_NO_ACTIONS_SSH_SECRET"
+            exit 0
           fi
 
           install -d -m 700 "$HOME/.ssh"
