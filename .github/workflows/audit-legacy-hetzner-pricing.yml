@@ -1,48 +1,40 @@
-name: Apply safe Hetzner pricing fixes
+name: Validate Hetzner pricing
 
 on:
-  push:
-    branches:
-      - agent/audit-legacy-hetzner-pricing-20260804
   pull_request:
     branches:
       - main
+    paths:
+      - Hetzner/hetzner-api.js
+      - index.js
+      - scripts/reconcile-hetzner-billing-amounts.js
+      - scripts/validate-hetzner-pricing.js
+      - package.json
+      - .github/workflows/audit-legacy-hetzner-pricing.yml
+  push:
+    branches:
+      - main
+      - agent/audit-legacy-hetzner-pricing-20260804
+    paths:
+      - Hetzner/hetzner-api.js
+      - index.js
+      - scripts/reconcile-hetzner-billing-amounts.js
+      - scripts/validate-hetzner-pricing.js
+      - package.json
+      - .github/workflows/audit-legacy-hetzner-pricing.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-validate:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Apply patch
-        if: github.event_name == 'push'
-        run: python3 scripts/apply-hetzner-pricing-fix.py
-
-      - name: Validate syntax and pricing
-        run: |
-          node -c Hetzner/hetzner-api.js
-          node -c index.js
-          node -c scripts/reconcile-hetzner-billing-amounts.js
-          node scripts/validate-hetzner-pricing.js
-          npm run validate:hetzner-lifecycle
-          npm run validate:provider-capabilities
-
-      - name: Commit patched files
-        if: github.event_name == 'push'
-        run: |
-          if git diff --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Fix Hetzner location pricing and legacy cycle amounts"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+      - uses: actions/checkout@v4
+      - run: node -c Hetzner/hetzner-api.js
+      - run: node -c index.js
+      - run: node -c scripts/reconcile-hetzner-billing-amounts.js
+      - run: node scripts/validate-hetzner-pricing.js
+      - run: npm run validate:hetzner-lifecycle
+      - run: npm run validate:provider-capabilities
