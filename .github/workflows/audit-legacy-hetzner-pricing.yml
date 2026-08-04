@@ -1,0 +1,87 @@
+name: Audit legacy Hetzner CX23 pricing
+
+on:
+  push:
+    branches:
+      - agent/audit-legacy-hetzner-pricing-20260804
+    paths:
+      - .github/workflows/audit-legacy-hetzner-pricing.yml
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST || secrets.SERVER_HOST || secrets.SERVER_IP || secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER || secrets.SERVER_USER || secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SSH_PORT || secrets.SERVER_PORT || secrets.SSH_PORT }}
+      SSH_PRIVATE_KEY: ${{ secrets.HAMOON_SSH_PRIVATE_KEY || secrets.SERVER_SSH_PRIVATE_KEY || secrets.SERVER_SSH_KEY || secrets.SSH_PRIVATE_KEY || secrets.SSH_KEY }}
+
+    steps:
+      - name: Audit production CX23 purchases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          host="${SSH_HOST:-91.107.241.4}"
+          user="${SSH_USER:-root}"
+          port="${SSH_PORT:-22}"
+
+          if [[ -z "${SSH_PRIVATE_KEY:-}" ]]; then
+            echo "No supported SSH private-key secret was found."
+            exit 2
+          fi
+
+          install -d -m 700 "$HOME/.ssh"
+          if grep -q "BEGIN .*PRIVATE KEY" <<<"$SSH_PRIVATE_KEY"; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/hamoon_key"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/hamoon_key"
+          fi
+          chmod 600 "$HOME/.ssh/hamoon_key"
+          ssh-keyscan -p "$port" -H "$host" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+
+          script_b64="$(base64 -w0 <<'NODE'
+          const db = require('./db');
+
+          (async () => {
+            const rows = await db.getAllPurchases();
+            const out = rows
+              .filter((p) => {
+                const dc = String(p.datacenter || '').toLowerCase();
+                const flavor = String(p.flavor_id || '').toLowerCase();
+                return dc.includes('hetzner') && flavor === 'cx23';
+              })
+              .map((p) => ({
+                server_id: p.server_id,
+                telegram_id: p.telegram_id,
+                datacenter: p.datacenter,
+                server_name: p.server_name,
+                flavor_id: p.flavor_id,
+                amount: Number(p.amount || 0),
+                duration: p.duration,
+                status: p.status,
+                auto_renew: Number(p.auto_renew ?? 1),
+                created_at: p.created_at,
+                last_billed_at: p.last_billed_at,
+                updated_at: p.updated_at,
+              }))
+              .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+
+            console.log('HAMOON_CX23_AUDIT_BEGIN');
+            console.log(JSON.stringify(out, null, 2));
+            console.log('HAMOON_CX23_AUDIT_END');
+            process.exit(0);
+          })().catch((error) => {
+            console.error('HAMOON_CX23_AUDIT_FAILED', error.code || error.message);
+            process.exit(1);
+          });
+          NODE
+          )"
+
+          ssh -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20 \
+            -i "$HOME/.ssh/hamoon_key" -p "$port" "$user@$host" \
+            "cd /root/Hamoon && printf '%s' '$script_b64' | base64 -d | node"
