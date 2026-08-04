@@ -354,13 +354,49 @@ function getAllowedCycles(dcConfig) {
 function getCycleLabel(cycle) { return formatBillingCycleFa(cycle); }
 
 function getFlavorCyclePrice(flavor, cycle) {
+  const cycleHours = HOURS_IN_CYCLE[cycle];
+  if (!cycleHours) return 0;
   if (flavor?.pricesByCycle && Number(flavor.pricesByCycle[cycle]) > 0) {
     return Math.round(Number(flavor.pricesByCycle[cycle]));
   }
-  if (cycle === 'monthly' && Number(flavor?.monthly_price || flavor?.monthlyPrice) > 0) {
-    return Math.round(Number(flavor.monthly_price || flavor.monthlyPrice));
-  }
-  return Math.round(Number(flavor?.price || 0) * HOURS_IN_CYCLE[cycle]);
+  const monthly = Number(
+    flavor?.amount_monthly ??
+    flavor?.monthly_toman ??
+    flavor?.monthly_price_toman ??
+    flavor?.monthly_price ??
+    flavor?.monthlyPrice ??
+    0
+  );
+  const hourly = Number(
+    flavor?.amount_hourly ??
+    flavor?.hourly_price_toman ??
+    flavor?.price ??
+    (monthly > 0 ? monthly / HOURS_IN_CYCLE.monthly : 0)
+  );
+  if (cycle === 'monthly') return Math.round(monthly || hourly * HOURS_IN_CYCLE.monthly);
+  return Math.round(hourly * cycleHours);
+}
+
+function normalizeStoredCycleAmount(purchase, dcConfig = null) {
+  const amount = Number(purchase?.amount || 0);
+  const cycle = String(purchase?.duration || 'hourly');
+  const cycleHours = HOURS_IN_CYCLE[cycle];
+  if (!(amount > 0) || !cycleHours || cycle === 'hourly') return amount;
+
+  const dc = dcConfig || baseDatacenters[purchase?.datacenter] || null;
+  const flavorId = String(purchase?.flavor_id || '').toLowerCase();
+  const configuredFlavor = (dc?.flavors || []).find((flavor) => {
+    const ids = [flavor?.id, flavor?.hetzner_type, flavor?.server_type]
+      .map((value) => String(value || '').toLowerCase());
+    return ids.includes(flavorId);
+  });
+  const expectedCycleAmount = configuredFlavor ? getFlavorCyclePrice(configuredFlavor, cycle) : 0;
+  if (!(expectedCycleAmount > 0)) return amount;
+
+  const expandedLegacyAmount = Math.round(amount * cycleHours);
+  const storedDistance = Math.abs(amount - expectedCycleAmount);
+  const expandedDistance = Math.abs(expandedLegacyAmount - expectedCycleAmount);
+  return expandedDistance < storedDistance ? expandedLegacyAmount : amount;
 }
 
 function formatToman(n) {
@@ -1137,21 +1173,22 @@ bot.editMessageText('⏳ در حال محاسبه و تغییر دوره پرد�
     const lastBilledDate = new Date(purchase.last_billed_at || purchase.created_at || now);
     const elapsedHours   = Math.max(0, (now - lastBilledDate) / (3600 * 1000));
 
-    // ۲) اعتبار زمان استفاده‌نشده در سیکل فعلی (بر اساس نرخ ساعتی ثبت‌شده در purchase.amount)
+    // ۲) اعتبار زمان استفاده‌نشده در سیکل فعلی بر اساس مبلغ کامل دوره
     const currentCycleHours  = HOURS_IN_CYCLE[purchase.duration];
     if (!currentCycleHours) {
       return sendMessage(chatId, `❌ سیکل فعلی نامعتبر است: ${escapeMarkdownV2(String(purchase.duration))}`);
     }
-    const hourlyPrice        = Number(purchase.amount) || 0; // نرخ ساعتی فعلی
+    const currentCycleAmount = normalizeStoredCycleAmount(purchase);
+    const hourlyPrice        = currentCycleAmount / currentCycleHours;
     const unusedHours        = Math.max(0, currentCycleHours - elapsedHours);
     const creditForUnusedTime= unusedHours * hourlyPrice;
 
-    // ۳) هزینه سیکل جدید (باز هم با همان نرخ ساعتی)
+    // ۳) هزینه سیکل جدید با همان نرخ ساعتی مؤثر
     const targetCycleHours   = HOURS_IN_CYCLE[newCycle];
     if (!targetCycleHours) {
       return sendMessage(chatId, `❌ سیکل انتخابی نامعتبر است: ${escapeMarkdownV2(String(newCycle))}`);
     }
-    const newCyclePrice      = hourlyPrice * targetCycleHours;
+    const newCyclePrice      = Math.round(hourlyPrice * targetCycleHours);
 
     // ۴) مابه‌التفاوت
     const difference         = newCyclePrice - creditForUnusedTime;
@@ -2289,7 +2326,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
     if (!allowedCycles.includes(selectedCycle)) return sendMessage(chatId, '❌ سیکل پرداخت انتخاب‌شده برای این دیتاسنتر مجاز نیست.');
 
     const finalPrice = getFlavorCyclePrice(selectedFlavor, selectedCycle);
-    const amountForDb = finalPrice / HOURS_IN_CYCLE[selectedCycle];
+    const amountForDb = finalPrice;
     const isHetzner = isHetznerDc(effectiveDc);
     const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';
     const isTebyan = effectiveDc.key === 'tebyan';
@@ -2623,7 +2660,7 @@ async function handleHetznerUpgradeSelect(chatId, userId, serverId, dcConfig, ta
   const { current } = await resolveCurrentHetznerFlavor(liveDc, purchase);
   if (!target) return sendMessage(chatId, '❌ پلن انتخاب‌شده معتبر نیست.');
   if (current && !getHigherHetznerFlavors(liveDc, current, purchase.duration || 'monthly').some(f => f.id === target.id)) return sendMessage(chatId, '❌ پلن انتخاب‌شده بالاتر از پلن فعلی نیست.');
-  const oldAmount = Number(purchase.amount || (current ? getFlavorCyclePrice(current, purchase.duration || 'monthly') : 0));
+  const oldAmount = normalizeStoredCycleAmount(purchase, liveDc) || (current ? getFlavorCyclePrice(current, purchase.duration || 'monthly') : 0);
   const newAmount = getFlavorCyclePrice(target, purchase.duration || 'monthly');
   const text = `شما در حال ارتقای سرور زیر هستید:\nسرور: ${purchase.server_name || serverId}\nپلن فعلی: ${current?.label || purchase.flavor_id || 'نامشخص'}\nپلن جدید: ${target.label || target.id}\nهزینه فعلی: ${formatToman(oldAmount)} تومان\nهزینه جدید: ${formatToman(newAmount)} تومان\nدوره پرداخت: ${getCycleLabel(purchase.duration || 'monthly')}\n\nتوجه: در زمان ارتقا ممکن است سرور برای چند دقیقه خاموش یا از دسترس خارج شود.\nارتقا ممکن است چند دقیقه زمان ببرد.\nافزایش دیسک اختیاری است و مسیر پیشنهادی، ارتقا بدون افزایش دیسک است.`;
   return sendMessage(chatId, text, { reply_markup: { inline_keyboard: [
@@ -2693,7 +2730,7 @@ async function handlePurchaseAutoRenewEnable(chatId, userId, serverId, dcConfig)
   }
 
   if (purchase.status === 'suspended' && purchase.suspend_reason === 'auto_renew_disabled') {
-    const cycleAmount = Number(purchase.amount || 0);
+    const cycleAmount = normalizeStoredCycleAmount(purchase, dcConfig);
     const wallet = await getUserWallet(userId);
     if (wallet < cycleAmount) {
       return sendMessage(chatId, 'برای فعال‌سازی مجدد، کیف پول شما باید حداقل به اندازه هزینه یک دوره شارژ داشته باشد.');
@@ -3412,7 +3449,7 @@ async function runHourlyBilling() {
     const cycleDue = hoursSinceLastBill >= cycleHours;
     const autoRenewEnabled = Number(auto_renew ?? 1) === 1;
     if (cycleDue && autoRenewEnabled) {
-      instanceCost = parseFloat(amount); // amount = هزینه دوره انتخاب‌شده
+      instanceCost = normalizeStoredCycleAmount(purchase); // مبلغ کامل دوره؛ رکوردهای ساعتی قدیمی نیز نرمال می‌شوند
     }
 
     if (cycleDue && !autoRenewEnabled) {
