@@ -6,6 +6,11 @@ on:
       - agent/audit-legacy-hetzner-pricing-20260804
     paths:
       - .github/workflows/audit-legacy-hetzner-pricing.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/audit-legacy-hetzner-pricing.yml
 
 permissions:
   contents: read
