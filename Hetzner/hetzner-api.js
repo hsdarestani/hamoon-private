@@ -37,23 +37,48 @@ async function listHetznerServerTypes(config) {
 }
 
 const SERVER_TYPE_CACHE_MS = Number(process.env.HETZNER_PLAN_CACHE_MS || 20 * 60 * 1000);
-let serverTypeCache = { expires: 0, plans: null };
+const serverTypeCache = new Map();
 
 function roundPrice(value) {
   const roundTo = Math.max(1, Number(process.env.HETZNER_PRICE_ROUND_TO || 1000));
   return Math.max(roundTo, Math.ceil(Number(value || 0) / roundTo) * roundTo);
 }
 
-function firstPrice(serverType) {
+function normalizeLocation(value) {
+  return String(value?.name || value || '').trim().toLowerCase();
+}
+
+function configuredPriceLocations(config = {}) {
+  const preferred = normalizeLocation(config.HETZNER_LOCATION || config.location);
+  const fallbacks = String(config.HETZNER_LOCATION_FALLBACKS || '')
+    .split(',')
+    .map(normalizeLocation)
+    .filter(Boolean);
+  return [...new Set([preferred, ...fallbacks].filter(Boolean))];
+}
+
+function firstPrice(serverType, config = {}) {
   const prices = Array.isArray(serverType?.prices) ? serverType.prices : [];
-  return prices.find(p => p?.price_hourly || p?.price_monthly) || prices[0] || {};
+  const usable = prices.filter(p => p?.price_hourly || p?.price_monthly);
+  for (const location of configuredPriceLocations(config)) {
+    const match = usable.find(p => normalizeLocation(p?.location) === location);
+    if (match) return match;
+  }
+  return usable[0] || prices[0] || {};
+}
+
+function hetznerPlanCacheKey(config = {}) {
+  return [
+    String(config.key || config.name || 'hetzner').trim().toLowerCase(),
+    ...configuredPriceLocations(config),
+  ].join('|');
 }
 
 function hetznerFamily(name) {
   return String(name || '').replace(/[0-9].*$/, '').toUpperCase() || 'OTHER';
 }
 
-function normalizeHetznerServerTypes(serverTypes = []) {
+function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const eurToToman = Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
   const baseMultiplier = Number(process.env.HETZNER_PRICE_MULTIPLIER || 1);
   const hourlyMultiplier = Number(process.env.HETZNER_HOURLY_PRICE_MULTIPLIER || baseMultiplier);
@@ -63,7 +88,7 @@ function normalizeHetznerServerTypes(serverTypes = []) {
   return (serverTypes || [])
     .filter(st => st && st.name && !st.deprecated && st.deprecation === null)
     .map(st => {
-      const price = firstPrice(st);
+      const price = firstPrice(st, config);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
       const monthlyEur = Number(price?.price_monthly?.gross || price?.price_monthly?.net || (hourlyEur * 720));
       const hourlyToman = roundPrice(Math.max(minHourly, hourlyEur * eurToToman * hourlyMultiplier));
@@ -98,11 +123,13 @@ function normalizeStaticHetznerPlans(config = {}) {
 
 async function getHetznerSellablePlans(config = {}) {
   const now = Date.now();
-  if (serverTypeCache.plans && serverTypeCache.expires > now) return serverTypeCache.plans;
+  const cacheKey = hetznerPlanCacheKey(config);
+  const cached = serverTypeCache.get(cacheKey);
+  if (cached?.plans && cached.expires > now) return cached.plans;
   try {
-    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config));
+    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
     if (plans.length) {
-      serverTypeCache = { plans, expires: now + SERVER_TYPE_CACHE_MS };
+      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
       return plans;
     }
   } catch (e) {
@@ -527,6 +554,8 @@ module.exports = {
   isHetznerPlacementUnavailableError,
   listHetznerServerTypes,
   normalizeHetznerServerTypes,
+  firstPrice,
+  hetznerPlanCacheKey,
   getHetznerSellablePlans,
   getHetznerServer,
   powerOffHetznerServer,
