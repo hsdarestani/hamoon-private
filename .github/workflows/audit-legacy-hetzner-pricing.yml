@@ -13,7 +13,6 @@ on:
       - .github/workflows/audit-legacy-hetzner-pricing.yml
 
 permissions:
-  actions: read
   contents: read
 
 jobs:
@@ -26,20 +25,24 @@ jobs:
       SSH_PORT: ${{ secrets.HAMOON_SSH_PORT || secrets.SERVER_PORT || secrets.SSH_PORT || secrets.VPS_PORT || secrets.DEPLOY_PORT || vars.HAMOON_SSH_PORT || vars.SERVER_PORT || vars.SSH_PORT }}
       SSH_PRIVATE_KEY: ${{ secrets.HAMOON_SSH_PRIVATE_KEY || secrets.HAMOON_PRIVATE_KEY || secrets.HAMOON_KEY || secrets.SERVER_SSH_PRIVATE_KEY || secrets.SERVER_SSH_KEY || secrets.SERVER_KEY || secrets.SSH_PRIVATE_KEY || secrets.SSH_KEY || secrets.SSHKEY || secrets.PRIVATE_KEY || secrets.DEPLOY_PRIVATE_KEY || secrets.DEPLOY_KEY || secrets.VPS_PRIVATE_KEY || secrets.VPS_SSH_KEY || secrets.SSH_KEY_B64 }}
       SSH_PASSWORD: ${{ secrets.HAMOON_SERVER_PASSWORD || secrets.HAMOON_PASSWORD || secrets.SERVER_PASSWORD || secrets.SSH_PASSWORD || secrets.VPS_PASSWORD || secrets.DEPLOY_PASSWORD || secrets.PASSWORD }}
-      GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Discover available repository secret names
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Discover secret names referenced by repository files
         continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
-          curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/secrets?per_page=100" \
-            | python3 -c 'import json,sys; data=json.load(sys.stdin); print("AVAILABLE_SECRET_NAMES=" + ",".join(sorted(x["name"] for x in data.get("secrets", []))))'
+          set -u
+          echo "WORKFLOW_FILES_BEGIN"
+          find .github/workflows -maxdepth 2 -type f -print 2>/dev/null | sort || true
+          echo "WORKFLOW_FILES_END"
+          echo "REFERENCED_SECRET_NAMES_BEGIN"
+          grep -RhoE 'secrets\.[A-Za-z_][A-Za-z0-9_]*' . \
+            --exclude-dir=.git --exclude-dir=node_modules 2>/dev/null \
+            | sed 's/^secrets\.//' | sort -u || true
+          echo "REFERENCED_SECRET_NAMES_END"
 
       - name: Audit production CX23 purchases
         shell: bash
