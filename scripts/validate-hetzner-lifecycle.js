@@ -31,6 +31,21 @@ const cloud = require('../cloud-api');
   assert.strictEqual(retryResult, 'ok');
   assert.strictEqual(lockedAttempts, 3);
 
+  let exhaustedAttempts = 0;
+  await assert.rejects(
+    cloud.retryHetznerLockedOperation(
+      { apiType: 'hetzner', key: 'hetzner' },
+      'test-start',
+      async () => {
+        exhaustedAttempts += 1;
+        throw lockedError;
+      },
+      { delays: [0], sleep: async () => {} }
+    ),
+    err => err?.code === 'OPERATION_IN_PROGRESS' && err?.status === 423
+  );
+  assert.strictEqual(exhaustedAttempts, 2);
+
   let nonLockedAttempts = 0;
   await assert.rejects(
     cloud.retryHetznerLockedOperation(
