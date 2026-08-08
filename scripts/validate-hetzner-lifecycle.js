@@ -10,6 +10,10 @@ const cloud = require('../cloud-api');
   assert.strictEqual(cloud.pick({ apiType: 'hetzner' }).getHetznerApiToken ? 'hetzner' : 'other', 'hetzner');
   assert(detector.isAfraCloudConfig({ key: 'afracloud-ir' }));
   assert(detector.isOpenStackConfig({ OS_AUTH_URL: 'https://example.invalid' }));
+  assert.strictEqual(typeof cloud.createPrimaryIpv4, 'function');
+  assert.strictEqual(typeof cloud.assignPrimaryIp, 'function');
+  assert.strictEqual(typeof cloud.unassignPrimaryIp, 'function');
+  assert.strictEqual(typeof cloud.deletePrimaryIp, 'function');
 
   const lockedError = Object.assign(new Error('Request failed with status code 423'), {
     response: { status: 423, data: { error: { code: 'locked' } } }
