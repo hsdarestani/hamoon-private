@@ -113,14 +113,23 @@ function primaryIpLocationName(value, dc = {}) {
 // Preserve the provider value separately while presenting the compatible shape internally.
 function normalizePrimaryIpForLegacyLifecycle(primaryIp) {
   if (!primaryIp || typeof primaryIp !== 'object') return primaryIp;
-  if (primaryIp.assignee_id == null && String(primaryIp.assignee_type || '').toLowerCase() === 'unassigned') {
-    return {
-      ...primaryIp,
-      provider_assignee_type: 'unassigned',
-      assignee_type: 'server'
-    };
+  const locationName = primaryIpLocationName(primaryIp.location, {});
+  const normalized = { ...primaryIp };
+
+  // Hetzner removed Primary-IP `datacenter` from responses on 2026-07-01.
+  // Recreate the minimum legacy shape used by older lifecycle code.
+  if (!normalized.datacenter && locationName) {
+    normalized.datacenter = { location: { name: locationName } };
   }
-  return primaryIp;
+
+  // Hetzner changed an unassigned Primary IP to assignee_type="unassigned"
+  // on 2026-08-01. Older lifecycle code expects the previous "server"+null shape.
+  if (normalized.assignee_id == null && String(normalized.assignee_type || '').toLowerCase() === 'unassigned') {
+    normalized.provider_assignee_type = 'unassigned';
+    normalized.assignee_type = 'server';
+  }
+
+  return normalized;
 }
 
 async function createHetznerPrimaryIpv4(dc, args) {
