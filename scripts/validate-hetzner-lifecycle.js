@@ -14,6 +14,12 @@ const cloud = require('../cloud-api');
   assert.strictEqual(typeof cloud.assignPrimaryIp, 'function');
   assert.strictEqual(typeof cloud.unassignPrimaryIp, 'function');
   assert.strictEqual(typeof cloud.deletePrimaryIp, 'function');
+  assert.deepStrictEqual(cloud.stripLegacyTokenPlaceholder([null, 'hel1']), ['hel1']);
+  assert.deepStrictEqual(cloud.stripLegacyTokenPlaceholder(['hel1']), ['hel1']);
+  assert.strictEqual(cloud.primaryIpLocationName({ name: 'FSN1' }), 'fsn1');
+  const compatIp = cloud.normalizePrimaryIpForLegacyLifecycle({ id: 1, ip: '1.2.3.4', assignee_type: 'unassigned', assignee_id: null });
+  assert.strictEqual(compatIp.assignee_type, 'server');
+  assert.strictEqual(compatIp.provider_assignee_type, 'unassigned');
 
   const lockedError = Object.assign(new Error('Request failed with status code 423'), {
     response: { status: 423, data: { error: { code: 'locked' } } }
