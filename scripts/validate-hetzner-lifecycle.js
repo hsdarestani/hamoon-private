@@ -10,6 +10,42 @@ const cloud = require('../cloud-api');
   assert.strictEqual(cloud.pick({ apiType: 'hetzner' }).getHetznerApiToken ? 'hetzner' : 'other', 'hetzner');
   assert(detector.isAfraCloudConfig({ key: 'afracloud-ir' }));
   assert(detector.isOpenStackConfig({ OS_AUTH_URL: 'https://example.invalid' }));
+
+  const lockedError = Object.assign(new Error('Request failed with status code 423'), {
+    response: { status: 423, data: { error: { code: 'locked' } } }
+  });
+  assert(cloud.isHetznerLockedError(lockedError));
+  assert(!cloud.isHetznerLockedError(Object.assign(new Error('bad request'), { response: { status: 400 } })));
+
+  let lockedAttempts = 0;
+  const retryResult = await cloud.retryHetznerLockedOperation(
+    { apiType: 'hetzner', key: 'hetzner' },
+    'test-start',
+    async () => {
+      lockedAttempts += 1;
+      if (lockedAttempts < 3) throw lockedError;
+      return 'ok';
+    },
+    { delays: [0, 0], sleep: async () => {} }
+  );
+  assert.strictEqual(retryResult, 'ok');
+  assert.strictEqual(lockedAttempts, 3);
+
+  let nonLockedAttempts = 0;
+  await assert.rejects(
+    cloud.retryHetznerLockedOperation(
+      { apiType: 'hetzner', key: 'hetzner' },
+      'test-start',
+      async () => {
+        nonLockedAttempts += 1;
+        throw Object.assign(new Error('forbidden'), { response: { status: 403 } });
+      },
+      { delays: [0, 0], sleep: async () => {} }
+    ),
+    /forbidden/
+  );
+  assert.strictEqual(nonLockedAttempts, 1);
+
   assert(!lifecycle.isBillablePurchase({ status: 'deleted' }));
   assert(!lifecycle.isBillablePurchase({ status: 'deletion_pending' }));
   assert(!lifecycle.isBillablePurchase({ status: 'provisioning' }));
