@@ -78,6 +78,13 @@ function callWithHetznerLockedRetry(dc, operation, fn) {
   return isHetznerConfig(dc) ? retryHetznerLockedOperation(dc, operation, fn) : fn();
 }
 
+function callProviderMethod(dc, method, args, unsupportedMessage) {
+  const provider = pick(dc);
+  return provider[method]
+    ? provider[method](dc, ...args)
+    : Promise.reject(new Error(unsupportedMessage));
+}
+
 module.exports = {
   pick,
   isHetznerConfig,
@@ -119,7 +126,6 @@ module.exports = {
       ? pick(dc).createServerFromSnapshot(dc, ...a)
       : Promise.reject(new Error('createServerFromSnapshot not supported')),
 
-  // 👇 این خط مشکل شما را حل می‌کند:
   createKeyPair:         (dc, ...a) => (pick(dc).createKeyPair ? pick(dc).createKeyPair(dc, ...a) : safeNoopCreateKeyPair(dc, ...a)),
   deleteKeyPair:         (dc, ...a) => pick(dc).deleteKeyPair ? pick(dc).deleteKeyPair(dc, ...a) : Promise.reject(new Error('deleteKeyPair not supported')),
   getServerDetails:      (dc, ...a) => pick(dc).getServerDetails ? pick(dc).getServerDetails(dc, ...a) : Promise.reject(new Error('getServerDetails not supported')),
@@ -138,4 +144,8 @@ module.exports = {
     return callWithHetznerLockedRetry(dc, 'poweron', call);
   },
 
+  createPrimaryIpv4: (dc, ...a) => callProviderMethod(dc, 'createPrimaryIpv4', a, 'createPrimaryIpv4 not supported'),
+  assignPrimaryIp:   (dc, ...a) => callProviderMethod(dc, 'assignPrimaryIp', a, 'assignPrimaryIp not supported'),
+  unassignPrimaryIp: (dc, ...a) => callProviderMethod(dc, 'unassignPrimaryIp', a, 'unassignPrimaryIp not supported'),
+  deletePrimaryIp:   (dc, ...a) => callProviderMethod(dc, 'deletePrimaryIp', a, 'deletePrimaryIp not supported'),
 };
