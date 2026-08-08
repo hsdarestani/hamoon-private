@@ -107,6 +107,17 @@ function primaryIpLocationName(value, dc = {}) {
   return String(raw).trim().toLowerCase();
 }
 
+function primaryIpResourceName(location) {
+  const loc = String(location || 'loc')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 16) || 'loc';
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `hamoon-ip-${loc}-${suffix}`.slice(0, 63).replace(/-+$/g, '');
+}
+
 // Hetzner changed unassigned Primary IPs on 2026-08-01 from
 // assignee_type="server", assignee_id=null to assignee_type="unassigned".
 // Production lifecycle still expects the legacy shape before the swap.
@@ -135,10 +146,12 @@ function normalizePrimaryIpForLegacyLifecycle(primaryIp) {
 async function createHetznerPrimaryIpv4(dc, args) {
   const [locationArg] = stripLegacyTokenPlaceholder(args);
   const location = primaryIpLocationName(locationArg, dc);
-  // Hetzner removed "datacenter" from Primary-IP create requests on 2026-07-01.
-  // "assignee_type" is optional for an unassigned Primary IP.
+  const name = primaryIpResourceName(location);
+  // Current Hetzner Primary-IP create requires `name` and uses `location` rather than `datacenter`.
+  // `assignee_type` is optional for an unassigned Primary IP.
   const data = await hetzner.hetznerRequest(dc, 'POST', '/primary_ips', {
     type: 'ipv4',
+    name,
     location,
     auto_delete: false
   });
@@ -176,6 +189,7 @@ module.exports = {
   retryHetznerLockedOperation,
   stripLegacyTokenPlaceholder,
   primaryIpLocationName,
+  primaryIpResourceName,
   normalizePrimaryIpForLegacyLifecycle,
   getToken:              (dc, ...a) => pick(dc).getToken(dc, ...a),
   listFlavors:           (dc, ...a) => pick(dc).listFlavors(dc, ...a),
