@@ -85,6 +85,79 @@ function callProviderMethod(dc, method, args, unsupportedMessage) {
     : Promise.reject(new Error(unsupportedMessage));
 }
 
+// Production lifecycle uses the generic cloud-api convention (dc, token, ...args).
+// Hetzner's Primary-IP helpers historically used (dc, ...args) directly.
+// Accept both forms so a null token placeholder can never shift the real arguments.
+function stripLegacyTokenPlaceholder(args = []) {
+  const out = Array.from(args);
+  if (out.length > 1 && (out[0] === null || out[0] === undefined)) out.shift();
+  return out;
+}
+
+function primaryIpLocationName(value, dc = {}) {
+  const raw =
+    value?.name ||
+    value?.location?.name ||
+    value?.location ||
+    value ||
+    dc?.HETZNER_LOCATION ||
+    dc?.location ||
+    process.env.HETZNER_LOCATION ||
+    'nbg1';
+  return String(raw).trim().toLowerCase();
+}
+
+// Hetzner changed unassigned Primary IPs on 2026-08-01 from
+// assignee_type="server", assignee_id=null to assignee_type="unassigned".
+// Production lifecycle still expects the legacy shape before the swap.
+// Preserve the provider value separately while presenting the compatible shape internally.
+function normalizePrimaryIpForLegacyLifecycle(primaryIp) {
+  if (!primaryIp || typeof primaryIp !== 'object') return primaryIp;
+  if (primaryIp.assignee_id == null && String(primaryIp.assignee_type || '').toLowerCase() === 'unassigned') {
+    return {
+      ...primaryIp,
+      provider_assignee_type: 'unassigned',
+      assignee_type: 'server'
+    };
+  }
+  return primaryIp;
+}
+
+async function createHetznerPrimaryIpv4(dc, args) {
+  const [locationArg] = stripLegacyTokenPlaceholder(args);
+  const location = primaryIpLocationName(locationArg, dc);
+  // Hetzner removed "datacenter" from Primary-IP create requests on 2026-07-01.
+  // "assignee_type" is optional for an unassigned Primary IP.
+  const data = await hetzner.hetznerRequest(dc, 'POST', '/primary_ips', {
+    type: 'ipv4',
+    location,
+    auto_delete: false
+  });
+  return normalizePrimaryIpForLegacyLifecycle(data?.primary_ip);
+}
+
+async function assignHetznerPrimaryIp(dc, args) {
+  const [primaryIpId, serverId] = stripLegacyTokenPlaceholder(args);
+  const data = await hetzner.hetznerRequest(
+    dc,
+    'POST',
+    `/primary_ips/${primaryIpId}/actions/assign`,
+    { assignee_id: Number(serverId), assignee_type: 'server' }
+  );
+  return data?.action;
+}
+
+async function unassignHetznerPrimaryIp(dc, args) {
+  const [primaryIpId] = stripLegacyTokenPlaceholder(args);
+  const data = await hetzner.hetznerRequest(dc, 'POST', `/primary_ips/${primaryIpId}/actions/unassign`, {});
+  return data?.action;
+}
+
+async function deleteHetznerPrimaryIp(dc, args) {
+  const [primaryIpId] = stripLegacyTokenPlaceholder(args);
+  return hetzner.hetznerRequest(dc, 'DELETE', `/primary_ips/${primaryIpId}`);
+}
+
 module.exports = {
   pick,
   isHetznerConfig,
@@ -92,6 +165,9 @@ module.exports = {
   isOpenStackConfig,
   isHetznerLockedError,
   retryHetznerLockedOperation,
+  stripLegacyTokenPlaceholder,
+  primaryIpLocationName,
+  normalizePrimaryIpForLegacyLifecycle,
   getToken:              (dc, ...a) => pick(dc).getToken(dc, ...a),
   listFlavors:           (dc, ...a) => pick(dc).listFlavors(dc, ...a),
   listImages:            (dc, ...a) => pick(dc).listImages(dc, ...a),
@@ -144,8 +220,20 @@ module.exports = {
     return callWithHetznerLockedRetry(dc, 'poweron', call);
   },
 
-  createPrimaryIpv4: (dc, ...a) => callProviderMethod(dc, 'createPrimaryIpv4', a, 'createPrimaryIpv4 not supported'),
-  assignPrimaryIp:   (dc, ...a) => callProviderMethod(dc, 'assignPrimaryIp', a, 'assignPrimaryIp not supported'),
-  unassignPrimaryIp: (dc, ...a) => callProviderMethod(dc, 'unassignPrimaryIp', a, 'unassignPrimaryIp not supported'),
-  deletePrimaryIp:   (dc, ...a) => callProviderMethod(dc, 'deletePrimaryIp', a, 'deletePrimaryIp not supported'),
+  createPrimaryIpv4: (dc, ...a) =>
+    isHetznerConfig(dc)
+      ? createHetznerPrimaryIpv4(dc, a)
+      : callProviderMethod(dc, 'createPrimaryIpv4', a, 'createPrimaryIpv4 not supported'),
+  assignPrimaryIp: (dc, ...a) =>
+    isHetznerConfig(dc)
+      ? assignHetznerPrimaryIp(dc, a)
+      : callProviderMethod(dc, 'assignPrimaryIp', a, 'assignPrimaryIp not supported'),
+  unassignPrimaryIp: (dc, ...a) =>
+    isHetznerConfig(dc)
+      ? unassignHetznerPrimaryIp(dc, a)
+      : callProviderMethod(dc, 'unassignPrimaryIp', a, 'unassignPrimaryIp not supported'),
+  deletePrimaryIp: (dc, ...a) =>
+    isHetznerConfig(dc)
+      ? deleteHetznerPrimaryIp(dc, a)
+      : callProviderMethod(dc, 'deletePrimaryIp', a, 'deletePrimaryIp not supported'),
 };
