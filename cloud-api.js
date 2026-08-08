@@ -40,6 +40,15 @@ function hetznerLockedRetryDelays() {
   return parsed.length ? parsed : [2000, 4000, 8000];
 }
 
+function operationInProgressError(cause) {
+  const err = new Error('OPERATION_IN_PROGRESS');
+  err.code = 'OPERATION_IN_PROGRESS';
+  err.status = 423;
+  err.cause = cause;
+  if (cause?.response) err.response = cause.response;
+  return err;
+}
+
 async function retryHetznerLockedOperation(dc, operation, fn, options = {}) {
   if (!isHetznerConfig(dc)) return fn();
 
@@ -50,7 +59,9 @@ async function retryHetznerLockedOperation(dc, operation, fn, options = {}) {
     try {
       return await fn();
     } catch (err) {
-      if (!isHetznerLockedError(err) || attempt >= delays.length) throw err;
+      if (!isHetznerLockedError(err)) throw err;
+      if (attempt >= delays.length) throw operationInProgressError(err);
+
       const delayMs = Math.max(0, Number(delays[attempt]) || 0);
       console.warn('[HETZNER_LOCKED_RETRY]', {
         operation,
