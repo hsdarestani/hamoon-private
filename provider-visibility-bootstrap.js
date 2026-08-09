@@ -21,14 +21,15 @@ function replaceOnce(source, needle, replacement, label) {
 
 function applyProviderVisibilityPatches(coreSource) {
   let source = String(coreSource);
-  const needle = [
+
+  const effectiveDcNeedle = [
     '    }',
     '    return out;',
     '  }',
     '',
     '  // بدون پروژه اختصاصی → DCهای پایه با فیلتر متادیتا'
   ].join('\n');
-  const replacement = [
+  const effectiveDcReplacement = [
     '    }',
     "    require('./provider-visibility').appendSharedNonOpenStackProviders(out, baseDatacenters);",
     '    return out;',
@@ -37,7 +38,53 @@ function applyProviderVisibilityPatches(coreSource) {
     '  // بدون پروژه اختصاصی → DCهای پایه با فیلتر متادیتا'
   ].join('\n');
 
-  source = replaceOnce(source, needle, replacement, 'keep shared non-OpenStack providers for custom-project users');
+  source = replaceOnce(
+    source,
+    effectiveDcNeedle,
+    effectiveDcReplacement,
+    'keep shared non-OpenStack providers for custom-project users'
+  );
+
+  const manageNeedle = [
+    '            const results = await Promise.all(promises);',
+    '            const userServers = results.flat();',
+    "  console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);",
+    '',
+    '            if (userServers.length === 0) {'
+  ].join('\n');
+  const manageReplacement = [
+    '            const results = await Promise.all(promises);',
+    '            const userServers = results.flat();',
+    '            const managedServerKeys = new Set(userServers.map(s => `${s.datacenter}:${String(s.id ?? s.uuid ?? \'\')}`));',
+    '            for (const p of userPurchases) {',
+    "              const dcKey = String(p.datacenter || '');",
+    "              const serverId = String(p.server_id || '');",
+    '              if (!dcKey || !serverId || !userDCs[dcKey]) continue;',
+    '              const managedKey = `${dcKey}:${serverId}`;',
+    '              if (managedServerKeys.has(managedKey)) continue;',
+    '              userServers.push({',
+    '                id: serverId,',
+    '                uuid: serverId,',
+    '                name: p.server_name || serverId,',
+    '                datacenter: dcKey,',
+    '                purchase: p,',
+    '                providerUnavailable: true',
+    '              });',
+    '              managedServerKeys.add(managedKey);',
+    "              console.warn('[MANAGE] provider list missed owned server; using purchase fallback', { datacenter: dcKey, server_id: serverId });",
+    '            }',
+    "  console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);",
+    '',
+    '            if (userServers.length === 0) {'
+  ].join('\n');
+
+  source = replaceOnce(
+    source,
+    manageNeedle,
+    manageReplacement,
+    'use owned purchase fallback when provider list misses a server'
+  );
+
   return source;
 }
 
