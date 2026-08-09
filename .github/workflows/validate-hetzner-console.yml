@@ -7,11 +7,15 @@ on:
     paths:
       - index.js
       - index-core.js
+      - runtime-bootstrap.js
+      - provider-visibility.js
+      - provider-visibility-bootstrap.js
       - hetzner-console-bootstrap.js
       - console-session.js
       - server.js
       - public/console/**
       - server-display-names-bootstrap.js
+      - scripts/validate-provider-visibility.js
       - scripts/validate-hetzner-console.js
       - scripts/validate-novnc-console.js
       - package.json
@@ -23,11 +27,15 @@ on:
     paths:
       - index.js
       - index-core.js
+      - runtime-bootstrap.js
+      - provider-visibility.js
+      - provider-visibility-bootstrap.js
       - hetzner-console-bootstrap.js
       - console-session.js
       - server.js
       - public/console/**
       - server-display-names-bootstrap.js
+      - scripts/validate-provider-visibility.js
       - scripts/validate-hetzner-console.js
       - scripts/validate-novnc-console.js
       - package.json
@@ -48,6 +56,7 @@ jobs:
           node-version: '20'
       - run: npm ci --ignore-scripts
       - run: npm run validate:syntax
+      - run: npm run validate:provider-visibility
       - run: npm run validate:hetzner-console
       - run: npm run validate:novnc-console
       - run: npm run validate:server-display-names
