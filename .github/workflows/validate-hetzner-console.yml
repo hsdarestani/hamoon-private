@@ -1,0 +1,39 @@
+name: Validate Hetzner console
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - index.js
+      - index-core.js
+      - hetzner-console-bootstrap.js
+      - server-display-names-bootstrap.js
+      - scripts/validate-hetzner-console.js
+      - package.json
+      - .github/workflows/validate-hetzner-console.yml
+  push:
+    branches:
+      - main
+    paths:
+      - index.js
+      - index-core.js
+      - hetzner-console-bootstrap.js
+      - server-display-names-bootstrap.js
+      - scripts/validate-hetzner-console.js
+      - package.json
+      - .github/workflows/validate-hetzner-console.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run validate:syntax
+      - run: npm run validate:hetzner-console
+      - run: npm run validate:server-display-names
+      - run: npm run validate:production-patch
