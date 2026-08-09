@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>HamoonCloud Console</title>
+  <style>
+    :root { color-scheme: dark; font-family: Tahoma, Arial, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width:100%; height:100%; margin:0; background:#080d18; color:#fff; overflow:hidden; }
+    body { display:flex; flex-direction:column; }
+    #toolbar { min-height:56px; display:flex; gap:8px; align-items:center; padding:8px 10px; background:#101827; border-bottom:1px solid #263246; direction:rtl; }
+    #brand { font-weight:700; white-space:nowrap; }
+    #status { flex:1; font-size:13px; color:#b7c5db; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    button { border:1px solid #33445e; background:#182338; color:#fff; border-radius:9px; padding:9px 11px; cursor:pointer; font:inherit; }
+    button:hover { background:#22304a; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #screen { flex:1; min-height:0; overflow:hidden; background:#05070b; position:relative; }
+    #screen canvas { margin:auto; }
+    #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:24px; text-align:center; background:#080d18; z-index:5; }
+    #overlay.hidden { display:none; }
+    #card { max-width:520px; }
+    #card h1 { font-size:20px; margin:0 0 10px; }
+    #card p { color:#b7c5db; line-height:1.8; margin:0; }
+    @media (max-width:700px) {
+      #toolbar { flex-wrap:wrap; min-height:64px; }
+      #brand { width:100%; }
+      #status { order:3; width:100%; flex-basis:100%; }
+      button { padding:8px 10px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <div id="brand">🖥 HamoonCloud Console</div>
+    <div id="status">در حال آماده‌سازی…</div>
+    <button id="ctrlAltDel" type="button" disabled>Ctrl+Alt+Del</button>
+    <button id="fullscreen" type="button">تمام‌صفحه</button>
+  </div>
+  <div id="screen">
+    <div id="overlay">
+      <div id="card">
+        <h1>در حال اتصال به کنسول…</h1>
+        <p>این لینک کوتاه‌عمر و یک‌بارمصرف است. اگر منقضی شد، از داخل ربات «ساخت لینک جدید» را بزنید.</p>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/console/app.js"></script>
+</body>
+</html>
