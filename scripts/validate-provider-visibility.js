@@ -42,6 +42,10 @@ try {
   process.exit(1);
 }
 assert('effective DC function appends shared non-OpenStack providers', visibilityPatched.includes("appendSharedNonOpenStackProviders(out, baseDatacenters)"));
+assert('management list falls back to owned purchases', visibilityPatched.includes('provider list missed owned server; using purchase fallback'));
+assert('purchase fallback preserves purchase object', visibilityPatched.includes('purchase: p'));
+assert('purchase fallback only uses effective datacenters', visibilityPatched.includes('!userDCs[dcKey]'));
+assert('purchase fallback deduplicates provider results', visibilityPatched.includes('managedServerKeys.has(managedKey)'));
 
 try {
   const fullyPatched = applyRuntimePatches(core);
@@ -50,6 +54,7 @@ try {
   assert('rename patches remain active', fullyPatched.includes("case 'RENAME_SERVER':"));
   assert('Hetzner console patches remain active', fullyPatched.includes("case 'HCONSOLE':"));
   assert('provider visibility patch remains active', fullyPatched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
+  assert('DB purchase fallback remains active', fullyPatched.includes('provider list missed owned server; using purchase fallback'));
 } catch (error) {
   console.error('FAIL full runtime patches', error.message);
   process.exitCode = 1;
