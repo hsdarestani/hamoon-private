@@ -1319,6 +1319,88 @@ async function updatePublicIp(telegramId, serverId, datacenter, publicIp) {
   const conn = await pool.getConnection();
   try { await conn.execute('UPDATE purchases SET public_ip = ?, lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?', [publicIp, String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
 }
+
+async function getAllActivePurchases() {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT * FROM purchases
+             WHERE status = 'active'
+             ORDER BY created_at DESC`
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseTrafficBilled(serverId, lastBilledTrafficGb, lastBilledAt = undefined) {
+    const conn = await pool.getConnection();
+    try {
+        let sql = 'UPDATE purchases SET last_billed_traffic_gb = ?, updated_at = CURRENT_TIMESTAMP';
+        const params = [Number(lastBilledTrafficGb || 0)];
+        if (lastBilledAt !== undefined && lastBilledAt !== null) {
+            const formattedDate = lastBilledAt instanceof Date
+                ? lastBilledAt.toISOString().slice(0, 19).replace('T', ' ')
+                : lastBilledAt;
+            sql += ', last_billed_at = ?';
+            params.push(formattedDate);
+        }
+        sql += ' WHERE server_id = ?';
+        params.push(String(serverId));
+        const [res] = await conn.execute(sql, params);
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function adminUpdateBilling(serverId, updates = {}) {
+    const conn = await pool.getConnection();
+    try {
+        const fields = [];
+        const params = [];
+        if (Object.prototype.hasOwnProperty.call(updates, 'price_per_gb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.price_per_gb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'pricePerGb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.pricePerGb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'download_only')) {
+            fields.push('download_only = ?');
+            params.push(updates.download_only ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'downloadOnly')) {
+            fields.push('download_only = ?');
+            params.push(updates.downloadOnly ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'duration')) {
+            fields.push('duration = ?');
+            params.push(String(updates.duration));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'amount')) {
+            fields.push('amount = ?');
+            params.push(Number(updates.amount || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'auto_renew')) {
+            fields.push('auto_renew = ?');
+            params.push(updates.auto_renew ? 1 : 0);
+        }
+        if (!fields.length) return false;
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+        params.push(String(serverId));
+        const [res] = await conn.execute(
+            `UPDATE purchases SET ${fields.join(', ')} WHERE server_id = ?`,
+            params
+        );
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
 module.exports = {
     getPurchaseForOwner,
     markDeletionPending,
