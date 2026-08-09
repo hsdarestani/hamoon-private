@@ -1,0 +1,43 @@
+name: Prepare noVNC lockfile
+
+on:
+  push:
+    branches:
+      - feature/novnc-console
+    paths:
+      - package.json
+      - .github/workflows/prepare-novnc-lock.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/novnc-console
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Generate lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Run full validation
+        run: npm test
+      - name: Commit lockfile and remove one-time workflow
+        run: |
+          rm -f .github/workflows/prepare-novnc-lock.yml
+          git add package-lock.json .github/workflows/prepare-novnc-lock.yml
+          if git diff --cached --quiet; then
+            echo "No lockfile changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Lock noVNC dependency"
+          git push origin HEAD:feature/novnc-console
