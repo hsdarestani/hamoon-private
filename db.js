@@ -96,18 +96,6 @@ async function initializeDatabase() {
             )
         `);
 
-        
-        for (const [column, ddl] of [
-            ['deleted_at', 'DATETIME NULL'],
-            ['delivered_at', 'DATETIME NULL'],
-            ['provider_action_id', 'VARCHAR(255) NULL'],
-            ['public_ip', 'VARCHAR(64) NULL'],
-            ['lifecycle_error_code', 'VARCHAR(64) NULL'],
-            ['lifecycle_updated_at', 'DATETIME NULL'],
-        ]) {
-            await ensureColumn(connection, 'purchases', column, ddl);
-        }
-
         await connection.execute('ALTER TABLE purchases MODIFY amount DECIMAL(14, 6) NOT NULL').catch(err => {
             console.warn('Could not widen purchases.amount:', err.message);
         });
@@ -115,6 +103,13 @@ async function initializeDatabase() {
         await ensureColumn(connection, 'purchases', 'auto_renew_disabled_at', 'DATETIME NULL');
         await ensureColumn(connection, 'purchases', 'renewal_stopped_at', 'DATETIME NULL');
         await ensureColumn(connection, 'purchases', 'suspend_reason', 'VARCHAR(64) NULL');
+        await ensureColumn(connection, 'purchases', 'deleted_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'delivered_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'provider_action_id', 'VARCHAR(255) NULL');
+        await ensureColumn(connection, 'purchases', 'public_ip', 'VARCHAR(64) NULL');
+        await ensureColumn(connection, 'purchases', 'lifecycle_error_code', 'VARCHAR(64) NULL');
+        await ensureColumn(connection, 'purchases', 'lifecycle_updated_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'billing_amount_version', 'TINYINT NOT NULL DEFAULT 1');
         await connection.execute('UPDATE purchases SET auto_renew = 1 WHERE auto_renew IS NULL').catch(err => {
             console.warn('Could not backfill purchases.auto_renew:', err.message);
         });
@@ -423,57 +418,125 @@ async function getWalletLogs(telegramId, limit) {
     }
 }
 
-async function recordPurchase(telegramId, serverId, datacenter, serverName, flavorId, amount, duration, pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, lastBilledTrafficGb = 0.0, freeTrafficHourlyGb = 0.0, freeTrafficDailyGb = 0.0, freeTrafficWeeklyGb = 0.0, freeTrafficMonthlyGb = 0.0, sshKeyId = null, status = 'active') {
+async function recordPurchase(
+    telegramId,
+    serverId,
+    datacenter,
+    serverName,
+    flavorId,
+    amount,
+    duration,
+    pricePerGb,
+    downloadOnly,
+    bootVolumeId,
+    bootMethod,
+    osLabel,
+    lastBilledTrafficGb = 0.0,
+    freeTrafficHourlyGb = 0.0,
+    freeTrafficDailyGb = 0.0,
+    freeTrafficWeeklyGb = 0.0,
+    freeTrafficMonthlyGb = 0.0,
+    sshKeyId = null,
+    status = 'active',
+    billingAmountVersion = 1,
+    lifecycle = {}
+) {
     const conn = await pool.getConnection();
+
     try {
+        const publicIp = lifecycle?.publicIp || null;
+        const providerActionId = lifecycle?.providerActionId || null;
+        const deliveredAt = lifecycle?.deliveredAt || null;
+
         const values = [
-            serverId, String(telegramId), datacenter, serverName, flavorId, amount, duration,
-            pricePerGb, downloadOnly, bootVolumeId, bootMethod, osLabel, status,
-            lastBilledTrafficGb, freeTrafficHourlyGb, freeTrafficDailyGb,
-            freeTrafficWeeklyGb, freeTrafficMonthlyGb, sshKeyId
+            serverId,
+            String(telegramId),
+            datacenter,
+            serverName,
+            flavorId,
+            amount,
+            duration,
+            pricePerGb,
+            downloadOnly,
+            bootVolumeId,
+            bootMethod,
+            osLabel,
+            status,
+            lastBilledTrafficGb,
+            freeTrafficHourlyGb,
+            freeTrafficDailyGb,
+            freeTrafficWeeklyGb,
+            freeTrafficMonthlyGb,
+            sshKeyId,
+            Number(billingAmountVersion || 1),
+            publicIp,
+            providerActionId,
+            deliveredAt
         ];
 
-
         await conn.execute(
-  `INSERT INTO purchases (
-     server_id, telegram_id, datacenter, server_name,
-     flavor_id, amount, duration, price_per_gb, download_only,
-     boot_volume_id, boot_method, os_label, status,
-     last_billed_traffic_gb, free_traffic_hourly_gb, free_traffic_daily_gb,
-     free_traffic_weekly_gb, free_traffic_monthly_gb, ssh_key_id,
-     created_at, last_billed_at
-   )
-   VALUES (
-     ?, ?, ?, ?,
-     ?, ?, ?, ?, ?,
-     ?, ?, ?, ?,
-     ?, ?, ?,
-     ?, ?, ?,
-     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-   )
-   ON DUPLICATE KEY UPDATE
-     telegram_id = VALUES(telegram_id),
-     datacenter = VALUES(datacenter),
-     server_name = VALUES(server_name),
-     flavor_id = VALUES(flavor_id),
-     amount = VALUES(amount),
-     duration = VALUES(duration),
-     price_per_gb = VALUES(price_per_gb),
-     download_only = VALUES(download_only),
-     boot_volume_id = VALUES(boot_volume_id),
-     boot_method = VALUES(boot_method),
-     os_label = VALUES(os_label),
-     status = VALUES(status),
-     last_billed_traffic_gb = VALUES(last_billed_traffic_gb),
-     free_traffic_hourly_gb = VALUES(free_traffic_hourly_gb),
-     free_traffic_daily_gb = VALUES(free_traffic_daily_gb),
-     free_traffic_weekly_gb = VALUES(free_traffic_weekly_gb),
-     free_traffic_monthly_gb = VALUES(free_traffic_monthly_gb),
-     ssh_key_id = VALUES(ssh_key_id),
-     updated_at = CURRENT_TIMESTAMP`,
-  values
-);
-
+            `INSERT INTO purchases (
+               server_id,
+               telegram_id,
+               datacenter,
+               server_name,
+               flavor_id,
+               amount,
+               duration,
+               price_per_gb,
+               download_only,
+               boot_volume_id,
+               boot_method,
+               os_label,
+               status,
+               last_billed_traffic_gb,
+               free_traffic_hourly_gb,
+               free_traffic_daily_gb,
+               free_traffic_weekly_gb,
+               free_traffic_monthly_gb,
+               ssh_key_id,
+               billing_amount_version,
+               public_ip,
+               provider_action_id,
+               delivered_at,
+               lifecycle_updated_at,
+               created_at,
+               last_billed_at
+             )
+             VALUES (
+               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               CURRENT_TIMESTAMP,
+               CURRENT_TIMESTAMP,
+               CURRENT_TIMESTAMP
+             )
+             ON DUPLICATE KEY UPDATE
+               telegram_id = VALUES(telegram_id),
+               datacenter = VALUES(datacenter),
+               server_name = VALUES(server_name),
+               flavor_id = VALUES(flavor_id),
+               amount = VALUES(amount),
+               duration = VALUES(duration),
+               price_per_gb = VALUES(price_per_gb),
+               download_only = VALUES(download_only),
+               boot_volume_id = VALUES(boot_volume_id),
+               boot_method = VALUES(boot_method),
+               os_label = VALUES(os_label),
+               status = VALUES(status),
+               last_billed_traffic_gb = VALUES(last_billed_traffic_gb),
+               free_traffic_hourly_gb = VALUES(free_traffic_hourly_gb),
+               free_traffic_daily_gb = VALUES(free_traffic_daily_gb),
+               free_traffic_weekly_gb = VALUES(free_traffic_weekly_gb),
+               free_traffic_monthly_gb = VALUES(free_traffic_monthly_gb),
+               ssh_key_id = VALUES(ssh_key_id),
+               billing_amount_version = VALUES(billing_amount_version),
+               public_ip = VALUES(public_ip),
+               provider_action_id = VALUES(provider_action_id),
+               delivered_at = VALUES(delivered_at),
+               lifecycle_updated_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP`,
+            values
+        );
     } finally {
         conn.release();
     }
@@ -549,7 +612,7 @@ async function getUserActivePurchases(telegramId) {
         const [rows] = await conn.execute(
             `SELECT * FROM purchases
              WHERE telegram_id = ?
-               AND (status IS NULL OR status NOT IN ('deleted','cancelled'))
+               AND (status IS NULL OR status NOT IN ('deleted','cancelled','provider_missing'))
              ORDER BY created_at DESC`,
             [String(telegramId)]
         );
@@ -577,7 +640,12 @@ async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, am
     try {
         const [res] = await conn.execute(
             `UPDATE purchases
-             SET flavor_id = ?, amount = ?, status = 'active', updated_at = CURRENT_TIMESTAMP
+             SET flavor_id = ?,
+                 amount = ?,
+                 billing_amount_version = 2,
+                 status = 'active',
+                 lifecycle_updated_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
              WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`,
             [flavorId, amount, String(telegramId), String(serverId), datacenter]
         );
@@ -629,6 +697,25 @@ async function recordTestServer(telegramId, datacenter, serverId, bootVolumeId) 
     }
 }
 
+
+async function getUserActiveTestServers(telegramId) {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT telegram_id, datacenter, server_id, boot_volume_id, used_at
+             FROM test_servers
+             WHERE telegram_id = ?
+               AND server_id IS NOT NULL
+               AND server_id <> ''
+             ORDER BY used_at DESC`,
+            [String(telegramId)]
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
 async function deleteTestServer(serverId) {
     const conn = await pool.getConnection();
     try {
@@ -653,52 +740,72 @@ async function getAllPurchases() {
 
 
 
-async function updatePurchaseStatus(serverId, newStatus, newLastBilledTrafficGb = undefined, newLastBilledAt = undefined) {
+async function updatePurchaseStatus(
+  serverId,
+  newStatus,
+  newLastBilledTrafficGb = undefined,
+  newLastBilledAt = undefined
+) {
   const conn = await pool.getConnection();
+
   try {
-    let sql = 'UPDATE purchases SET status = ?, updated_at = CURRENT_TIMESTAMP';
+    const normalizedStatus = String(newStatus || '').toLowerCase();
+    let sql = `
+      UPDATE purchases
+      SET status = ?,
+          lifecycle_updated_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+    `;
     const params = [newStatus];
 
-    // فقط وقتی مقدار واقعی داریم ست کن (نه null و نه undefined)
-    if (newLastBilledTrafficGb !== undefined && newLastBilledTrafficGb !== null) {
+    if (
+      newLastBilledTrafficGb !== undefined &&
+      newLastBilledTrafficGb !== null
+    ) {
       sql += ', last_billed_traffic_gb = ?';
       params.push(newLastBilledTrafficGb);
     }
 
-    if (newLastBilledAt !== undefined && newLastBilledAt !== null) {
+    if (
+      newLastBilledAt !== undefined &&
+      newLastBilledAt !== null
+    ) {
       const formattedDate =
         newLastBilledAt instanceof Date
-          ? newLastBilledAt.toISOString().slice(0, 19).replace('T', ' ')
-          : newLastBilledAt; // فرض: رشتهٔ 'YYYY-MM-DD hh:mm:ss'
+          ? newLastBilledAt
+              .toISOString()
+              .slice(0, 19)
+              .replace('T', ' ')
+          : newLastBilledAt;
+
       sql += ', last_billed_at = ?';
       params.push(formattedDate);
+    } else if (
+      newLastBilledTrafficGb !== undefined &&
+      newLastBilledTrafficGb !== null
+    ) {
+      sql += ', last_billed_at = NOW()';
     }
 
-    // اگر اصلاً newLastBilledAt پاس داده نشد ولی داریم بیلینگ می‌کنیم،
-    // بهتره خودمون NOW() ست کنیم. راه امن: یک فلگ اختیاری از کالِر بگیری،
-    // ولی اگر نمی‌گیری، می‌تونی این راه ساده رو بذاری:
     if (
-      (newLastBilledAt === undefined || newLastBilledAt === null) &&
-      (newLastBilledTrafficGb !== undefined && newLastBilledTrafficGb !== null)
+      normalizedStatus === 'deleted' ||
+      normalizedStatus === 'provider_missing'
     ) {
-      // چون ترافیک/شارژ ثبت می‌شه، زمان بیلینگ هم جلو بره
-      sql += ', last_billed_at = NOW()';
-      // اینجا پارامتر اضافه نمی‌کنیم
+      sql += `
+        , auto_renew = 0
+        , auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW())
+        , deleted_at = COALESCE(deleted_at, NOW())
+      `;
     }
 
     sql += ' WHERE server_id = ?';
     params.push(serverId);
-
-    // (اختیاری) لاگِ دیباگ دقیق‌تر
-    // console.log('updatePurchaseStatus SQL:', sql);
-    // console.log('updatePurchaseStatus params:', params);
 
     await conn.execute(sql, params);
   } finally {
     conn.release();
   }
 }
-
 
 async function updatePurchaseOsLabel(serverId, newOsLabel) {
     const conn = await pool.getConnection();
@@ -744,19 +851,183 @@ async function updatePurchaseFreeTraffic(serverId, cycle, amountGb) {
     }
 }
 
-async function updatePurchaseCycle(serverId, newDuration) {
+async function updatePurchaseCycle(
+  serverId,
+  newDuration,
+  newAmount,
+  billingAmountVersion = 2
+) {
     const conn = await pool.getConnection();
+
     try {
         await conn.execute(
-            'UPDATE purchases SET duration = ?, last_billed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE server_id = ?',
-            [newDuration, serverId]
+            `UPDATE purchases
+             SET duration = ?,
+                 amount = ?,
+                 billing_amount_version = ?,
+                 last_billed_at = CURRENT_TIMESTAMP,
+                 lifecycle_updated_at = CURRENT_TIMESTAMP,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE server_id = ?`,
+            [
+              newDuration,
+              Number(newAmount || 0),
+              Number(billingAmountVersion || 2),
+              serverId
+            ]
         );
     } catch (error) {
-        console.error(`[DB_UPDATE_CYCLE_ERROR] Failed to update cycle for server ${serverId}:`, error);
+        console.error(
+          `[DB_UPDATE_CYCLE_ERROR] Failed to update cycle for server ${serverId}:`,
+          error
+        );
         throw error;
     } finally {
         conn.release();
     }
+}
+
+
+async function changePurchaseCycleAtomic({
+  telegramId,
+  serverId,
+  datacenter,
+  expectedCurrentCycle,
+  newCycle,
+  newAmount,
+  walletDifference,
+  serverName
+}) {
+  const conn = await pool.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [purchaseRows] = await conn.execute(
+      `SELECT duration, status
+       FROM purchases
+       WHERE telegram_id = ?
+         AND server_id = ?
+         AND datacenter = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [
+        String(telegramId),
+        String(serverId),
+        String(datacenter)
+      ]
+    );
+
+    if (!purchaseRows.length) {
+      const error = new Error('PURCHASE_NOT_FOUND');
+      error.code = 'PURCHASE_NOT_FOUND';
+      throw error;
+    }
+
+    if (
+      String(purchaseRows[0].duration) !==
+      String(expectedCurrentCycle)
+    ) {
+      const error = new Error('PURCHASE_CYCLE_CHANGED');
+      error.code = 'PURCHASE_CYCLE_CHANGED';
+      throw error;
+    }
+
+    const [userRows] = await conn.execute(
+      `SELECT wallet
+       FROM users
+       WHERE telegram_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [String(telegramId)]
+    );
+
+    if (!userRows.length) {
+      const error = new Error('USER_NOT_FOUND');
+      error.code = 'USER_NOT_FOUND';
+      throw error;
+    }
+
+    const difference = Math.round(
+      Number(walletDifference || 0)
+    );
+    const currentWallet = Number(userRows[0].wallet || 0);
+
+    if (difference > 0 && currentWallet < difference) {
+      const error = new Error('INSUFFICIENT_WALLET');
+      error.code = 'INSUFFICIENT_WALLET';
+      throw error;
+    }
+
+    if (difference !== 0) {
+      await conn.execute(
+        `UPDATE users
+         SET wallet = wallet - ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE telegram_id = ?`,
+        [difference, String(telegramId)]
+      );
+
+      await conn.execute(
+        `INSERT INTO wallet_logs
+           (telegram_id, amount, description, type)
+         VALUES (?, ?, ?, ?)`,
+        [
+          String(telegramId),
+          -difference,
+          difference > 0
+            ? `تغییر دوره سرور ${serverName || serverId} از ${expectedCurrentCycle} به ${newCycle}`
+            : `اعتبار باقیمانده تغییر دوره سرور ${serverName || serverId} از ${expectedCurrentCycle} به ${newCycle}`,
+          difference > 0
+            ? 'billing_cycle_change'
+            : 'billing_cycle_refund'
+        ]
+      );
+    }
+
+    const [updateResult] = await conn.execute(
+      `UPDATE purchases
+       SET duration = ?,
+           amount = ?,
+           billing_amount_version = 2,
+           last_billed_at = CURRENT_TIMESTAMP,
+           lifecycle_updated_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE telegram_id = ?
+         AND server_id = ?
+         AND datacenter = ?
+         AND duration = ?`,
+      [
+        String(newCycle),
+        Number(newAmount || 0),
+        String(telegramId),
+        String(serverId),
+        String(datacenter),
+        String(expectedCurrentCycle)
+      ]
+    );
+
+    if (updateResult.affectedRows !== 1) {
+      const error = new Error('PURCHASE_CYCLE_CONCURRENT_UPDATE');
+      error.code = 'PURCHASE_CYCLE_CONCURRENT_UPDATE';
+      throw error;
+    }
+
+    await conn.commit();
+
+    return {
+      previousCycle: String(expectedCurrentCycle),
+      newCycle: String(newCycle),
+      newAmount: Number(newAmount || 0),
+      walletDifference: difference,
+      newWallet: currentWallet - difference
+    };
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 async function storeKeyPair(telegramId, serverId, keyName, privateKey) {
@@ -1255,7 +1526,37 @@ async function createApiClient({ telegramId, name, notes = null, maxServers = 2,
     return getApiClientById(r.insertId);
 }
 async function listApiClients() {
-    const [rows] = await pool.execute(`SELECT c.*, u.wallet, COUNT(DISTINCT CASE WHEN k.is_active=1 THEN k.id END) active_keys, MAX(k.last_used_at) last_used_at, COUNT(DISTINCT CASE WHEN p.status NOT IN ('deleted','deletion_pending','provider_missing') THEN p.server_id END) active_servers FROM api_clients c LEFT JOIN users u ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci LEFT JOIN api_keys k ON k.client_id=c.id LEFT JOIN purchases p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci AND p.datacenter IN (${hetznerDatacenterSqlList}) GROUP BY c.id ORDER BY c.created_at DESC`);
+    const [rows] = await pool.execute(`
+        SELECT
+            c.*,
+            COALESCE(u.wallet, 0) AS wallet,
+            COALESCE(k.active_keys, 0) AS active_keys,
+            k.last_used_at,
+            COALESCE(p.active_servers, 0) AS active_servers
+        FROM api_clients c
+        LEFT JOIN users u
+          ON u.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci
+        LEFT JOIN (
+            SELECT
+                client_id,
+                COUNT(DISTINCT CASE WHEN is_active = 1 THEN id END) AS active_keys,
+                MAX(last_used_at) AS last_used_at
+            FROM api_keys
+            GROUP BY client_id
+        ) k ON k.client_id = c.id
+        LEFT JOIN (
+            SELECT
+                telegram_id,
+                COUNT(DISTINCT CASE
+                    WHEN status NOT IN ('deleted','deletion_pending','provider_missing')
+                    THEN server_id
+                END) AS active_servers
+            FROM purchases
+            WHERE datacenter IN (${hetznerDatacenterSqlList})
+            GROUP BY telegram_id
+        ) p ON p.telegram_id COLLATE utf8mb4_unicode_ci = c.telegram_id COLLATE utf8mb4_unicode_ci
+        ORDER BY c.created_at DESC
+    `);
     return rows;
 }
 async function getApiClientById(clientId) {
@@ -1287,46 +1588,323 @@ async function authenticateApiKey(rawKey) {
 }
 async function recordApiRequestLog({ clientId=null, telegramId=null, keyPrefix=null, method='', path='', statusCode=null, ip='', userAgent='', requestId='', errorMessage=null }) { await pool.execute(`INSERT INTO api_request_logs (client_id,telegram_id,key_prefix,method,path,status_code,ip,user_agent,request_id,error_message) VALUES (?,?,?,?,?,?,?,?,?,?)`, [clientId, telegramId, keyPrefix, method, path, statusCode, ip, userAgent, requestId, errorMessage]); }
 async function getApiClientActiveServerCount(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COUNT(*) n FROM purchases WHERE telegram_id=? AND datacenter IN (${hetznerDatacenterSqlList}) AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
-async function getApiClientMonthlySpend(clientId) { const c=await getApiClientById(clientId); if(!c)return 0; const [r]=await pool.execute(`SELECT COALESCE(SUM(amount),0) n FROM purchases WHERE telegram_id=? AND datacenter IN (${hetznerDatacenterSqlList}) AND duration='monthly' AND status NOT IN ('deleted','deletion_pending','provider_missing')`, [c.telegram_id]); return Number(r[0]?.n||0); }
+async function getApiClientMonthlySpend(clientId) {
+    const client = await getApiClientById(clientId);
+    if (!client) return 0;
+    const [rows] = await pool.execute(
+      `SELECT COALESCE(SUM(
+         CASE
+           WHEN COALESCE(billing_amount_version, 1) >= 2
+             THEN amount
+           ELSE amount * 720
+         END
+       ), 0) AS n
+       FROM purchases
+       WHERE telegram_id = ?
+         AND datacenter IN (${hetznerDatacenterSqlList})
+         AND duration = 'monthly'
+         AND status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh')`,
+      [client.telegram_id]
+    );
+    return Number(rows[0]?.n || 0);
+}
 async function getApiClientUsageSummary(clientId) { return { active_servers: await getApiClientActiveServerCount(clientId), monthly_spend: await getApiClientMonthlySpend(clientId), client: await getApiClientById(clientId) }; }
 async function listApiClientLogs(clientId, limit=100) { const [rows]=await pool.execute(`SELECT * FROM api_request_logs WHERE client_id=? ORDER BY created_at DESC LIMIT ${Math.min(Number(limit)||100,500)}`, [clientId]); return rows; }
 
 
 
+async function getPurchaseForOwner(
+  telegramId,
+  serverId,
+  datacenter
+) {
+  return getPurchaseForUserServer(
+    telegramId,
+    serverId,
+    datacenter
+  );
+}
 
-async function getPurchaseForOwner(telegramId, serverId, datacenter) {
-  const conn = await pool.getConnection();
-  try { const [rows] = await conn.execute('SELECT * FROM purchases WHERE telegram_id = ? AND server_id = ? AND datacenter = ? LIMIT 1', [String(telegramId), String(serverId), String(datacenter)]); return rows[0] || null; } finally { conn.release(); }
+async function markDeletionPending(
+  telegramId,
+  serverId,
+  datacenter
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET status = 'deletion_pending',
+         auto_renew = 0,
+         auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()),
+         lifecycle_error_code = NULL,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [String(telegramId), String(serverId), String(datacenter)]
+  );
+
+  return result.affectedRows > 0;
 }
-async function markDeletionPending(telegramId, serverId, datacenter) {
-  const conn = await pool.getConnection();
-  try { await conn.execute("UPDATE purchases SET status = 'deletion_pending', auto_renew = 0, auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()), lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?", [String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+
+async function markDeleted(
+  telegramId,
+  serverId,
+  datacenter
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET status = 'deleted',
+         auto_renew = 0,
+         auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()),
+         deleted_at = COALESCE(deleted_at, NOW()),
+         lifecycle_error_code = NULL,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [String(telegramId), String(serverId), String(datacenter)]
+  );
+
+  return result.affectedRows > 0;
 }
-async function markDeleted(telegramId, serverId, datacenter) {
-  const conn = await pool.getConnection();
-  try { await conn.execute("UPDATE purchases SET status = 'deleted', deleted_at = COALESCE(deleted_at, NOW()), lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?", [String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+
+async function restorePurchaseLifecycle(
+  telegramId,
+  serverId,
+  datacenter,
+  status,
+  autoRenew = 1
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET status = ?,
+         auto_renew = ?,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [
+      String(status || 'active'),
+      Number(autoRenew) === 1 ? 1 : 0,
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+
+  return result.affectedRows > 0;
 }
-async function restorePurchaseStatus(telegramId, serverId, datacenter, status) {
-  const conn = await pool.getConnection();
-  try { await conn.execute('UPDATE purchases SET status = ?, lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?', [status, String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+
+async function updateScopedStatus(
+  telegramId,
+  serverId,
+  datacenter,
+  status
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET status = ?,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [
+      String(status),
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+
+  return result.affectedRows > 0;
 }
-async function updateScopedStatus(telegramId, serverId, datacenter, status) { return restorePurchaseStatus(telegramId, serverId, datacenter, status); }
+
 async function listDeletionPending() {
-  const conn = await pool.getConnection();
-  try { const [rows] = await conn.execute("SELECT * FROM purchases WHERE status = 'deletion_pending'"); return rows; } finally { conn.release(); }
+  const [rows] = await pool.execute(
+    `SELECT *
+     FROM purchases
+     WHERE status = 'deletion_pending'
+     ORDER BY lifecycle_updated_at ASC, updated_at ASC`
+  );
+
+  return rows;
 }
-async function updatePublicIp(telegramId, serverId, datacenter, publicIp) {
-  const conn = await pool.getConnection();
-  try { await conn.execute('UPDATE purchases SET public_ip = ?, lifecycle_updated_at = NOW(), updated_at = NOW() WHERE telegram_id = ? AND server_id = ? AND datacenter = ?', [publicIp, String(telegramId), String(serverId), String(datacenter)]); } finally { conn.release(); }
+
+async function listPendingProvisioning() {
+  const [rows] = await pool.execute(
+    `SELECT *
+     FROM purchases
+     WHERE status IN (
+       'provisioning',
+       'pending_ip',
+       'pending_ssh',
+       'rebuilding'
+     )
+       AND (
+         LOWER(datacenter) = 'hetzner'
+         OR LOWER(datacenter) LIKE 'hetzner-%'
+       )
+     ORDER BY lifecycle_updated_at ASC, updated_at ASC`
+  );
+
+  return rows;
 }
+
+async function updatePublicIp(
+  telegramId,
+  serverId,
+  datacenter,
+  publicIp
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET public_ip = ?,
+         lifecycle_error_code = NULL,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [
+      publicIp || null,
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+
+  return result.affectedRows > 0;
+}
+
+async function markDelivered(
+  telegramId,
+  serverId,
+  datacenter,
+  publicIp
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET status = 'active',
+         public_ip = COALESCE(?, public_ip),
+         delivered_at = NOW(),
+         lifecycle_error_code = NULL,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?
+       AND delivered_at IS NULL`,
+    [
+      publicIp || null,
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+
+  return result.affectedRows === 1;
+}
+
+
+async function getAllActivePurchases() {
+    const conn = await pool.getConnection();
+    try {
+        const [rows] = await conn.execute(
+            `SELECT * FROM purchases
+             WHERE status = 'active'
+             ORDER BY created_at DESC`
+        );
+        return rows;
+    } finally {
+        conn.release();
+    }
+}
+
+async function updatePurchaseTrafficBilled(serverId, lastBilledTrafficGb, lastBilledAt = undefined) {
+    const conn = await pool.getConnection();
+    try {
+        let sql = 'UPDATE purchases SET last_billed_traffic_gb = ?, updated_at = CURRENT_TIMESTAMP';
+        const params = [Number(lastBilledTrafficGb || 0)];
+        if (lastBilledAt !== undefined && lastBilledAt !== null) {
+            const formattedDate = lastBilledAt instanceof Date
+                ? lastBilledAt.toISOString().slice(0, 19).replace('T', ' ')
+                : lastBilledAt;
+            sql += ', last_billed_at = ?';
+            params.push(formattedDate);
+        }
+        sql += ' WHERE server_id = ?';
+        params.push(String(serverId));
+        const [res] = await conn.execute(sql, params);
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
+async function adminUpdateBilling(serverId, updates = {}) {
+    const conn = await pool.getConnection();
+    try {
+        const fields = [];
+        const params = [];
+
+        if (Object.prototype.hasOwnProperty.call(updates, 'price_per_gb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.price_per_gb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'pricePerGb')) {
+            fields.push('price_per_gb = ?');
+            params.push(Number(updates.pricePerGb || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'download_only')) {
+            fields.push('download_only = ?');
+            params.push(updates.download_only ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'downloadOnly')) {
+            fields.push('download_only = ?');
+            params.push(updates.downloadOnly ? 1 : 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'duration')) {
+            fields.push('duration = ?');
+            params.push(String(updates.duration));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'amount')) {
+            fields.push('amount = ?');
+            params.push(Number(updates.amount || 0));
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'auto_renew')) {
+            fields.push('auto_renew = ?');
+            params.push(updates.auto_renew ? 1 : 0);
+        }
+
+        if (!fields.length) return false;
+
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+        params.push(String(serverId));
+
+        const [res] = await conn.execute(
+            `UPDATE purchases SET ${fields.join(', ')} WHERE server_id = ?`,
+            params
+        );
+        return res.affectedRows > 0;
+    } finally {
+        conn.release();
+    }
+}
+
 module.exports = {
     getPurchaseForOwner,
     markDeletionPending,
     markDeleted,
-    restorePurchaseStatus,
+    restorePurchaseLifecycle,
     updateScopedStatus,
     listDeletionPending,
+    listPendingProvisioning,
     updatePublicIp,
+    markDelivered,
     pool,
     pingDatabase,
     ensureAdminAuditLogsTable,
@@ -1363,6 +1941,7 @@ module.exports = {
     updatePurchaseSuspendReason,
     hasUsedFreeTestServer,
     recordTestServer,
+    getUserActiveTestServers,
     storeKeyPair,
     getKeyPair,
     deleteKeyPairFromDb,
@@ -1374,6 +1953,7 @@ module.exports = {
     updatePurchaseBilling,
     updatePurchaseFreeTraffic,
     updatePurchaseCycle,
+    changePurchaseCycleAtomic,
     updateUserShahkar,
     getPurchaseByServerId,
     getUserActivePurchases,
