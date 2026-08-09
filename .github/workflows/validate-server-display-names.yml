@@ -1,0 +1,28 @@
+name: Validate server display names
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - index.js
+      - index-core.js
+      - server-display-names.js
+      - server-display-names-bootstrap.js
+      - scripts/validate-server-display-names.js
+      - scripts/validate-production-patch.js
+      - package.json
+      - .github/workflows/validate-server-display-names.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run validate:syntax
+      - run: npm run validate:server-display-names
+      - run: npm run validate:production-patch
