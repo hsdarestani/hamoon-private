@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+// Prevent startup crashes caused by exporting database helpers that are not declared.
 const fs = require('fs');
 const source = fs.readFileSync('db.js', 'utf8');
 const m = source.match(/module\.exports\s*=\s*\{([\s\S]*?)\}\s*;?\s*$/);
