@@ -8,9 +8,14 @@ on:
       - index.js
       - index-core.js
       - hetzner-console-bootstrap.js
+      - console-session.js
+      - server.js
+      - public/console/**
       - server-display-names-bootstrap.js
       - scripts/validate-hetzner-console.js
+      - scripts/validate-novnc-console.js
       - package.json
+      - package-lock.json
       - .github/workflows/validate-hetzner-console.yml
   push:
     branches:
@@ -19,9 +24,14 @@ on:
       - index.js
       - index-core.js
       - hetzner-console-bootstrap.js
+      - console-session.js
+      - server.js
+      - public/console/**
       - server-display-names-bootstrap.js
       - scripts/validate-hetzner-console.js
+      - scripts/validate-novnc-console.js
       - package.json
+      - package-lock.json
       - .github/workflows/validate-hetzner-console.yml
 
 permissions:
@@ -33,7 +43,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci --ignore-scripts
       - run: npm run validate:syntax
       - run: npm run validate:hetzner-console
+      - run: npm run validate:novnc-console
       - run: npm run validate:server-display-names
       - run: npm run validate:production-patch
