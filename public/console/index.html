@@ -13,6 +13,8 @@
     body { display:flex; flex-direction:column; }
     #toolbar { min-height:56px; display:flex; gap:8px; align-items:center; padding:8px 10px; background:#101827; border-bottom:1px solid #263246; direction:rtl; }
     #brand { font-weight:700; white-space:nowrap; }
+    #loginHint { font-size:12px; color:#dbe7f8; background:#182338; border:1px solid #33445e; border-radius:8px; padding:7px 9px; white-space:nowrap; }
+    #loginHint code { color:#fff; font-weight:700; direction:ltr; unicode-bidi:isolate; }
     #status { flex:1; font-size:13px; color:#b7c5db; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     button { border:1px solid #33445e; background:#182338; color:#fff; border-radius:9px; padding:9px 11px; cursor:pointer; font:inherit; }
     button:hover { background:#22304a; }
@@ -27,6 +29,7 @@
     @media (max-width:700px) {
       #toolbar { flex-wrap:wrap; min-height:64px; }
       #brand { width:100%; }
+      #loginHint { order:2; flex:1; white-space:normal; line-height:1.6; }
       #status { order:3; width:100%; flex-basis:100%; }
       button { padding:8px 10px; }
     }
@@ -35,6 +38,7 @@
 <body>
   <div id="toolbar">
     <div id="brand">🖥 HamoonCloud Console</div>
+    <div id="loginHint">برای ورود به لینوکس: نام کاربری <code>root</code> + رمز روت سرور</div>
     <div id="status">در حال آماده‌سازی…</div>
     <button id="ctrlAltDel" type="button" disabled>Ctrl+Alt+Del</button>
     <button id="fullscreen" type="button">تمام‌صفحه</button>
