@@ -1,0 +1,62 @@
+name: Restore full production DB snapshot
+
+on:
+  push:
+    branches:
+      - fix/restore-production-db-2
+    paths:
+      - .github/workflows/restore-full-production-db.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/restore-production-db-2
+
+      - name: Rebuild exact production db.js
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+
+          expected_sha = '4c7677bdfd145d37897e873c1b5d05471d8e17dfaff1225e62d773ab9a924add'
+          expected_len = 88902
+          parts = [Path(f'.restore/db.part{i}.b64').read_text(encoding='ascii') for i in range(1, 5)]
+          raw = gzip.decompress(base64.b64decode(''.join(parts)))
+          actual_sha = hashlib.sha256(raw).hexdigest()
+          if actual_sha != expected_sha:
+              raise SystemExit(f'checksum mismatch: {actual_sha}')
+          if len(raw) != expected_len:
+              raise SystemExit(f'length mismatch: {len(raw)}')
+          Path('db.js').write_bytes(raw)
+          print(f'PRODUCTION_DB_SHA256={actual_sha}')
+          print(f'PRODUCTION_DB_BYTES={len(raw)}')
+          PY
+
+      - name: Validate production snapshot and runtime patches
+        shell: bash
+        run: |
+          node -c db.js
+          node scripts/validate-db-exports.js
+          npm run validate:syntax
+          npm run validate:server-display-names
+          npm run validate:hetzner-console
+          npm run validate:production-patch
+
+      - name: Commit clean snapshot
+        shell: bash
+        run: |
+          rm -rf .restore
+          rm -f .github/workflows/restore-full-production-db.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Restore full production database snapshot"
+          git push origin HEAD:fix/restore-production-db-2
