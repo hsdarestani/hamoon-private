@@ -10,4 +10,4 @@
 // handleRebuildConfirm
 // handleHetznerConsole
 
-module.exports = require('./hetzner-console-bootstrap').run();
+module.exports = require('./runtime-bootstrap').run();
