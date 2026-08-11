@@ -26,8 +26,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== CURRENT INDEX DELIVERY MARKERS ==='
-          grep -nE "initialStatus|resetServerPassword\(effectiveDc|waitForReadiness|pending_ssh|delivered_at|markDelivered|ping|iran|Iran" index-core.js services/hetzner-lifecycle.js db.js || true
+          echo '=== CURRENT PURCHASE FLOW ==='
+          sed -n '2360,2455p' index-core.js
+          echo '=== CURRENT LIFECYCLE ==='
+          sed -n '1,90p' services/hetzner-lifecycle.js
 
       - name: Prepare SSH
         shell: bash
@@ -38,7 +40,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect live runtime and historical backups
+      - name: Inspect historical production implementation
         shell: bash
         run: |
           set -euo pipefail
@@ -46,21 +48,22 @@ jobs:
           ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          OLD_DIR="$(find /root -maxdepth 1 -type d -name 'hamoon-image-ip-stage-20260719_150056' | head -n1)"
+          echo "OLD_DIR_FOUND=$([ -n "$OLD_DIR" ] && echo yes || echo no)"
+          if [ -z "$OLD_DIR" ]; then exit 0; fi
+
+          echo '=== OLD INDEX PURCHASE/DELIVERY FLOW ==='
+          sed -n '3090,3265p' "$OLD_DIR/index.js"
+          echo '=== OLD LIFECYCLE READINESS ==='
+          sed -n '245,335p' "$OLD_DIR/services/hetzner-lifecycle.js"
+          echo '=== OLD LIFECYCLE PROVISIONING/DELIVERY ==='
+          sed -n '535,735p' "$OLD_DIR/services/hetzner-lifecycle.js"
+          echo '=== OLD LIFECYCLE IP/REACHABILITY TERMS ==='
+          grep -nEi "check.?host|ping|iran|probe|reachable|reachability|clean|block|blacklist|ssh|password|markDelivered|delivered_at|waitForReadiness" "$OLD_DIR/services/hetzner-lifecycle.js" | head -n 260 || true
+          echo '=== OLD INDEX IP/REACHABILITY TERMS ==='
+          grep -nEi "check.?host|ping|iran|probe|reachable|reachability|clean|block|blacklist|ssh|password|markDelivered|delivered_at|waitForReadiness" "$OLD_DIR/index.js" | tail -n 260 || true
+
+          echo '=== LIVE RECENT PURCHASE LOGS ==='
           cd "$APP_PATH"
-          echo '=== LIVE COMMIT ==='
-          git rev-parse HEAD
-          git log -1 --oneline
-          echo '=== LIVE DELIVERY MARKERS ==='
-          grep -nE "initialStatus|resetServerPassword\(effectiveDc|waitForReadiness|pending_ssh|delivered_at|markDelivered|ping|iran|Iran" index-core.js services/hetzner-lifecycle.js db.js || true
-          echo '=== REFLOG RECENT ==='
-          git reflog --date=iso -n 40 || true
-          echo '=== CANDIDATE BACKUP FILES ==='
-          find /root -maxdepth 3 -type f \( -name 'index*.js*' -o -name '*hetzner*lifecycle*' -o -name '*provision*' -o -name '*readiness*' -o -name '*.patch' \) 2>/dev/null | grep -v '/node_modules/' | head -n 120 || true
-          echo '=== HISTORICAL DELIVERY/PING MARKERS ==='
-          find /root -maxdepth 3 -type f \( -name 'index*.js*' -o -name '*hetzner*lifecycle*' -o -name '*provision*' -o -name '*readiness*' -o -name '*.patch' \) -print0 2>/dev/null \
-            | xargs -0 -r grep -nEi "check.?host|ping|iran|pending_ssh|markDelivered|delivered_at|waitForReadiness|resetServerPassword" 2>/dev/null \
-            | grep -v '/node_modules/' \
-            | head -n 240 || true
-          echo '=== RECENT HETZNER CREATE/PASSWORD LOGS ==='
-          pm2 logs hamoonbot --lines 350 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|password|root_password" | tail -n 160 || true
+          pm2 logs hamoonbot --lines 450 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|readiness|ssh" | tail -n 180 || true
           REMOTE
