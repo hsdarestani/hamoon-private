@@ -1,0 +1,962 @@
+name: Apply Hetzner Delivery Guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-hetzner-delivery-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch guarded delivery flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) Preserve Hetzner create response action + original root password.
+          p = Path('Hetzner/hetzner-api.js')
+          s = p.read_text()
+          old = """    const r = await c.post('/servers', attemptPayload);\n    return r.data.server;"""
+          new = """    const r = await c.post('/servers', attemptPayload);\n    const data = r.data || {};\n    const server = data.server || {};\n    server.action = data.action || null;\n    server.root_password = data.root_password || null;\n    return server;"""
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif 'server.root_password = data.root_password || null;' not in s:
+              raise SystemExit('Hetzner create response block not found')
+          p.write_text(s)
+
+          # 2) Turn on the delivery health gate for actual Hetzner datacenters.
+          p = Path('datacenters.js')
+          s = p.read_text()
+          needle = "    HETZNER_PASSWORD_ONLY: true,\n"
+          insert = "    HETZNER_PASSWORD_ONLY: true,\n    HETZNER_PURCHASE_HEALTH_GATE: process.env.HETZNER_PURCHASE_HEALTH_GATE !== 'false',\n"
+          if 'HETZNER_PURCHASE_HEALTH_GATE:' not in s:
+              if needle not in s: raise SystemExit('Hetzner password-only marker not found')
+              s = s.replace(needle, insert, 1)
+          p.write_text(s)
+
+          # 3) DB state for quality gate / retries.
+          p = Path('db.js')
+          s = p.read_text()
+          marker = "        await ensureColumn(connection, 'purchases', 'lifecycle_updated_at', 'DATETIME NULL');\n"
+          extra = marker + "        await ensureColumn(connection, 'purchases', 'ip_quality_attempts', 'INT NOT NULL DEFAULT 0');\n        await ensureColumn(connection, 'purchases', 'ip_quality_checked_at', 'DATETIME NULL');\n        await ensureColumn(connection, 'purchases', 'ip_quality_summary', 'VARCHAR(255) NULL');\n"
+          if "'ip_quality_attempts'" not in s:
+              if marker not in s: raise SystemExit('DB lifecycle column marker not found')
+              s = s.replace(marker, extra, 1)
+
+          old_pending = """       'pending_ip',\n       'pending_ssh',\n       'rebuilding'"""
+          new_pending = """       'pending_ip',\n       'pending_ssh',\n       'pending_ip_quality',\n       'rebuilding'"""
+          if "'pending_ip_quality',\n       'rebuilding'" not in s:
+              if old_pending not in s: raise SystemExit('DB pending provisioning marker not found')
+              s = s.replace(old_pending, new_pending, 1)
+
+          if 'async function updateIpQualityResult(' not in s:
+              marker2 = "\n\nasync function getAllActivePurchases() {"
+              fn = r'''
+
+async function updateIpQualityResult(
+  telegramId,
+  serverId,
+  datacenter,
+  summary,
+  incrementAttempt = false
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET ip_quality_checked_at = NOW(),
+         ip_quality_summary = ?,
+         ip_quality_attempts = ip_quality_attempts + ?,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [
+      String(summary || '').slice(0, 255) || null,
+      incrementAttempt ? 1 : 0,
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+  return result.affectedRows > 0;
+}
+'''
+              if marker2 not in s: raise SystemExit('DB insertion marker not found')
+              s = s.replace(marker2, fn + marker2, 1)
+
+          old_admin = "const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];"
+          new_admin = "const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','pending_ip_quality','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];"
+          if old_admin in s:
+              s = s.replace(old_admin, new_admin, 1)
+
+          old_spend = "status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh')"
+          new_spend = "status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')"
+          if old_spend in s:
+              s = s.replace(old_spend, new_spend, 1)
+
+          export_marker = "    markDelivered,\n"
+          if '    updateIpQualityResult,\n' not in s:
+              if export_marker not in s: raise SystemExit('DB export marker not found')
+              s = s.replace(export_marker, export_marker + "    updateIpQualityResult,\n", 1)
+          p.write_text(s)
+
+          # 4) Replace lifecycle with guarded readiness + Iran/global ping validation + bounded IP rotation.
+          lifecycle = r'''const net = require('net');
+const cloud = require('../cloud-api');
+const { isHetznerConfig } = require('../provider-detector');
+
+const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
+const NON_BILLABLE_STATUSES = new Set([
+  'deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh',
+  'pending_ip_quality','provisioning_failed','manual_review','upgrading','rebuilding'
+]);
+const VALID_OPERATION_STATUSES = new Set(['active','suspended','stopped','shutoff']);
+const locks = new Set();
+const unavailable = new Map();
+const CHECK_HOST_BASE = 'https://check-host.net';
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function isBillablePurchase(p) {
+  if (!p) return false;
+  return !NON_BILLABLE_STATUSES.has(String(p.status || '').toLowerCase());
+}
+function isNotFound(err) { return Number(err?.status || err?.statusCode || err?.response?.status) === 404; }
+function safeProviderMessage(err) {
+  if (err?.code === 'HETZNER_PLACEMENT_UNAVAILABLE') return 'ظرفیت این پلن در لوکیشن انتخاب‌شده موقتاً در دسترس نیست. لطفاً پلن دیگری انتخاب کنید یا بعداً دوباره تلاش کنید.';
+  if (err?.code === 'HETZNER_INVALID_IMAGE_ARCH') return 'ایمیج انتخاب‌شده با معماری پلن سازگار نیست.';
+  return 'عملیات ارائه‌دهنده با خطا روبه‌رو شد. لطفاً کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.';
+}
+function withLock(key, fn) {
+  if (locks.has(key)) { const e = new Error('OPERATION_IN_PROGRESS'); e.code = 'OPERATION_IN_PROGRESS'; throw e; }
+  locks.add(key);
+  return Promise.resolve().then(fn).finally(() => locks.delete(key));
+}
+function cycleHours(cycle) {
+  const h = HOURS_IN_CYCLE[cycle];
+  if (!h) { const e = new Error('INVALID_BILLING_CYCLE'); e.code = 'INVALID_BILLING_CYCLE'; throw e; }
+  return h;
+}
+function getFlavorCyclePrice(plan, cycle) {
+  cycleHours(cycle);
+  const monthly = Number(plan.amount_monthly ?? plan.monthly_toman ?? plan.monthly_price_toman ?? 0);
+  const hourly = Number(plan.amount_hourly ?? plan.price ?? plan.hourly_price_toman ?? (monthly / 720));
+  if (cycle === 'hourly') return hourly;
+  if (cycle === 'daily') return hourly * 24;
+  if (cycle === 'weekly') return hourly * 168;
+  return monthly || hourly * 720;
+}
+function calculateCycleChange({ currentAmount, currentCycle, targetAmount, lastBilledAt, now = new Date() }) {
+  const elapsed = Math.max(0, (new Date(now) - new Date(lastBilledAt || now)) / 3600000);
+  const totalHours = cycleHours(currentCycle);
+  const unused = Math.max(0, totalHours - Math.min(totalHours, elapsed));
+  const credit = Number(currentAmount || 0) / totalHours * unused;
+  return { elapsedHours: elapsed, unusedHours: unused, credit, targetAmount: Number(targetAmount || 0), difference: Number(targetAmount || 0) - credit };
+}
+function architectureForServerType(type) { return String(type || '').toLowerCase().startsWith('cax') ? 'arm' : 'x86'; }
+function imageArch(img) {
+  const explicit = img?.architecture || img?.arch || img?.labels?.architecture;
+  if (explicit) return String(explicit).toLowerCase();
+  return String(img?.name || img?.id || '').toLowerCase().includes('arm') ? 'arm' : 'x86';
+}
+function filterCompatibleImages(images, serverType) {
+  const arch = architectureForServerType(serverType);
+  return (images || []).filter(i => !i.deprecated && imageArch(i).startsWith(arch));
+}
+function markPlanUnavailable(location, serverType, ttlMs = Number(process.env.HETZNER_UNAVAILABLE_PLAN_CACHE_MS || 10 * 60 * 1000)) {
+  unavailable.set(`${location}:${serverType}`.toLowerCase(), Date.now() + ttlMs);
+}
+function isPlanTemporarilyUnavailable(location, serverType) {
+  const key = `${location}:${serverType}`.toLowerCase();
+  const exp = unavailable.get(key);
+  if (!exp) return false;
+  if (exp < Date.now()) { unavailable.delete(key); return false; }
+  return true;
+}
+function filterSellablePlans(plans, { location, image, allowedTypes, disabledTypes } = {}) {
+  const allowed = new Set(String(allowedTypes || process.env.HETZNER_ALLOWED_SERVER_TYPES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+  const disabled = new Set(String(disabledTypes || process.env.HETZNER_DISABLED_SERVER_TYPES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+  const imgArch = image ? imageArch(image) : null;
+  return (plans || []).filter(p => p && p.available !== false && !p.deprecated && !p.deprecation && (!allowed.size || allowed.has(p.id)) && !disabled.has(p.id) && (!location || !isPlanTemporarilyUnavailable(location, p.id)) && (!imgArch || architectureForServerType(p.id) === imgArch));
+}
+
+async function waitTcp22(ip, timeoutMs = 300000, dial = net.createConnection) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await new Promise(resolve => {
+      const s = dial({ host: ip, port: 22, timeout: 2500 }, () => { s.destroy(); resolve(true); });
+      s.on('error', () => resolve(false));
+      s.on('timeout', () => { s.destroy(); resolve(false); });
+    })) return true;
+    await sleep(1000);
+  }
+  return false;
+}
+function publicIpv4(server) {
+  return server?.public_net?.ipv4?.ip || server?.public_ip || server?.addresses?.public?.find?.(a => Number(a.version) === 4)?.addr || null;
+}
+
+async function fetchJson(url, { fetchImpl = global.fetch, timeoutMs = 7000 } = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('FETCH_UNAVAILABLE');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, {
+      headers: { Accept: 'application/json', 'User-Agent': 'HamoonCloud/1.0' },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`CHECK_HOST_HTTP_${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function pingNodeSuccess(value) {
+  if (value === null || value === undefined) return null;
+  let sawFailure = false;
+  const visit = v => {
+    if (typeof v === 'string') {
+      const x = v.toUpperCase();
+      if (x === 'OK') return true;
+      if (x.includes('TIMEOUT') || x.includes('MALFORMED') || x.includes('ERROR') || x.includes('FAIL')) sawFailure = true;
+      return false;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) if (visit(x)) return true;
+      return false;
+    }
+    if (v && typeof v === 'object') {
+      for (const x of Object.values(v)) if (visit(x)) return true;
+    }
+    return false;
+  };
+  if (visit(value)) return true;
+  return sawFailure || value !== null ? false : null;
+}
+
+function selectCheckHostNodes(payload, { iranCount = 4, globalCount = 6 } = {}) {
+  const entries = Object.entries(payload?.nodes || {}).filter(([, meta]) => Array.isArray(meta?.location));
+  const iranAll = entries.filter(([, meta]) => String(meta.location[0] || '').toLowerCase() === 'ir');
+  const iran = [];
+  const iranCities = new Set();
+  for (const [name, meta] of iranAll) {
+    const city = String(meta.location[2] || '').toLowerCase();
+    if (iran.length < iranCount && (!city || !iranCities.has(city))) {
+      iran.push(name); if (city) iranCities.add(city);
+    }
+  }
+  for (const [name] of iranAll) if (iran.length < iranCount && !iran.includes(name)) iran.push(name);
+
+  const priority = ['de','nl','gb','us','fi','fr','sg','ca','ch','se','pl','tr','jp','au'];
+  const outside = entries.filter(([, meta]) => String(meta.location[0] || '').toLowerCase() !== 'ir');
+  const global = [];
+  const usedCountries = new Set();
+  for (const cc of priority) {
+    const found = outside.find(([name, meta]) => String(meta.location[0] || '').toLowerCase() === cc && !global.includes(name));
+    if (found && global.length < globalCount) { global.push(found[0]); usedCountries.add(cc); }
+  }
+  for (const [name, meta] of outside) {
+    if (global.length >= globalCount) break;
+    const cc = String(meta.location[0] || '').toLowerCase();
+    if (!usedCountries.has(cc)) { global.push(name); usedCountries.add(cc); }
+  }
+  return { iran, global };
+}
+
+function qualitySummary(q) {
+  if (!q) return 'quality=unknown';
+  return `iran=${q.iran?.success || 0}/${q.iran?.selected || 0};global=${q.global?.success || 0}/${q.global?.selected || 0};reason=${q.reason || (q.ok ? 'ok' : 'unknown')}`.slice(0, 255);
+}
+
+async function checkIpQuality(ip, options = {}) {
+  const iranCount = Math.max(2, Number(options.iranCount ?? process.env.HETZNER_IP_QUALITY_IR_NODES ?? 4));
+  const iranMin = Math.max(1, Number(options.iranMin ?? process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS ?? 3));
+  const globalCount = Math.max(3, Number(options.globalCount ?? process.env.HETZNER_IP_QUALITY_GLOBAL_NODES ?? 6));
+  const globalRatio = Math.min(1, Math.max(0.5, Number(options.globalRatio ?? process.env.HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO ?? 0.67)));
+  const polls = Math.max(2, Number(options.polls ?? 6));
+  const pollDelayMs = Math.max(250, Number(options.pollDelayMs ?? 1500));
+  const fetchImpl = options.fetchImpl || global.fetch;
+  try {
+    const nodePayload = options.nodesPayload || await fetchJson(`${CHECK_HOST_BASE}/nodes/hosts`, { fetchImpl, timeoutMs: 7000 });
+    const selected = selectCheckHostNodes(nodePayload, { iranCount, globalCount });
+    if (selected.iran.length < 2 || selected.global.length < 3) {
+      return { ok: false, checked: false, definitive: false, reason: 'probe_nodes_unavailable', iran: { selected: selected.iran.length, success: 0, completed: 0 }, global: { selected: selected.global.length, success: 0, completed: 0 } };
+    }
+    const allNodes = [...selected.iran, ...selected.global];
+    const u = new URL(`${CHECK_HOST_BASE}/check-ping`);
+    u.searchParams.set('host', ip);
+    for (const node of allNodes) u.searchParams.append('node', node);
+    const request = await fetchJson(u.toString(), { fetchImpl, timeoutMs: 7000 });
+    if (!request?.ok || !request?.request_id) throw new Error('CHECK_HOST_REQUEST_REJECTED');
+
+    let result = {};
+    for (let i = 0; i < polls; i += 1) {
+      if (i) await sleep(pollDelayMs);
+      result = await fetchJson(`${CHECK_HOST_BASE}/check-result/${encodeURIComponent(request.request_id)}`, { fetchImpl, timeoutMs: 7000 });
+      const completed = allNodes.filter(n => pingNodeSuccess(result?.[n]) !== null).length;
+      if (completed === allNodes.length) break;
+    }
+    const count = names => {
+      const states = names.map(n => pingNodeSuccess(result?.[n]));
+      return { selected: names.length, success: states.filter(v => v === true).length, failed: states.filter(v => v === false).length, completed: states.filter(v => v !== null).length };
+    };
+    const iran = count(selected.iran);
+    const global = count(selected.global);
+    const iranRequired = Math.min(iran.selected, iranMin);
+    const globalRequired = Math.max(1, Math.ceil(global.selected * globalRatio));
+    const ok = iran.success >= iranRequired && global.success >= globalRequired;
+    const iranImpossible = iran.success + (iran.selected - iran.completed) < iranRequired;
+    const globalImpossible = global.success + (global.selected - global.completed) < globalRequired;
+    const definitive = ok || iranImpossible || globalImpossible || (iran.completed === iran.selected && global.completed === global.selected);
+    return { ok, checked: true, definitive, reason: ok ? 'ok' : (definitive ? 'failed_threshold' : 'insufficient_results'), iran: { ...iran, required: iranRequired }, global: { ...global, required: globalRequired } };
+  } catch (error) {
+    return { ok: false, checked: false, definitive: false, reason: `probe_error:${String(error?.message || error).slice(0, 80)}`, iran: { selected: 0, success: 0, completed: 0 }, global: { selected: 0, success: 0, completed: 0 } };
+  }
+}
+
+function shouldRequireIpQuality(dc, explicit) {
+  if (explicit !== undefined) return Boolean(explicit);
+  return dc?.HETZNER_PURCHASE_HEALTH_GATE === true && process.env.HETZNER_IP_QUALITY_REQUIRED !== 'false';
+}
+
+async function waitForReadiness(dc, serverId, { waitActionId, timeoutMs = 300000, waitTcp = waitTcp22, checkQuality = checkIpQuality, requireIpQuality } = {}) {
+  if (waitActionId) await cloud.waitHetznerAction(dc, waitActionId, timeoutMs);
+  const start = Date.now();
+  let server = null, ip = null;
+  while (Date.now() - start < timeoutMs) {
+    server = await cloud.getServer(dc, null, serverId);
+    ip = publicIpv4(server);
+    if (String(server?.status || '').toLowerCase() === 'running' && ip) {
+      const remaining = Math.max(1000, timeoutMs - (Date.now() - start));
+      const reachable = await waitTcp(ip, Math.min(30000, remaining));
+      if (reachable) {
+        if (!shouldRequireIpQuality(dc, requireIpQuality)) return { server, ip, status: 'active', ready: true, quality: { ok: true, skipped: true, reason: 'not_required' } };
+        const quality = await checkQuality(ip);
+        if (quality?.ok) return { server, ip, status: 'active', ready: true, quality };
+        return { server, ip, status: 'pending_ip_quality', ready: false, quality };
+      }
+    }
+    await sleep(3000);
+  }
+  return { server, ip, status: ip ? 'pending_ssh' : 'pending_ip', ready: false, quality: null };
+}
+
+async function waitActionMaybe(dc, action) {
+  const id = action?.id || action?.action?.id;
+  if (id) await cloud.waitHetznerAction(dc, id, 180000);
+}
+
+async function rotateProvisioningIp({ dc, serverId }) {
+  const provider = cloud.pick(dc);
+  if (typeof provider.getHetznerServer !== 'function') throw new Error('HETZNER_RAW_SERVER_UNAVAILABLE');
+  const raw = await provider.getHetznerServer(dc, serverId);
+  const oldIpId = raw?.public_net?.ipv4?.id;
+  const oldIp = raw?.public_net?.ipv4?.ip;
+  const location = raw?.datacenter?.location?.name || dc?.HETZNER_LOCATION;
+  if (!oldIpId || !location) throw new Error('HETZNER_PRIMARY_IP_METADATA_MISSING');
+  const newIp = await cloud.createPrimaryIpv4(dc, null, location);
+  if (!newIp?.id || !newIp?.ip) throw new Error('HETZNER_NEW_IP_CREATE_FAILED');
+  let oldUnassigned = false;
+  let newAssigned = false;
+  try {
+    if (!['off','stopped'].includes(String(raw?.status || '').toLowerCase())) await waitActionMaybe(dc, await cloud.powerOffHetznerServer(dc, serverId));
+    await waitActionMaybe(dc, await cloud.unassignPrimaryIp(dc, null, oldIpId));
+    oldUnassigned = true;
+    await waitActionMaybe(dc, await cloud.assignPrimaryIp(dc, null, newIp.id, serverId));
+    newAssigned = true;
+    await cloud.deletePrimaryIp(dc, null, oldIpId);
+    await waitActionMaybe(dc, await cloud.powerOnHetznerServer(dc, serverId));
+    return { oldIp, newIp: newIp.ip, newIpId: newIp.id };
+  } catch (error) {
+    try {
+      if (newAssigned) {
+        await waitActionMaybe(dc, await cloud.unassignPrimaryIp(dc, null, newIp.id));
+        await waitActionMaybe(dc, await cloud.assignPrimaryIp(dc, null, oldIpId, serverId));
+      } else if (oldUnassigned) {
+        await waitActionMaybe(dc, await cloud.assignPrimaryIp(dc, null, oldIpId, serverId));
+      }
+      await cloud.deletePrimaryIp(dc, null, newIp.id).catch(() => null);
+      await waitActionMaybe(dc, await cloud.powerOnHetznerServer(dc, serverId)).catch(() => null);
+    } catch (_) {}
+    throw error;
+  }
+}
+
+async function deletePurchaseServer({ db, dc, telegramId, serverId, datacenter }) {
+  if (!isHetznerConfig(dc)) throw new Error('NOT_HETZNER');
+  const purchase = await db.getPurchaseForOwner?.(telegramId, serverId, datacenter);
+  if (!purchase) { const e = new Error('NOT_FOUND'); e.code = 'NOT_FOUND'; throw e; }
+  const previous = purchase.status || 'active';
+  await db.markDeletionPending?.(telegramId, serverId, datacenter, previous);
+  try {
+    await cloud.deleteServer(dc, null, serverId);
+    await db.markDeleted?.(telegramId, serverId, datacenter);
+    return { status: 'deleted' };
+  } catch (e) {
+    if (isNotFound(e)) { await db.markDeleted?.(telegramId, serverId, datacenter); return { status: 'deleted' }; }
+    await db.restorePurchaseStatus?.(telegramId, serverId, datacenter, previous);
+    e.safeMessage = safeProviderMessage(e);
+    throw e;
+  }
+}
+
+async function reconcileDeletionPending({ db, dc }) {
+  const rows = await db.listDeletionPending?.();
+  const out = [];
+  for (const p of rows || []) {
+    try {
+      await cloud.getServer(dc, null, p.server_id);
+      out.push({ server_id: p.server_id, status: 'manual_review_provider_still_exists' });
+    } catch (e) {
+      if (isNotFound(e)) { await db.markDeleted?.(p.telegram_id, p.server_id, p.datacenter); out.push({ server_id: p.server_id, status: 'deleted' }); }
+      else out.push({ server_id: p.server_id, status: 'check_failed' });
+    }
+  }
+  return out;
+}
+
+async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000, maxIpRotations = Number(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS || 3) }) {
+  const rows = await db.listPendingProvisioning?.();
+  const results = [];
+  const deliveryStatuses = new Set(['provisioning','pending_ip','pending_ssh','pending_ip_quality']);
+  for (const purchase of rows || []) {
+    const dc = resolveDatacenter(purchase.datacenter, purchase);
+    if (!dc || !isHetznerConfig(dc)) { results.push({ server_id: purchase.server_id, status: 'missing_datacenter' }); continue; }
+    const isDelivery = deliveryStatuses.has(String(purchase.status || '').toLowerCase());
+    try {
+      if (isDelivery && dc.HETZNER_PASSWORD_ONLY) {
+        const stored = await db.getServerSecret?.(purchase.server_id, 'root_password').catch(() => null);
+        if (!stored) {
+          await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
+          results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'manual_review', reason: 'password_missing' });
+          continue;
+        }
+      }
+
+      const readiness = await waitForReadiness(dc, purchase.server_id, { timeoutMs });
+      if (readiness.quality && db.updateIpQualityResult) {
+        await db.updateIpQualityResult(purchase.telegram_id, purchase.server_id, purchase.datacenter, qualitySummary(readiness.quality), false);
+      }
+
+      if (readiness.ready) {
+        let newlyDelivered = false;
+        if (isDelivery) newlyDelivered = Boolean(await db.markDelivered?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, readiness.ip));
+        else await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'active');
+        results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, previous_status: purchase.status, status: 'active', ready: true, newly_delivered: newlyDelivered, ip: readiness.ip, quality: readiness.quality });
+        continue;
+      }
+
+      await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, readiness.status);
+      if (readiness.status === 'pending_ip_quality' && readiness.quality?.definitive) {
+        const attempts = Number(purchase.ip_quality_attempts || 0);
+        if (attempts >= maxIpRotations) {
+          await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
+          results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'manual_review', reason: 'ip_quality_exhausted', quality: readiness.quality });
+          continue;
+        }
+        await db.updateIpQualityResult?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, qualitySummary(readiness.quality), true);
+        try {
+          const rotated = await rotateProvisioningIp({ dc, serverId: purchase.server_id });
+          await db.updatePublicIp?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, rotated.newIp);
+          await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'pending_ssh');
+          results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'pending_ssh', ready: false, ip_rotated: true, quality: readiness.quality });
+          continue;
+        } catch (rotationError) {
+          if (attempts + 1 >= maxIpRotations) await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
+          results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: attempts + 1 >= maxIpRotations ? 'manual_review' : 'pending_ip_quality', ready: false, reason: 'ip_rotation_failed', error: String(rotationError?.message || rotationError).slice(0, 120) });
+          continue;
+        }
+      }
+      results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, previous_status: purchase.status, status: readiness.status, ready: false, ip: readiness.ip || null, quality: readiness.quality });
+    } catch (error) {
+      if (isNotFound(error)) {
+        await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'provider_missing');
+        results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'provider_missing', ready: false });
+      } else results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'check_failed', ready: false, error: String(error?.message || error).slice(0, 120) });
+    }
+  }
+  return results;
+}
+
+async function rebuildServerLifecycle({ db, dc, telegramId, serverId, datacenter, imageId, waitOptions }) {
+  return withLock(`rebuild:${datacenter}:${serverId}`, async () => {
+    const p = await db.getPurchaseForOwner?.(telegramId, serverId, datacenter);
+    if (!p) throw Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' });
+    await db.updateScopedStatus?.(telegramId, serverId, datacenter, 'rebuilding');
+    const r = await cloud.rebuildServer(dc, null, serverId, imageId);
+    const ready = await waitForReadiness(dc, serverId, { waitActionId: r?.action?.id || r?.id, ...(waitOptions || {}) });
+    await db.updatePurchaseOsLabel?.(serverId, imageId);
+    await db.updateScopedStatus?.(telegramId, serverId, datacenter, ready.ready ? 'active' : ready.status);
+    return { ok: ready.ready, status: ready.status, ip: ready.ip || null, root_password: r?.root_password || null };
+  });
+}
+
+async function changePublicIpLifecycle({ db, dc, telegramId, serverId, datacenter, provider, waitOptions }) {
+  return withLock(`change-ip:${datacenter}:${serverId}`, async () => {
+    const p = await db.getPurchaseForOwner?.(telegramId, serverId, datacenter);
+    if (!p || !VALID_OPERATION_STATUSES.has(String(p.status))) throw Object.assign(new Error('CONFLICT'), { code: 'CONFLICT' });
+    const s = await provider.getServer(serverId);
+    const oldIpId = s.primary_ipv4_id;
+    const oldIp = s.public_ip;
+    const newIp = await provider.createPrimaryIpv4(s.location);
+    try {
+      await provider.powerOff(serverId); await provider.waitAction('poweroff');
+      await provider.unassignPrimaryIp(oldIpId); await provider.assignPrimaryIp(newIp.id, serverId); await provider.deletePrimaryIp(oldIpId, { onlyIfUnassigned: true });
+      await provider.powerOn(serverId);
+      const ready = await waitForReadiness(dc, serverId, waitOptions || {});
+      await db.updatePublicIp?.(telegramId, serverId, datacenter, ready.ip || newIp.ip);
+      return { status: ready.ready ? 'active' : ready.status, old_ip: oldIp, new_ip: ready.ip || newIp.ip };
+    } catch (e) {
+      try { await provider.assignPrimaryIp(oldIpId, serverId); if (newIp?.id) await provider.deletePrimaryIp(newIp.id, { onlyIfUnassigned: true }); }
+      catch { await db.updateScopedStatus?.(telegramId, serverId, datacenter, 'manual_review'); }
+      throw Object.assign(new Error('CHANGE_IP_FAILED'), { code: 'CHANGE_IP_FAILED' });
+    }
+  });
+}
+
+module.exports = {
+  HOURS_IN_CYCLE, NON_BILLABLE_STATUSES, isBillablePurchase, getFlavorCyclePrice, calculateCycleChange,
+  architectureForServerType, filterCompatibleImages, filterSellablePlans, markPlanUnavailable,
+  isPlanTemporarilyUnavailable, waitForReadiness, checkIpQuality, pingNodeSuccess, selectCheckHostNodes,
+  qualitySummary, rotateProvisioningIp, deletePurchaseServer, reconcileDeletionPending, reconcileProvisioning,
+  rebuildServerLifecycle, changePublicIpLifecycle, safeProviderMessage, publicIpv4
+};
+'''
+          Path('services/hetzner-lifecycle.js').write_text(lifecycle)
+
+          # 5) Replace purchase handler so original password is kept and delivery is gated.
+          p = Path('index-core.js')
+          s = p.read_text()
+          start = s.index('async function handlePurchaseConfirmation(')
+          end = s.index('\n\n\nasync function handleStartMySuspendedServers', start)
+          fn = r'''async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
+  if (state[userId]?.purchaseInProgress) return sendMessage(chatId, '⏳ در حال پردازش خرید قبلی هستیم...');
+  state[userId] = { ...(state[userId] || {}), purchaseInProgress: true };
+  await editOrSendMessage(chatId, messageId, '🚀 در حال ساخت سرور شما...').catch(() => {});
+
+  let srv = null;
+  let purchaseRecorded = false;
+  let effectiveDc = dcConfig || state[userId]?.selectedDatacenterConfig;
+
+  try {
+    const { selectedFlavor, selectedImage, selectedCycle } = state[userId];
+    if (!effectiveDc) return sendMessage(chatId, '❌ دیتاسنتر از state پیدا نشد. دوباره خرید را شروع کنید.');
+    const allowedCycles = getAllowedCycles(effectiveDc);
+    if (!selectedFlavor || !selectedImage) return sendMessage(chatId, '❌ اطلاعات خرید منقضی شده است. دوباره خرید را شروع کنید.');
+    if (!allowedCycles.includes(selectedCycle)) return sendMessage(chatId, '❌ سیکل پرداخت انتخاب‌شده برای این دیتاسنتر مجاز نیست.');
+
+    const finalPrice = getFlavorCyclePrice(selectedFlavor, selectedCycle);
+    const amountForDb = finalPrice;
+    const isHetzner = isHetznerDc(effectiveDc);
+    const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';
+    const isTebyan = effectiveDc.key === 'tebyan';
+
+    console.log('[PURCHASE]', { dcKey: effectiveDc.key, provider: effectiveDc.provider, apiType: effectiveDc.apiType, selectedFlavor: selectedFlavor?.id || selectedFlavor?.name, selectedCycle, finalPrice });
+
+    const balance = await getUserWallet(userId);
+    if (balance < finalPrice) {
+      return sendMessage(chatId, `❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${formatToman(finalPrice)} تومان\n💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.`, mainMenu);
+    }
+
+    const serverName = `Srv-${getServerNamePrefix(effectiveDc)}-${crypto.randomBytes(3).toString('hex')}`;
+    let rawPrivateKey = null, rootPassword = null, tok = null;
+    let generatedRootPassword = null;
+    let hetznerKeyId = null;
+
+    if (!isHetzner) {
+      tok = await openstackApi.getToken(effectiveDc);
+      let keyName = null, kp = null;
+      if (!isAfra) {
+        keyName = `user-${userId}-${crypto.randomBytes(4).toString('hex')}`;
+        kp = await openstackApi.createKeyPair(effectiveDc, tok, keyName);
+      }
+      const isSnapshot = selectedImage.type === 'snapshot';
+      const serverMeta = { user: userId, type: 'purchased', datacenter: effectiveDc.key };
+      let createOptions = {};
+      let bootMethod = 'volume';
+      if (isAfra || isTebyan) {
+        generatedRootPassword = generateStrongPassword();
+        serverMeta.passwordManagedByBot = true;
+      }
+      if (isAfra) serverMeta.rootPassword = generatedRootPassword;
+      if (isTebyan) {
+        bootMethod = effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image';
+        const sgName = await openstackApi.ensureSshSecurityGroup(effectiveDc, tok);
+        createOptions = { security_groups: [sgName], user_data: buildTebyanRootPasswordCloudInit(generatedRootPassword) };
+      }
+      srv = await openstackApi.createServer(effectiveDc, tok, serverName, selectedFlavor.id, selectedImage.id, keyName, serverMeta, selectedFlavor.disk, bootMethod, isSnapshot, createOptions);
+      rawPrivateKey = kp?.private_key ? String(kp.private_key || '').replace(/-----BEGIN RSA PRIVATE KEY-----/g, '').replace(/-----END RSA PRIVATE KEY-----/g, '').trim() : null;
+      rootPassword = (isAfra || isTebyan) ? generatedRootPassword : srv.adminPass;
+    } else {
+      const passwordOnly = !!effectiveDc.HETZNER_PASSWORD_ONLY;
+      if (!passwordOnly) {
+        const kp = await openstackApi.createKeyPair(effectiveDc, null, `user-${userId}`);
+        hetznerKeyId = kp.key_id || null;
+      }
+      const userData = `#cloud-config
+ssh_pwauth: true
+disable_root: false
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hamoon.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+runcmd:
+  - systemctl reload ssh || systemctl restart ssh
+`;
+      srv = await openstackApi.createServer(effectiveDc, null, {
+        name: serverName,
+        serverType: selectedFlavor?.hetzner_type || selectedFlavor?.id,
+        image: selectedImage?.name || selectedImage?.id,
+        location: effectiveDc.HETZNER_LOCATION,
+        key_id: passwordOnly ? null : hetznerKeyId,
+        userLabel: userId,
+        user_data: userData
+      });
+      rootPassword = srv.root_password || null;
+    }
+
+    if (!srv?.id) throw new Error('شناسه سرور از Provider دریافت نشد.');
+
+    if ((isAfra || isTebyan) && generatedRootPassword) {
+      try {
+        await upsertServerSecret({ telegramId: userId, serverId: srv.id, datacenter: effectiveDc.key, secretType: 'root_password', secretValue: generatedRootPassword });
+      } catch (secretErr) {
+        logServerEvent({ type: 'server_secret_store_failed', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key, message: secretErr.code || secretErr.message });
+        if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 Secret store failed\nuser_id=${userId}\nserver_id=${srv.id}\ndc=${effectiveDc.key}\nerror=${secretErr.code || secretErr.message}`).catch(() => null);
+        return sendMessage(chatId, 'سرور ساخته شد اما ذخیره امن رمز عبور با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.', mainMenu);
+      }
+    }
+
+    await debitUser(userId, finalPrice);
+    const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';
+    const purchaseBootMethod = isTebyan ? (effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image') : 'volume';
+    await recordPurchase(
+      userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle,
+      DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY,
+      purchaseBootMethod === 'volume' ? srv.id : null, purchaseBootMethod, selectedImage.label,
+      0, 0, 0, 0, 0,
+      isHetzner ? hetznerKeyId : null,
+      initialStatus,
+      isHetzner ? 2 : 1,
+      { providerActionId: isHetzner ? (srv.action?.id || null) : null }
+    );
+    await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${effectiveDc.name})`, 'purchase');
+    purchaseRecorded = true;
+
+    let ip = extractServerIp(srv);
+
+    if (isHetzner) {
+      if (!rootPassword) {
+        await require('./db').updateScopedStatus(userId, srv.id, effectiveDc.key, 'manual_review').catch(() => null);
+        logServerEvent({ type: 'hetzner_original_password_missing', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key });
+        if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 Hetzner original password missing; no reset performed\nuser_id=${userId}\nserver_id=${srv.id}\ndc=${effectiveDc.key}`).catch(() => null);
+        return sendMessage(chatId, '⏳ سرور ساخته شده اما رمز اولیه از Provider دریافت نشد. برای جلوگیری از تحویل رمز نامعتبر، سرور فعلاً تحویل نمی‌شود و پشتیبانی آن را بررسی می‌کند.', mainMenu);
+      }
+      try {
+        await upsertServerSecret({ telegramId: userId, serverId: srv.id, datacenter: effectiveDc.key, secretType: 'root_password', secretValue: rootPassword });
+      } catch (secretErr) {
+        await require('./db').updateScopedStatus(userId, srv.id, effectiveDc.key, 'manual_review').catch(() => null);
+        logServerEvent({ type: 'hetzner_password_store_failed', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key, message: secretErr.code || secretErr.message });
+        if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 Hetzner password secure-store failed\nuser_id=${userId}\nserver_id=${srv.id}\ndc=${effectiveDc.key}\nerror=${secretErr.code || secretErr.message}`).catch(() => null);
+        return sendMessage(chatId, '⏳ سرور ساخته شده اما ذخیره امن رمز اولیه کامل نشد؛ برای امنیت، اطلاعات ورود فعلاً تحویل داده نمی‌شود.', mainMenu);
+      }
+
+      const readiness = await hetznerLifecycle.waitForReadiness(effectiveDc, srv.id, {
+        waitActionId: srv.action?.id,
+        timeoutMs: Number(process.env.HETZNER_INITIAL_READY_TIMEOUT_MS || 45000)
+      });
+      ip = readiness.ip || ip;
+      await require('./db').updateScopedStatus(userId, srv.id, effectiveDc.key, readiness.status);
+      if (readiness.quality) {
+        await require('./db').updateIpQualityResult(userId, srv.id, effectiveDc.key, hetznerLifecycle.qualitySummary(readiness.quality), false).catch(() => null);
+      }
+      if (!readiness.ready) {
+        logServerEvent({ type: 'hetzner_delivery_pending', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key, status: readiness.status, quality_reason: readiness.quality?.reason || null });
+        return sendMessage(chatId, '⏳ سرور ساخته شد، اما قبل از تحویل نهایی باید روشن‌بودن، SSH و دسترسی IP از ایران و چند نقطه خارجی تأیید شود. اگر IP مناسب نباشد، سیستم آن را خودکار تعویض می‌کند. تا تأیید کامل، IP و رمز نمایش داده نمی‌شود.', mainMenu);
+      }
+      const newlyDelivered = await require('./db').markDelivered(userId, srv.id, effectiveDc.key, ip);
+      if (!newlyDelivered) return;
+    } else {
+      if (!ip) ip = await pollForIp(effectiveDc, tok || await openstackApi.getToken(effectiveDc), srv.id, isAfra ? 3 : 24, isAfra ? 3000 : 5000);
+      if (isTebyan) {
+        const sshReady = ip ? await tcpCheck(ip, 22, 180000).catch(() => ({ reachable: false })) : { reachable: false };
+        await updatePurchaseStatus(srv.id, sshReady.reachable ? 'active' : 'pending_ssh');
+      }
+    }
+
+    const privateKeyText = rawPrivateKey ? `-----BEGIN RSA PRIVATE KEY-----\n${rawPrivateKey}\n-----END RSA PRIVATE KEY-----` : null;
+    const planLabel = selectedFlavor.label || selectedFlavor.name || selectedFlavor.id;
+    let msgHtml = [
+      `✅ سرور شما در ${htmlEscape(effectiveDc.name)} با موفقیت ساخته و آماده شد!`,
+      `🔹 نام: ${htmlEscape(serverName)}`,
+      ip ? `🔹 IP: <code>${htmlEscape(ip)}</code>` : '🔹 IP: در حال تخصیص...',
+      `🔹 سیستم‌عامل: ${htmlEscape(selectedImage.label || selectedImage.name || selectedImage.id)}`,
+      `🔹 پلن: ${htmlEscape(planLabel)}`,
+      `🔹 ${htmlEscape(formatBillingAmountLabel(finalPrice, selectedCycle))}`
+    ].join('\n');
+    if (isHetzner) msgHtml += '\n✅ دسترسی SSH و تست IP از ایران/چند نقطه خارجی تأیید شد.';
+    if (rootPassword && isTebyan && ip) {
+      msgHtml += '\n' + `IP: <code>${htmlEscape(ip)}</code>` + '\nSSH user: root' + '\nRoot password: ' + htmlCodeBlock(rootPassword) + '\nLogin command:' + `\n<code>ssh root@${htmlEscape(ip)}</code>` + '\nFallback:' + `\n<code>ssh ubuntu@${htmlEscape(ip)}</code>`;
+    } else if (rootPassword) msgHtml += '\n' + `🔑 <b>رمز عبور روت:</b>\n` + htmlCodeBlock(rootPassword) + '\nلطفاً رمز را در جای امن ذخیره کنید.';
+    else if (isAfra) msgHtml += '\n' + serverSecretNotConfiguredMessage();
+    if (privateKeyText) msgHtml += '\n' + `🔑 <b>کلید خصوصی شما (SSH):</b>\n` + htmlCodeBlock(privateKeyText);
+
+    const notifyResult = await notifyPurchaseSuccess(chatId, messageId, msgHtml, { inline_keyboard: [[{ text: '⚙️ مدیریت سرور', callback_data: makeShortCb(userId, { action: 'M', dcKey: effectiveDc.key, serverId: srv.id }) }]] });
+    if (!notifyResult) logServerEvent({ type: 'purchase_notification_failed', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key, message: 'sendMessage returned null' });
+    logServerEvent({ type: 'server_created', server_id: srv.id, user_id: userId, datacenter: effectiveDc.key, password_provided: !!rootPassword, guarded_delivery: isHetzner });
+  } catch (e) {
+    const dcKey = effectiveDc?.key || dcConfig?.key || 'unknown';
+    console.error(`Purchase Error in ${effectiveDc?.name || dcKey}:`, { message: e.message, server_id: srv?.id, purchaseRecorded });
+    if (srv?.id && !purchaseRecorded) {
+      logServerEvent({ type: 'CRITICAL_orphan_server_after_provider_create', user_id: userId, server_id: srv.id, datacenter: dcKey, message: e.message });
+      if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 CRITICAL: provider orphan server\nuser_id=${userId}\nserver_id=${srv.id}\ndc=${dcKey}\nerror=${e.message}`).catch(() => null);
+      return sendMessage(chatId, '⚠️ سرور ساخته شد اما ثبت خرید با مشکل مواجه شد. لطفاً با پشتیبانی تماس بگیرید.', mainMenu);
+    }
+    if (srv?.id && purchaseRecorded) {
+      logServerEvent({ type: 'purchase_post_create_warning', user_id: userId, server_id: srv.id, datacenter: dcKey, message: e.message });
+      return sendMessage(chatId, '⚠️ سرور ساخته شد ولی هنوز تحویل نهایی نشده است. سیستم بررسی خودکار را ادامه می‌دهد؛ در صورت نیاز پشتیبانی بررسی می‌کند.', mainMenu);
+    }
+    sendMessage(chatId, `❌ خطا در خرید سرور: ${escapeMarkdownV2(e.message)}`, mainMenu);
+  } finally {
+    if (state[userId]) { state[userId].purchaseInProgress = false; state[userId].step = 'READY'; }
+  }
+}
+'''
+          s = s[:start] + fn + s[end:]
+
+          # Restore the minute provisioning reconciler if absent.
+          if 'HETZNER_PROVISIONING_RECONCILE' not in s:
+              marker = "\n\n// --- Cleanup expired test servers every 15 minutes ---"
+              scheduler = r'''
+
+// Hetzner delivery reconciler: never deliver credentials before SSH + Iran/global reachability pass.
+cron.schedule('* * * * *', async () => {
+  try {
+    const db = require('./db');
+    const results = await hetznerLifecycle.reconcileProvisioning({
+      db,
+      resolveDatacenter: datacenter => {
+        const dc = baseDatacenters[datacenter];
+        return dc ? { ...dc, key: datacenter } : null;
+      },
+      timeoutMs: Number(process.env.HETZNER_RECONCILE_READY_TIMEOUT_MS || 12000)
+    });
+    const changed = results.filter(item => item.ready || item.ip_rotated || item.status === 'manual_review' || item.status === 'provider_missing');
+    if (changed.length) console.log('[HETZNER_PROVISIONING_RECONCILE]', changed.map(x => ({ server_id: x.server_id, status: x.status, ready: !!x.ready, ip_rotated: !!x.ip_rotated, reason: x.reason || null })));
+
+    for (const item of results.filter(result => result.newly_delivered)) {
+      const purchase = await getPurchaseByServerId(item.server_id).catch(() => null);
+      const password = await getServerSecret(item.server_id, 'root_password').catch(() => null);
+      if (!purchase || !password) {
+        await db.updateScopedStatus(item.telegram_id, item.server_id, item.datacenter, 'manual_review').catch(() => null);
+        continue;
+      }
+      const msgHtml = [
+        `✅ سرور ${htmlEscape(purchase.server_name || item.server_id)} اکنون کاملاً آماده و قابل تحویل است.`,
+        `🔹 IP: <code>${htmlEscape(item.ip || purchase.public_ip || '')}</code>`,
+        '✅ SSH در دسترس است.',
+        '✅ تست دسترسی IP از ایران و چند نقطه خارجی تأیید شد.',
+        `🔑 <b>رمز عبور روت:</b>\n${htmlCodeBlock(password)}`
+      ].join('\n');
+      await sendMessage(item.telegram_id, msgHtml, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '⚙️ مدیریت سرور', callback_data: makeShortCb(item.telegram_id, { action: 'M', dcKey: item.datacenter, serverId: item.server_id }) }]] }
+      }).catch(error => console.error('[HETZNER_DELIVERY_NOTIFY_FAILED]', { server_id: item.server_id, message: error.message }));
+    }
+
+    for (const item of results.filter(result => result.status === 'manual_review')) {
+      await sendMessage(item.telegram_id, '⚠️ سرور هنوز شرایط تحویل امن را پاس نکرده و برای بررسی دستی نگه داشته شده است. IP و رمز تا رفع مشکل نمایش داده نمی‌شود.').catch(() => null);
+      if (SUPPORT_ID) await sendMessage(SUPPORT_ID, `🚨 Hetzner delivery manual review\nuser_id=${item.telegram_id}\nserver_id=${item.server_id}\ndc=${item.datacenter}\nreason=${item.reason || 'unknown'}`).catch(() => null);
+    }
+  } catch (error) {
+    console.error('[HETZNER_PROVISIONING_RECONCILE_FAILED]', error);
+  }
+});
+'''
+              if marker not in s: raise SystemExit('Index scheduler insertion marker not found')
+              s = s.replace(marker, scheduler + marker, 1)
+          p.write_text(s)
+
+          # 6) Add validator assertions for this regression.
+          p = Path('scripts/validate-hetzner-lifecycle.js')
+          s = p.read_text()
+          if "pending_ip_quality" not in s:
+              s = s.replace("  assert(!lifecycle.isBillablePurchase({ status: 'provisioning' }));\n", "  assert(!lifecycle.isBillablePurchase({ status: 'provisioning' }));\n  assert(!lifecycle.isBillablePurchase({ status: 'pending_ip_quality' }));\n", 1)
+          if "pingNodeSuccess" not in s:
+              pass
+          validation_marker = "  const text = ['customer-api.js','index.js','Hetzner/hetzner-api.js','services/hetzner-lifecycle.js'].map(f=>fs.readFileSync(f,'utf8')).join('\\n');\n"
+          if "originalRootPasswordFlow" not in s:
+              add = "  const originalRootPasswordFlow = fs.readFileSync('index-core.js','utf8');\n  assert(/rootPassword = srv\\.root_password \\|\\| null/.test(originalRootPasswordFlow));\n  assert(!/rootPassword = await openstackApi\\.resetServerPassword\\(effectiveDc, null, srv\\.id\\)/.test(originalRootPasswordFlow));\n  assert(/reconcileProvisioning/.test(originalRootPasswordFlow));\n  assert.strictEqual(lifecycle.pingNodeSuccess([[['OK', 0.04], ['TIMEOUT', 3]]]), true);\n  assert.strictEqual(lifecycle.pingNodeSuccess([[['TIMEOUT', 3]]]), false);\n"
+              if validation_marker not in s: raise SystemExit('Lifecycle validator marker not found')
+              s = s.replace(validation_marker, add + validation_marker, 1)
+          p.write_text(s)
+          PY
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check Hetzner/hetzner-api.js
+          node --check services/hetzner-lifecycle.js
+          node --check db.js
+          node --check index-core.js
+          npm run validate:hetzner-lifecycle
+          npm run validate:hetzner-pricing
+          grep -q "rootPassword = srv.root_password || null" index-core.js
+          ! grep -q "rootPassword = await openstackApi.resetServerPassword(effectiveDc, null, srv.id)" index-core.js
+          grep -q "pending_ip_quality" db.js
+          grep -q "checkIpQuality" services/hetzner-lifecycle.js
+          grep -q "HETZNER_PROVISIONING_RECONCILE" index-core.js
+
+      - name: Commit guarded delivery patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add Hetzner/hetzner-api.js services/hetzner-lifecycle.js datacenters.js db.js index-core.js scripts/validate-hetzner-lifecycle.js
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+          else
+            git commit -m "fix(hetzner): guard delivery until password and IP health pass"
+            git push origin HEAD:main
+          fi
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and restore server-secret key safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git pull --ff-only
+
+          # Restore the historical encryption key only if the current env lacks it.
+          # The correct candidate is selected by successfully decrypting existing DB rows; the key is never printed.
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+          const dotenv = require('dotenv');
+          const mysql = require('mysql2/promise');
+          const envPath = path.resolve('.env');
+          const currentText = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+          const current = dotenv.parse(currentText);
+          function decrypt(payload, rawKey) {
+            const parsed = JSON.parse(payload);
+            const key = crypto.createHash('sha256').update(String(rawKey)).digest();
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(parsed.iv, 'base64'));
+            decipher.setAuthTag(Buffer.from(parsed.tag, 'base64'));
+            return Buffer.concat([decipher.update(Buffer.from(parsed.data, 'base64')), decipher.final()]).toString('utf8');
+          }
+          function envFiles(root, depth = 0, out = []) {
+            if (depth > 4) return out;
+            let items = []; try { items = fs.readdirSync(root, { withFileTypes: true }); } catch { return out; }
+            for (const item of items) {
+              const f = path.join(root, item.name);
+              if (item.isDirectory()) { if (!['node_modules','.git','proc','sys','dev'].includes(item.name)) envFiles(f, depth + 1, out); }
+              else if (item.isFile() && (item.name === '.env' || item.name.startsWith('.env.'))) out.push(f);
+            }
+            return out;
+          }
+          (async () => {
+            const dbCfg = { host: current.DB_HOST || 'localhost', user: current.DB_USER || 'root', password: current.DB_PASSWORD || '', database: current.DB_NAME || 'hamooncloud_db' };
+            const c = await mysql.createConnection(dbCfg);
+            const [rows] = await c.query('SELECT secret_value_enc FROM server_secrets ORDER BY id DESC LIMIT 10');
+            await c.end();
+            if (!rows.length) {
+              if (!current.SERVER_SECRET_KEY) throw new Error('No existing encrypted rows to identify SERVER_SECRET_KEY safely');
+              console.log('SERVER_SECRET_KEY_PRESENT=yes; verification_skipped=no_rows');
+              return;
+            }
+            const candidates = [];
+            if (current.SERVER_SECRET_KEY) candidates.push(current.SERVER_SECRET_KEY);
+            for (const f of envFiles('/root')) {
+              try {
+                const parsed = dotenv.parse(fs.readFileSync(f, 'utf8'));
+                if (parsed.SERVER_SECRET_KEY && !candidates.includes(parsed.SERVER_SECRET_KEY)) candidates.push(parsed.SERVER_SECRET_KEY);
+              } catch {}
+            }
+            let best = null;
+            for (const candidate of candidates) {
+              let score = 0;
+              for (const row of rows) {
+                try { if (decrypt(row.secret_value_enc, candidate)) score += 1; } catch {}
+              }
+              if (!best || score > best.score) best = { key: candidate, score };
+            }
+            if (!best || best.score < 1) throw new Error('Could not verify any historical SERVER_SECRET_KEY against existing encrypted records');
+            if (!current.SERVER_SECRET_KEY || current.SERVER_SECRET_KEY !== best.key) {
+              let next = currentText.replace(/^SERVER_SECRET_KEY=.*$/m, '').trimEnd();
+              next += `\nSERVER_SECRET_KEY=${best.key}\n`;
+              fs.writeFileSync(envPath, next, { mode: 0o600 });
+            }
+            console.log(`SERVER_SECRET_KEY_VERIFIED=yes; verified_rows=${best.score}`);
+          })().catch(e => { console.error('SERVER_SECRET_KEY_RESTORE_FAILED=' + e.message); process.exit(1); });
+          NODE
+
+          node --check Hetzner/hetzner-api.js
+          node --check services/hetzner-lifecycle.js
+          node --check db.js
+          node --check index-core.js
+          npm run validate:hetzner-lifecycle
+          npm run validate:hetzner-pricing
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 4
+          pm2 describe hamoonbot | grep -E 'status|script path|uptime' || true
+
+          echo '=== DEPLOY VERIFICATION ==='
+          grep -q "rootPassword = srv.root_password || null" index-core.js && echo 'ORIGINAL_PASSWORD_FLOW=yes'
+          if grep -q "rootPassword = await openstackApi.resetServerPassword(effectiveDc, null, srv.id)" index-core.js; then echo 'PURCHASE_RESET_PASSWORD_CALL=bad'; exit 1; else echo 'PURCHASE_RESET_PASSWORD_CALL=none'; fi
+          grep -q 'pending_ip_quality' db.js && echo 'PENDING_IP_QUALITY=yes'
+          grep -q 'checkIpQuality' services/hetzner-lifecycle.js && echo 'IP_QUALITY_GATE=yes'
+          grep -q 'HETZNER_PROVISIONING_RECONCILE' index-core.js && echo 'RECONCILER=yes'
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          (async()=>{
+            const [rows] = await db.pool.query('SELECT server_id FROM server_secrets ORDER BY id DESC LIMIT 1');
+            if (!rows.length) throw new Error('no secret rows');
+            const value = await db.getServerSecret(rows[0].server_id, 'root_password');
+            console.log('SERVER_SECRET_DECRYPT_TEST=' + (value ? 'pass' : 'fail'));
+            process.exit(value ? 0 : 1);
+          })().catch(e=>{ console.error('SERVER_SECRET_DECRYPT_TEST=fail'); process.exit(1); });
+          NODE
+          REMOTE
