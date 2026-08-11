@@ -1,0 +1,74 @@
+name: Diagnose Hetzner 422
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/diagnose-hetzner-422.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect 422 and live catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== ERROR CONTEXT ==='
+          grep -n -B 5 -A 12 'Hetzner createServer error' "$HOME/.pm2/logs/hamoonbot-error.log" 2>/dev/null | tail -n 260 || true
+          echo '=== PURCHASE CONTEXT ==='
+          grep -n -Ei 'selectedFlavor|HETZNER_CREATE_ATTEMPT|selectedImage|Ubuntu 26|ubuntu-26|cpx11' "$HOME/.pm2/logs/hamoonbot-out.log" 2>/dev/null | tail -n 140 || true
+          echo '=== RAW CPX11 + IMAGE ==='
+          node - <<'NODE'
+          const dcs = require('./datacenters');
+          const api = require('./Hetzner/hetzner-api');
+          (async () => {
+            const dc = dcs['hetzner-finland'];
+            const types = await api.listHetznerServerTypes(dc);
+            const cpx11 = types.find(x => String(x.name).toLowerCase() === 'cpx11');
+            if (!cpx11) {
+              console.log('CPX11_RAW=missing');
+            } else {
+              console.log('CPX11_RAW=' + JSON.stringify({
+                id: cpx11.id,
+                name: cpx11.name,
+                architecture: cpx11.architecture,
+                deprecated: cpx11.deprecated,
+                deprecation: cpx11.deprecation,
+                hel1Prices: (cpx11.prices || []).filter(p => String(p.location).toLowerCase() === 'hel1'),
+              }));
+            }
+            const img = await api.hetznerRequest(dc, 'GET', '/images/387894169');
+            const i = img?.image;
+            console.log('IMAGE_RAW=' + JSON.stringify(i ? {
+              id: i.id, name: i.name, description: i.description, type: i.type,
+              status: i.status, architecture: i.architecture, deprecated: i.deprecated,
+              bound_to: i.bound_to,
+            } : null));
+          })().catch(err => { console.error('DIAG_ERROR=' + err.message); process.exit(1); });
+          NODE
+          REMOTE
