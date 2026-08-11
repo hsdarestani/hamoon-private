@@ -6,11 +6,14 @@ const Module = require('module');
 const { applyProviderVisibilityPatches } = require('./provider-visibility-bootstrap');
 const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
 const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
+const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 
 function applyPatches(coreSource) {
-  return applyHetznerTrafficPatches(
-    applyFeaturePatches(
-      applyProviderVisibilityPatches(coreSource)
+  return applyHetznerChangeIpPatches(
+    applyHetznerTrafficPatches(
+      applyFeaturePatches(
+        applyProviderVisibilityPatches(coreSource)
+      )
     )
   );
 }
