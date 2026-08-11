@@ -21,7 +21,6 @@ jobs:
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Prepare SSH
         shell: bash
         run: |
@@ -30,8 +29,7 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Inspect live change-cycle path and logs
+      - name: Inspect live Telegram and cycle errors
         shell: bash
         run: |
           set -euo pipefail
@@ -40,66 +38,12 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-
           echo '=== LIVE COMMIT ==='
           git rev-parse HEAD
           git log -1 --oneline
-
-          echo '=== CHANGE CYCLE CODE MARKERS ==='
-          grep -nE "makeCycleCb|handleChangeCycleAsk|handleChangeCycleConfirm|case 'CC'|CHANGECYCLE|normalizeStoredCycleAmount|updatePurchaseCycle|changePurchaseCycleAtomic|getPurchaseByServerId|getUserWallet" index-core.js db.js 2>/dev/null | head -n 240 || true
-
-          echo '=== CHANGE CYCLE HANDLER BODY ==='
-          START=$(grep -n "async function handleChangeCycleConfirm" index-core.js | head -n1 | cut -d: -f1 || true)
-          if [ -n "$START" ]; then
-            END=$((START+110))
-            sed -n "${START},${END}p" index-core.js
-          fi
-
-          echo '=== LEGACY CC CALLBACK BODY ==='
-          CC_LINE=$(grep -n "case 'CC'" index-core.js | head -n1 | cut -d: -f1 || true)
-          if [ -n "$CC_LINE" ]; then
-            S=$((CC_LINE-15)); [ "$S" -lt 1 ] && S=1
-            E=$((CC_LINE+65))
-            sed -n "${S},${E}p" index-core.js
-          fi
-
-          echo '=== DB CYCLE FUNCTIONS ==='
-          DB_LINE=$(grep -n "async function updatePurchaseCycle" db.js | head -n1 | cut -d: -f1 || true)
-          if [ -n "$DB_LINE" ]; then
-            S=$((DB_LINE-10)); E=$((DB_LINE+190)); sed -n "${S},${E}p" db.js
-          fi
-
-          echo '=== RECENT CHANGE CYCLE LOGS ==='
-          pm2 logs hamoonbot --lines 1600 --nostream 2>/dev/null \
-            | grep -Ei "change cycle|Change Cycle|CHANGECYCLE|cycle|دوره پرداخت|محاسبه و تغییر|wallet|deadlock|lock wait|timeout|ECONN|PROTOCOL|pool|DB_UPDATE_CYCLE" \
-            | tail -n 320 || true
-
-          echo '=== MYSQL PROCESSLIST / TRANSACTIONS ==='
-          node <<'NODE'
-          require('dotenv').config();
-          const mysql = require('mysql2/promise');
-          (async () => {
-            const c = await mysql.createConnection({
-              host: process.env.DB_HOST || 'localhost',
-              user: process.env.DB_USER || 'root',
-              password: process.env.DB_PASSWORD || '',
-              database: process.env.DB_NAME || 'hamooncloud_db'
-            });
-            const [p] = await c.query('SHOW FULL PROCESSLIST');
-            for (const r of p) {
-              if (String(r.Command).toLowerCase() !== 'sleep' || Number(r.Time) > 30) {
-                console.log(JSON.stringify({Id:r.Id,Command:r.Command,Time:r.Time,State:r.State,Info:String(r.Info||'').slice(0,180)}));
-              }
-            }
-            try {
-              const [t] = await c.query('SELECT trx_id, trx_state, trx_started, trx_wait_started, trx_mysql_thread_id, LEFT(trx_query,180) AS trx_query FROM information_schema.innodb_trx');
-              console.log('ACTIVE_TRX=' + t.length);
-              for (const r of t) console.log(JSON.stringify(r));
-            } catch (e) { console.log('INNODB_TRX_UNAVAILABLE=' + e.code); }
-            await c.end();
-          })().catch(e => { console.error('DB_DIAG_FAILED', e.code || e.message); process.exitCode = 1; });
-NODE
-
-          echo '=== PM2 STATUS ==='
-          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a){if(['hamoonbot','dashboard-server'].includes(p.name)) console.log(p.name,p.pm2_env.status,'restarts='+p.pm2_env.restart_time,'uptime='+(Date.now()-p.pm2_env.pm_uptime));}})" || true
+          echo '=== RECENT CYCLE / TELEGRAM ERRORS ==='
+          pm2 logs hamoonbot --lines 2500 --nostream 2>/dev/null \
+            | grep -Ei "Change Cycle|change cycle|DB_UPDATE_CYCLE|Error sending message|Telegram API Error Body|parse entities|reserved|can't parse|cannot parse|wallet|deadlock|lock wait" \
+            | tail -n 500 || true
+          echo '=== END ==='
           REMOTE
