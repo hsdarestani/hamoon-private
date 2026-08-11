@@ -1,0 +1,66 @@
+name: Diagnose Hetzner Delivery Readiness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-hetzner-delivery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Current repository checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== CURRENT INDEX DELIVERY MARKERS ==='
+          grep -nE "initialStatus|resetServerPassword\(effectiveDc|waitForReadiness|pending_ssh|delivered_at|markDelivered|ping|iran|Iran" index-core.js services/hetzner-lifecycle.js db.js || true
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect live runtime and historical backups
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== LIVE COMMIT ==='
+          git rev-parse HEAD
+          git log -1 --oneline
+          echo '=== LIVE DELIVERY MARKERS ==='
+          grep -nE "initialStatus|resetServerPassword\(effectiveDc|waitForReadiness|pending_ssh|delivered_at|markDelivered|ping|iran|Iran" index-core.js services/hetzner-lifecycle.js db.js || true
+          echo '=== REFLOG RECENT ==='
+          git reflog --date=iso -n 40 || true
+          echo '=== CANDIDATE BACKUP FILES ==='
+          find /root -maxdepth 3 -type f \( -name 'index*.js*' -o -name '*hetzner*lifecycle*' -o -name '*provision*' -o -name '*readiness*' -o -name '*.patch' \) 2>/dev/null | grep -v '/node_modules/' | head -n 120 || true
+          echo '=== HISTORICAL DELIVERY/PING MARKERS ==='
+          find /root -maxdepth 3 -type f \( -name 'index*.js*' -o -name '*hetzner*lifecycle*' -o -name '*provision*' -o -name '*readiness*' -o -name '*.patch' \) -print0 2>/dev/null \
+            | xargs -0 -r grep -nEi "check.?host|ping|iran|pending_ssh|markDelivered|delivered_at|waitForReadiness|resetServerPassword" 2>/dev/null \
+            | grep -v '/node_modules/' \
+            | head -n 240 || true
+          echo '=== RECENT HETZNER CREATE/PASSWORD LOGS ==='
+          pm2 logs hamoonbot --lines 350 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|password|root_password" | tail -n 160 || true
+          REMOTE
