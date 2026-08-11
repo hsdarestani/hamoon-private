@@ -57,13 +57,26 @@ function configuredPriceLocations(config = {}) {
   return [...new Set([preferred, ...fallbacks].filter(Boolean))];
 }
 
+function hasConfiguredLocationPrice(serverType, config = {}) {
+  const locations = configuredPriceLocations(config);
+  if (!locations.length) return true;
+  const prices = Array.isArray(serverType?.prices) ? serverType.prices : [];
+  return prices.some(p =>
+    (p?.price_hourly || p?.price_monthly) &&
+    locations.includes(normalizeLocation(p?.location))
+  );
+}
+
 function firstPrice(serverType, config = {}) {
   const prices = Array.isArray(serverType?.prices) ? serverType.prices : [];
   const usable = prices.filter(p => p?.price_hourly || p?.price_monthly);
-  for (const location of configuredPriceLocations(config)) {
+  const locations = configuredPriceLocations(config);
+  for (const location of locations) {
     const match = usable.find(p => normalizeLocation(p?.location) === location);
     if (match) return match;
   }
+  // A location-scoped catalog must never borrow the price of a different region.
+  if (locations.length) return {};
   return usable[0] || prices[0] || {};
 }
 
@@ -86,7 +99,7 @@ function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
   const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
   return (serverTypes || [])
-    .filter(st => st && st.name && !st.deprecated && st.deprecation === null)
+    .filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationPrice(st, config))
     .map(st => {
       const price = firstPrice(st, config);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);

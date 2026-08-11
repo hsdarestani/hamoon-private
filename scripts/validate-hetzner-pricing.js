@@ -27,6 +27,20 @@ assert.notStrictEqual(
   api.hetznerPlanCacheKey({ key: 'hetzner-finland', HETZNER_LOCATION: 'hel1' })
 );
 
+const regionalAvailabilitySample = [
+  {
+    name: 'cpx11', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+    prices: [{ location: 'ash', price_hourly: { gross: '0.0100' }, price_monthly: { gross: '5.00' } }],
+  },
+  {
+    name: 'cpx12', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+    prices: [{ location: 'hel1', price_hourly: { gross: '0.0120' }, price_monthly: { gross: '6.00' } }],
+  },
+];
+const finlandAvailable = api.normalizeHetznerServerTypes(regionalAvailabilitySample, { key: 'hetzner-finland', HETZNER_LOCATION: 'hel1' });
+assert(!finlandAvailable.some(p => p.id === 'cpx11'), 'CPX11 without HEL1 pricing must not be offered in Finland');
+assert(finlandAvailable.some(p => p.id === 'cpx12'), 'CPX12 with HEL1 pricing should remain available in Finland');
+
 const indexSource = fs.readFileSync(require.resolve('../index.js'), 'utf8');
 assert(indexSource.includes('const amountForDb = finalPrice;'));
 assert(indexSource.includes('function normalizeStoredCycleAmount('));
