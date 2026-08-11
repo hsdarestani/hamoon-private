@@ -1021,7 +1021,34 @@ async function getAfraPasswordFromApiOnce(dcConfig, serverId) {
   }
 }
 
+
+const HETZNER_UNDELIVERED_PURCHASE_STATUSES = new Set([
+  'provisioning',
+  'pending_ip',
+  'pending_ssh',
+  'pending_ip_quality',
+  'manual_review',
+  'provisioning_failed'
+]);
+
+function isHetznerUndeliveredPurchase(purchase) {
+  if (!purchase) return false;
+  return HETZNER_UNDELIVERED_PURCHASE_STATUSES.has(String(purchase.status || '').toLowerCase());
+}
+
+async function blockUndeliveredHetznerAction(chatId, serverId, dcConfig) {
+  if (!isHetznerDc(dcConfig)) return false;
+  const purchase = await getPurchaseByServerId(serverId).catch(() => null);
+  if (!isHetznerUndeliveredPurchase(purchase)) return false;
+  await sendMessage(
+    chatId,
+    '⏳ این سرور هنوز تحویل نهایی نشده است و تا تأیید روشن بودن، SSH و دسترسی IP از ایران و نقاط خارجی، اطلاعات ورود یا عملیات حساس در دسترس نیست.'
+  );
+  return true;
+}
+
 async function handleGetStoredPassword(chatId, userId, serverId, dcConfig, messageId) {
+  if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
   if (!isAfraDc(dcConfig)) return handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId);
   try {
     let password = await getServerSecret(serverId, 'root_password');
@@ -1093,6 +1120,7 @@ async function handleAfraSshResetConfirm(chatId, userId, serverId, dcConfig, mes
 
 async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
+  if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
   const keyboard = [
     [{ text: '✅ تأیید ریست پسورد', callback_data: makeShortCb(userId, { action: 'RESETPW', dcKey: dcConfig.key, serverId }) }],
     [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
@@ -1103,6 +1131,7 @@ async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
 }
 async function handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
+  if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
   try {
 
     const isHetzner = (dcConfig?.apiType === 'hetzner') || (dcConfig?.provider === 'hetzner');
@@ -2793,7 +2822,8 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
       ? (await getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null) || await getPurchaseByServerId(serverId))
       : await getPurchaseByServerId(serverId);
 
-    let ip = extractServerIp(srv) || '–';
+    const hetznerDeliveryPending = isHetznerDc(dcConfig) && isHetznerUndeliveredPurchase(purchase);
+    let ip = hetznerDeliveryPending ? 'در حال بررسی' : (extractServerIp(srv) || '–');
 
     const osLabel = purchase?.os_label || srv.image?.name || 'N/A';
     const isProjectDC = dcConfig.sharedProject === false;
@@ -2801,12 +2831,18 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
     const stateText = String(srv.status || srv.state || '').toLowerCase();
     const keyPair = hasCapability(dcConfig, 'privateKey') ? await getKeyPair(serverId).catch(() => null) : null;
 
+    const displayStatus = hetznerDeliveryPending
+      ? (purchase?.status || 'provisioning')
+      : (srv.status || srv.state || 'N/A');
     let messageText =
       `*مدیریت سرور: ${escapeMarkdownV2(srv.name || srv.id)}*\n` +
       `دیتاسنتر: ${escapeMarkdownV2(dcConfig.name)}\n` +
       `IP: ${escapeMarkdownV2(ip)}\n` +
-      `وضعیت: ${escapeMarkdownV2(srv.status || srv.state || 'N/A')}\n` +
+      `وضعیت: ${escapeMarkdownV2(displayStatus)}\n` +
       `سیستم عامل: ${escapeMarkdownV2(osLabel)}\n`;
+    if (hetznerDeliveryPending) {
+      messageText += '⏳ تحویل: در حال بررسی روشن بودن، SSH و دسترسی IP از ایران و نقاط خارجی\n';
+    }
 
     if (purchase) {
       messageText += Number(purchase.auto_renew ?? 1) === 1
@@ -2816,6 +2852,19 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
 
     const keyboard = [];
     const short = (action, extra = {}) => makeShortCb(userId, { action, dcKey: dcConfig.key, serverId: srv.id, ...extra });
+
+    if (hetznerDeliveryPending) {
+      if (hasCapability(dcConfig, 'deleteServer')) {
+        keyboard.push([{ text: '❌ حذف سرور', callback_data: makeShortCb(userId, { action: 'ASK_DELETE', dcKey: dcConfig.key, serverId: srv.id }) }]);
+      }
+      keyboard.push([{ text: '🔙 بازگشت', callback_data: 'CANCEL' }]);
+      await sendMessage(chatId, messageText, {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: keyboard }
+      });
+      console.log('[handleServerManagement] pending Hetzner delivery redacted', { user: userId, dc: dcConfig.key, server_id: srv.id, status: purchase?.status });
+      return;
+    }
 
     if (isProjectDC && hasCapability(dcConfig, 'projectTraffic') && hasTrafficApi) {
       keyboard.push([{ text: '📈 ترافیک کل پروژه + باقیمانده', callback_data: short('PROJECT_SUM', { projectId: dcConfig.OS_PROJECT_ID }) }]);
