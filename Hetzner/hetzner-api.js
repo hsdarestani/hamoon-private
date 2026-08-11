@@ -465,7 +465,11 @@ for (const locCandidate of getHetznerFallbackLocations(dcConfig, loc)) {
   console.log('[HETZNER_CREATE_ATTEMPT]', { location: locCandidate, server_type: serverType, image });
   try {
     const r = await c.post('/servers', attemptPayload);
-    return r.data.server;
+    const data = r.data || {};
+    const server = data.server || {};
+    server.action = data.action || null;
+    server.root_password = data.root_password || null;
+    return server;
   } catch (e) {
     console.error('🚨 [Hetzner createServer error]', e.response?.status, e.response?.data || e.message);
     if (!isHetznerPlacementUnavailableError(e)) throw e;

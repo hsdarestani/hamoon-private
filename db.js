@@ -109,6 +109,9 @@ async function initializeDatabase() {
         await ensureColumn(connection, 'purchases', 'public_ip', 'VARCHAR(64) NULL');
         await ensureColumn(connection, 'purchases', 'lifecycle_error_code', 'VARCHAR(64) NULL');
         await ensureColumn(connection, 'purchases', 'lifecycle_updated_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'ip_quality_attempts', 'INT NOT NULL DEFAULT 0');
+        await ensureColumn(connection, 'purchases', 'ip_quality_checked_at', 'DATETIME NULL');
+        await ensureColumn(connection, 'purchases', 'ip_quality_summary', 'VARCHAR(255) NULL');
         await ensureColumn(connection, 'purchases', 'billing_amount_version', 'TINYINT NOT NULL DEFAULT 1');
         await connection.execute('UPDATE purchases SET auto_renew = 1 WHERE auto_renew IS NULL').catch(err => {
             console.warn('Could not backfill purchases.auto_renew:', err.message);
@@ -1266,7 +1269,7 @@ async function getAdminWalletFlowStats(days) {
 }
 
 
-const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];
+const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','pending_ip_quality','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];
 const REVENUE_WALLET_TYPES = ['credit','deposit','payment','topup','admin_credit'];
 const APPROVED_TOPUP_TYPES = ['credit','deposit','payment','topup','admin_credit'];
 
@@ -1603,7 +1606,7 @@ async function getApiClientMonthlySpend(clientId) {
        WHERE telegram_id = ?
          AND datacenter IN (${hetznerDatacenterSqlList})
          AND duration = 'monthly'
-         AND status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh')`,
+         AND status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')`,
       [client.telegram_id]
     );
     return Number(rows[0]?.n || 0);
@@ -1742,6 +1745,7 @@ async function listPendingProvisioning() {
        'provisioning',
        'pending_ip',
        'pending_ssh',
+       'pending_ip_quality',
        'rebuilding'
      )
        AND (
@@ -1807,6 +1811,35 @@ async function markDelivered(
   );
 
   return result.affectedRows === 1;
+}
+
+
+async function updateIpQualityResult(
+  telegramId,
+  serverId,
+  datacenter,
+  summary,
+  incrementAttempt = false
+) {
+  const [result] = await pool.execute(
+    `UPDATE purchases
+     SET ip_quality_checked_at = NOW(),
+         ip_quality_summary = ?,
+         ip_quality_attempts = ip_quality_attempts + ?,
+         lifecycle_updated_at = NOW(),
+         updated_at = NOW()
+     WHERE telegram_id = ?
+       AND server_id = ?
+       AND datacenter = ?`,
+    [
+      String(summary || '').slice(0, 255) || null,
+      incrementAttempt ? 1 : 0,
+      String(telegramId),
+      String(serverId),
+      String(datacenter)
+    ]
+  );
+  return result.affectedRows > 0;
 }
 
 
@@ -1905,6 +1938,7 @@ module.exports = {
     listPendingProvisioning,
     updatePublicIp,
     markDelivered,
+    updateIpQualityResult,
     pool,
     pingDatabase,
     ensureAdminAuditLogsTable,

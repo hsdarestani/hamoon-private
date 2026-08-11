@@ -49,6 +49,7 @@ function createHetznerLocationDc({ key, label, flag, location, fallbackLocations
     provider: 'hetzner',
     apiType: 'hetzner',
     HETZNER_PASSWORD_ONLY: true,
+    HETZNER_PURCHASE_HEALTH_GATE: process.env.HETZNER_PURCHASE_HEALTH_GATE !== 'false',
     HETZNER_API_TOKEN: token,
     HETZNER_TOKEN: process.env.HETZNER_TOKEN || process.env.HETZNER_API_TOKEN || process.env.HCLOUD_TOKEN,
     token,
