@@ -30,6 +30,7 @@ jobs:
           set -euo pipefail
           python3 scripts/apply-hetzner-delivery-guard.py
           python3 scripts/harden-hetzner-pending-management.py
+          python3 scripts/repair-hetzner-management-bootstrap-compat.py
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -45,6 +46,7 @@ jobs:
           npm run validate:db-exports
           npm run validate:hetzner-lifecycle
           npm run validate:hetzner-pricing
+          node -e "require('./server-display-names-bootstrap').applyPatches(require('fs').readFileSync('index-core.js','utf8')); console.log('SERVER_DISPLAY_BOOTSTRAP_COMPAT=yes')"
           grep -q "rootPassword = srv.root_password || null" index-core.js
           ! grep -q "rootPassword = await openstackApi.resetServerPassword(effectiveDc, null, srv.id)" index-core.js
           grep -q "pending_ip_quality" db.js
@@ -63,7 +65,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No source changes to commit."
           else
-            git commit -m "fix(hetzner): hide pending credentials and sensitive actions"
+            git commit -m "fix(hetzner): keep delivery guard compatible with runtime patches"
             git push origin HEAD:main
           fi
 
@@ -95,10 +97,13 @@ jobs:
           npm run validate:db-exports
           npm run validate:hetzner-lifecycle
           npm run validate:hetzner-pricing
+          node -e "require('./server-display-names-bootstrap').applyPatches(require('fs').readFileSync('index-core.js','utf8')); console.log('SERVER_DISPLAY_BOOTSTRAP_COMPAT=yes')"
 
           pm2 restart hamoonbot --update-env >/dev/null
           sleep 5
-          pm2 describe hamoonbot | grep -E 'status|script path|uptime' || true
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = "online"
 
           echo '=== DEPLOY VERIFICATION ==='
           grep -q "rootPassword = srv.root_password || null" index-core.js && echo 'ORIGINAL_PASSWORD_FLOW=yes'
@@ -131,6 +136,4 @@ jobs:
             }
           }, 1500);
           NODE
-
-          pm2 logs hamoonbot --lines 100 --nostream 2>/dev/null | tail -n 100
           REMOTE
