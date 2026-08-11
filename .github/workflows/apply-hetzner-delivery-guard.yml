@@ -24,8 +24,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply source patch
-        run: python3 scripts/apply-hetzner-delivery-guard.py
+      - name: Apply source patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-hetzner-delivery-guard.py
+          python3 scripts/harden-hetzner-pending-management.py
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -46,6 +50,8 @@ jobs:
           grep -q "pending_ip_quality" db.js
           grep -q "checkIpQuality" services/hetzner-lifecycle.js
           grep -q "HETZNER_PROVISIONING_RECONCILE" index-core.js
+          grep -q "pending Hetzner delivery redacted" index-core.js
+          grep -q "blockUndeliveredHetznerAction" index-core.js
 
       - name: Commit source patch
         shell: bash
@@ -57,7 +63,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No source changes to commit."
           else
-            git commit -m "fix(hetzner): guard delivery until password and IP health pass"
+            git commit -m "fix(hetzner): hide pending credentials and sensitive actions"
             git push origin HEAD:main
           fi
 
@@ -82,7 +88,6 @@ jobs:
           git pull --ff-only
 
           node scripts/restore-server-secret-key.js .env
-
           node --check Hetzner/hetzner-api.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
@@ -106,6 +111,8 @@ jobs:
           grep -q 'pending_ip_quality' db.js && echo 'PENDING_IP_QUALITY=yes'
           grep -q 'checkIpQuality' services/hetzner-lifecycle.js && echo 'IP_QUALITY_GATE=yes'
           grep -q 'HETZNER_PROVISIONING_RECONCILE' index-core.js && echo 'RECONCILER=yes'
+          grep -q 'pending Hetzner delivery redacted' index-core.js && echo 'PENDING_MANAGEMENT_REDACTION=yes'
+          grep -q 'blockUndeliveredHetznerAction' index-core.js && echo 'PENDING_SENSITIVE_ACTION_BLOCK=yes'
 
           node - <<'NODE'
           require('dotenv').config();
@@ -125,5 +132,5 @@ jobs:
           }, 1500);
           NODE
 
-          pm2 logs hamoonbot --lines 80 --nostream 2>/dev/null | tail -n 80
+          pm2 logs hamoonbot --lines 100 --nostream 2>/dev/null | tail -n 100
           REMOTE
