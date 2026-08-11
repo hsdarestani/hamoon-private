@@ -21,18 +21,6 @@ jobs:
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Current repository checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo '=== CURRENT DB LIFECYCLE SYMBOLS ==='
-          grep -nE "async function (markDelivered|listPendingProvisioning|updateScopedStatus|updatePublicIp|getPurchaseForOwner)|markDelivered|listPendingProvisioning" db.js | head -n 120 || true
-          echo '=== CURRENT INDEX RECONCILE SYMBOLS ==='
-          grep -nE "reconcileProvisioning|pending_ssh|pending_ip|markDelivered|waitForReadiness|root_password" index-core.js | head -n 180 || true
-          echo '=== CURRENT DB EXPORTS TAIL ==='
-          tail -n 180 db.js
-
       - name: Prepare SSH
         shell: bash
         run: |
@@ -41,8 +29,7 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Inspect production prerequisites and historical code
+      - name: Inspect old reconcile and secret state
         shell: bash
         run: |
           set -euo pipefail
@@ -53,22 +40,18 @@ jobs:
           OLD_DIR="$(find /root -maxdepth 1 -type d -name 'hamoon-image-ip-stage-20260719_150056' | head -n1)"
           echo "OLD_DIR_FOUND=$([ -n "$OLD_DIR" ] && echo yes || echo no)"
           if [ -n "$OLD_DIR" ]; then
-            echo '=== OLD CREATE SERVER COMPLETE RETURN REGION ==='
-            sed -n '582,690p' "$OLD_DIR/Hetzner/hetzner-api.js"
-            echo '=== OLD DB LIFECYCLE SYMBOLS ==='
-            grep -nE "async function (markDelivered|listPendingProvisioning|updateScopedStatus|updatePublicIp|getPurchaseForOwner)|markDelivered|listPendingProvisioning" "$OLD_DIR/db.js" | head -n 160 || true
-            echo '=== OLD RECONCILIATION INDEX REGION ==='
-            grep -nE "reconcileProvisioning|markDelivered|pending_ssh|pending_ip" "$OLD_DIR/index.js" | tail -n 140 || true
+            echo '=== OLD RECONCILE LIFECYCLE ==='
+            sed -n '535,635p' "$OLD_DIR/services/hetzner-lifecycle.js"
+            echo '=== OLD RECONCILE SCHEDULER ==='
+            sed -n '4455,4535p' "$OLD_DIR/index.js"
           fi
-
           cd "$APP_PATH"
           echo '=== SERVER SECRET KEY STATE ==='
           if grep -q '^SERVER_SECRET_KEY=.' .env 2>/dev/null; then echo 'CURRENT_SECRET_KEY_PRESENT=yes'; else echo 'CURRENT_SECRET_KEY_PRESENT=no'; fi
           found_old=no
-          for f in /root/*/.env /root/*/.env.* /root/*/*/.env 2>/dev/null; do
-            [ -f "$f" ] || continue
+          while IFS= read -r -d '' f; do
             if grep -q '^SERVER_SECRET_KEY=.' "$f"; then found_old=yes; break; fi
-          done
+          done < <(find /root -maxdepth 4 -type f \( -name '.env' -o -name '.env.*' \) -print0 2>/dev/null)
           echo "BACKUP_SECRET_KEY_PRESENT=$found_old"
           node - <<'NODE'
           require('dotenv').config();
@@ -82,7 +65,6 @@ jobs:
             await c.end();
           })().catch(e=>{console.error('DB_DIAG_FAILED='+e.message);process.exitCode=1});
           NODE
-
           echo '=== CHECK-HOST IR NODES SAMPLE ==='
           curl -fsSL -H 'Accept: application/json' https://check-host.net/nodes/hosts | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const a=Object.entries(j.nodes||{}).filter(([,v])=>String(v.location?.[0]||'').toLowerCase()==='ir');console.log('IR_NODE_COUNT='+a.length);console.log(a.slice(0,8).map(([k,v])=>k+' '+(v.location||[]).join('/')).join('\n'))})"
           REMOTE
