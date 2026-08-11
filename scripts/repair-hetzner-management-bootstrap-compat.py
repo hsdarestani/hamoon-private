@@ -29,5 +29,11 @@ if old_keyboard in s:
 elif new_keyboard not in s:
     raise SystemExit('management keyboard compatibility marker not found')
 
+# harden script is intentionally repeatable; collapse any duplicate action guards it may have produced
+single_guard = "  if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;"
+double_guard = single_guard + "\n" + single_guard
+while double_guard in s:
+    s = s.replace(double_guard, single_guard)
+
 p.write_text(s)
 print('repair-hetzner-management-bootstrap-compat: patched')
