@@ -1,0 +1,75 @@
+name: Restore Hetzner Change IP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/hetzner-change-ip.js'
+      - 'hetzner-change-ip-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-hetzner-management-buttons.js'
+      - '.github/workflows/restore-hetzner-change-ip.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SSH_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SSH_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SSH_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SSH_PRIVATE_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source and composed keyboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -c services/hetzner-change-ip.js
+          node -c hetzner-change-ip-bootstrap.js
+          node -c runtime-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+          node -c Hetzner/hetzner-api.js
+          node -c cloud-api.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git pull --ff-only origin main
+          node -c services/hetzner-change-ip.js
+          node -c hetzner-change-ip-bootstrap.js
+          node -c runtime-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+          pm2 restart hamoonbot --update-env
+          sleep 4
+          STATUS="$(pm2 jlist | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const a=JSON.parse(s||"[]").find(x=>x.name==="hamoonbot");process.stdout.write(a?.pm2_env?.status||"missing")})')"
+          echo "HAMOONBOT_STATUS=$STATUS"
+          test "$STATUS" = "online"
+          pm2 show hamoonbot --no-color | sed -n '1,18p'
+          REMOTE
