@@ -54,6 +54,7 @@ jobs:
           grep -q "HETZNER_PROVISIONING_RECONCILE" index-core.js
           grep -q "pending Hetzner delivery redacted" index-core.js
           grep -q "blockUndeliveredHetznerAction" index-core.js
+          test "$(sed -n '/async function handleResetPasswordAsk/,/async function handleResetPasswordConfirm/p' index-core.js | grep -c 'blockUndeliveredHetznerAction')" -eq 1
 
       - name: Commit source patch
         shell: bash
@@ -65,7 +66,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No source changes to commit."
           else
-            git commit -m "fix(hetzner): keep delivery guard compatible with runtime patches"
+            git commit -m "fix(hetzner): keep delivery guard idempotent"
             git push origin HEAD:main
           fi
 
@@ -98,6 +99,7 @@ jobs:
           npm run validate:hetzner-lifecycle
           npm run validate:hetzner-pricing
           node -e "require('./server-display-names-bootstrap').applyPatches(require('fs').readFileSync('index-core.js','utf8')); console.log('SERVER_DISPLAY_BOOTSTRAP_COMPAT=yes')"
+          test "$(sed -n '/async function handleResetPasswordAsk/,/async function handleResetPasswordConfirm/p' index-core.js | grep -c 'blockUndeliveredHetznerAction')" -eq 1
 
           pm2 restart hamoonbot --update-env >/dev/null
           sleep 5
