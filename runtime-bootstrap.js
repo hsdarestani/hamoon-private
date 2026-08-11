@@ -7,12 +7,15 @@ const { applyProviderVisibilityPatches } = require('./provider-visibility-bootst
 const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
 const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
+const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 
 function applyPatches(coreSource) {
-  return applyHetznerChangeIpPatches(
-    applyHetznerTrafficPatches(
-      applyFeaturePatches(
-        applyProviderVisibilityPatches(coreSource)
+  return applyBillingCyclePatches(
+    applyHetznerChangeIpPatches(
+      applyHetznerTrafficPatches(
+        applyFeaturePatches(
+          applyProviderVisibilityPatches(coreSource)
+        )
       )
     )
   );
