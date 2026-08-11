@@ -50,20 +50,27 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           OLD_DIR="$(find /root -maxdepth 1 -type d -name 'hamoon-image-ip-stage-20260719_150056' | head -n1)"
           echo "OLD_DIR_FOUND=$([ -n "$OLD_DIR" ] && echo yes || echo no)"
-          if [ -z "$OLD_DIR" ]; then exit 0; fi
+          if [ -n "$OLD_DIR" ]; then
+            echo '=== OLD HETZNER CREATE RESPONSE HANDLING ==='
+            grep -n -A55 -B15 "async function createServer" "$OLD_DIR/Hetzner/hetzner-api.js" | head -n 180 || true
+            echo '=== OLD PURCHASE DELIVERY CORE MARKERS ==='
+            sed -n '3035,3225p' "$OLD_DIR/index.js"
+            echo '=== OLD LIFECYCLE READINESS ==='
+            sed -n '265,325p' "$OLD_DIR/services/hetzner-lifecycle.js"
+          fi
 
-          echo '=== OLD INDEX PURCHASE/DELIVERY FLOW ==='
-          sed -n '3090,3265p' "$OLD_DIR/index.js"
-          echo '=== OLD LIFECYCLE READINESS ==='
-          sed -n '245,335p' "$OLD_DIR/services/hetzner-lifecycle.js"
-          echo '=== OLD LIFECYCLE PROVISIONING/DELIVERY ==='
-          sed -n '535,735p' "$OLD_DIR/services/hetzner-lifecycle.js"
-          echo '=== OLD LIFECYCLE IP/REACHABILITY TERMS ==='
-          grep -nEi "check.?host|ping|iran|probe|reachable|reachability|clean|block|blacklist|ssh|password|markDelivered|delivered_at|waitForReadiness" "$OLD_DIR/services/hetzner-lifecycle.js" | head -n 260 || true
-          echo '=== OLD INDEX IP/REACHABILITY TERMS ==='
-          grep -nEi "check.?host|ping|iran|probe|reachable|reachability|clean|block|blacklist|ssh|password|markDelivered|delivered_at|waitForReadiness" "$OLD_DIR/index.js" | tail -n 260 || true
+          echo '=== GLOBAL IP QUALITY / MULTI-REGION PROBE SEARCH ==='
+          find /root -maxdepth 5 -type f -size -3M \
+            ! -path '*/node_modules/*' ! -path '*/.git/objects/*' -print0 2>/dev/null \
+            | xargs -0 -r grep -nEHi "check[-_. ]?host|checkhost|ping\.pe|ping[-_. ]?admin|icmp|iran|tehran|mci|mtn|irancell|mokhaberat|clean[-_. ]?ip|ip[-_. ]?(quality|health|clean|check)|blacklist|blocklist|multi[-_. ]?(region|location)|probe[-_. ]?(node|region|location)|reachab(le|ility).*iran" 2>/dev/null \
+            | grep -vE '/node_modules/|package-lock\.json' \
+            | head -n 500 || true
+
+          echo '=== CRON/SYSTEMD POSSIBLE EXTERNAL PROBERS ==='
+          (crontab -l 2>/dev/null || true)
+          grep -RniE "check[-_. ]?host|ping\.pe|iran|clean[-_. ]?ip|blacklist|probe" /etc/cron* /etc/systemd/system 2>/dev/null | head -n 160 || true
 
           echo '=== LIVE RECENT PURCHASE LOGS ==='
           cd "$APP_PATH"
-          pm2 logs hamoonbot --lines 450 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|readiness|ssh" | tail -n 180 || true
+          pm2 logs hamoonbot --lines 500 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|readiness|ssh|ping|probe|iran|clean" | tail -n 220 || true
           REMOTE
