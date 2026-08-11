@@ -46,7 +46,7 @@ jobs:
           git log -1 --oneline
 
           echo '=== CHANGE CYCLE CODE MARKERS ==='
-          grep -nE "makeCycleCb|handleChangeCycleAsk|handleChangeCycleConfirm|case 'CC'|CHANGECYCLE|normalizeStoredCycleAmount|updatePurchaseCycle|getPurchaseByServerId|getUserWallet" index-core.js db.js 2>/dev/null | head -n 220 || true
+          grep -nE "makeCycleCb|handleChangeCycleAsk|handleChangeCycleConfirm|case 'CC'|CHANGECYCLE|normalizeStoredCycleAmount|updatePurchaseCycle|changePurchaseCycleAtomic|getPurchaseByServerId|getUserWallet" index-core.js db.js 2>/dev/null | head -n 240 || true
 
           echo '=== CHANGE CYCLE HANDLER BODY ==='
           START=$(grep -n "async function handleChangeCycleConfirm" index-core.js | head -n1 | cut -d: -f1 || true)
@@ -63,10 +63,42 @@ jobs:
             sed -n "${S},${E}p" index-core.js
           fi
 
+          echo '=== DB CYCLE FUNCTIONS ==='
+          DB_LINE=$(grep -n "async function updatePurchaseCycle" db.js | head -n1 | cut -d: -f1 || true)
+          if [ -n "$DB_LINE" ]; then
+            S=$((DB_LINE-10)); E=$((DB_LINE+190)); sed -n "${S},${E}p" db.js
+          fi
+
           echo '=== RECENT CHANGE CYCLE LOGS ==='
-          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null \
-            | grep -Ei "change cycle|Change Cycle|CHANGECYCLE|cycle|دوره پرداخت|محاسبه و تغییر|wallet|deadlock|lock wait|timeout|ECONN|PROTOCOL|pool" \
-            | tail -n 260 || true
+          pm2 logs hamoonbot --lines 1600 --nostream 2>/dev/null \
+            | grep -Ei "change cycle|Change Cycle|CHANGECYCLE|cycle|دوره پرداخت|محاسبه و تغییر|wallet|deadlock|lock wait|timeout|ECONN|PROTOCOL|pool|DB_UPDATE_CYCLE" \
+            | tail -n 320 || true
+
+          echo '=== MYSQL PROCESSLIST / TRANSACTIONS ==='
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          (async () => {
+            const c = await mysql.createConnection({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            const [p] = await c.query('SHOW FULL PROCESSLIST');
+            for (const r of p) {
+              if (String(r.Command).toLowerCase() !== 'sleep' || Number(r.Time) > 30) {
+                console.log(JSON.stringify({Id:r.Id,Command:r.Command,Time:r.Time,State:r.State,Info:String(r.Info||'').slice(0,180)}));
+              }
+            }
+            try {
+              const [t] = await c.query('SELECT trx_id, trx_state, trx_started, trx_wait_started, trx_mysql_thread_id, LEFT(trx_query,180) AS trx_query FROM information_schema.innodb_trx');
+              console.log('ACTIVE_TRX=' + t.length);
+              for (const r of t) console.log(JSON.stringify(r));
+            } catch (e) { console.log('INNODB_TRX_UNAVAILABLE=' + e.code); }
+            await c.end();
+          })().catch(e => { console.error('DB_DIAG_FAILED', e.code || e.message); process.exitCode = 1; });
+NODE
 
           echo '=== PM2 STATUS ==='
           pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a){if(['hamoonbot','dashboard-server'].includes(p.name)) console.log(p.name,p.pm2_env.status,'restarts='+p.pm2_env.restart_time,'uptime='+(Date.now()-p.pm2_env.pm_uptime));}})" || true
