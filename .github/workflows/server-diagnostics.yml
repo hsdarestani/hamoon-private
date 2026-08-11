@@ -1,0 +1,60 @@
+name: Server Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/server-diagnostics.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo '=== SERVER ==='
+          echo "HOSTNAME=$(hostname)"
+          echo "USER=$(whoami)"
+          echo "APP_PATH_EXISTS=$([ -d "$APP_PATH" ] && echo yes || echo no)"
+          if [ ! -d "$APP_PATH" ]; then exit 2; fi
+          cd "$APP_PATH"
+          echo '=== GIT ==='
+          printf 'HEAD='; git rev-parse HEAD || true
+          printf 'BRANCH='; git rev-parse --abbrev-ref HEAD || true
+          echo 'STATUS_BEGIN'; git status --short || true; echo 'STATUS_END'
+          echo '=== RELEVANT SOURCE ==='
+          grep -n "HETZNER_CREATE_ATTEMPT\|normalizeHetznerServerTypes\|deprecation === null\|server_type: serverType" Hetzner/hetzner-api.js 2>/dev/null | head -n 30 || true
+          echo '=== PM2 ==='
+          if command -v pm2 >/dev/null 2>&1; then
+            pm2 ls --no-color || true
+            echo '=== RECENT HETZNER/422 LOGS ==='
+            pm2 logs --nostream --lines 500 2>&1 | grep -Ei '422|Hetzner createServer|HETZNER_CREATE_ATTEMPT|CPX11|CPX12|ubuntu-26\.04|خطا در خرید سرور' | tail -n 160 || true
+          else
+            echo PM2_NOT_FOUND
+          fi
+          REMOTE
