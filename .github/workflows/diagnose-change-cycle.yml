@@ -1,0 +1,73 @@
+name: Diagnose Billing Cycle Change
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-change-cycle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect live change-cycle path and logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== LIVE COMMIT ==='
+          git rev-parse HEAD
+          git log -1 --oneline
+
+          echo '=== CHANGE CYCLE CODE MARKERS ==='
+          grep -nE "makeCycleCb|handleChangeCycleAsk|handleChangeCycleConfirm|case 'CC'|CHANGECYCLE|normalizeStoredCycleAmount|updatePurchaseCycle|getPurchaseByServerId|getUserWallet" index-core.js db.js 2>/dev/null | head -n 220 || true
+
+          echo '=== CHANGE CYCLE HANDLER BODY ==='
+          START=$(grep -n "async function handleChangeCycleConfirm" index-core.js | head -n1 | cut -d: -f1 || true)
+          if [ -n "$START" ]; then
+            END=$((START+110))
+            sed -n "${START},${END}p" index-core.js
+          fi
+
+          echo '=== LEGACY CC CALLBACK BODY ==='
+          CC_LINE=$(grep -n "case 'CC'" index-core.js | head -n1 | cut -d: -f1 || true)
+          if [ -n "$CC_LINE" ]; then
+            S=$((CC_LINE-15)); [ "$S" -lt 1 ] && S=1
+            E=$((CC_LINE+65))
+            sed -n "${S},${E}p" index-core.js
+          fi
+
+          echo '=== RECENT CHANGE CYCLE LOGS ==='
+          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null \
+            | grep -Ei "change cycle|Change Cycle|CHANGECYCLE|cycle|دوره پرداخت|محاسبه و تغییر|wallet|deadlock|lock wait|timeout|ECONN|PROTOCOL|pool" \
+            | tail -n 260 || true
+
+          echo '=== PM2 STATUS ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a){if(['hamoonbot','dashboard-server'].includes(p.name)) console.log(p.name,p.pm2_env.status,'restarts='+p.pm2_env.restart_time,'uptime='+(Date.now()-p.pm2_env.pm_uptime));}})" || true
+          REMOTE
