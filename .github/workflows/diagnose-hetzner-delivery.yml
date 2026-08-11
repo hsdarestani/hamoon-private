@@ -26,10 +26,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== CURRENT PURCHASE FLOW ==='
-          sed -n '2360,2455p' index-core.js
-          echo '=== CURRENT LIFECYCLE ==='
-          sed -n '1,90p' services/hetzner-lifecycle.js
+          echo '=== CURRENT DB LIFECYCLE SYMBOLS ==='
+          grep -nE "async function (markDelivered|listPendingProvisioning|updateScopedStatus|updatePublicIp|getPurchaseForOwner)|markDelivered|listPendingProvisioning" db.js | head -n 120 || true
+          echo '=== CURRENT INDEX RECONCILE SYMBOLS ==='
+          grep -nE "reconcileProvisioning|pending_ssh|pending_ip|markDelivered|waitForReadiness|root_password" index-core.js | head -n 180 || true
+          echo '=== CURRENT DB EXPORTS TAIL ==='
+          tail -n 180 db.js
 
       - name: Prepare SSH
         shell: bash
@@ -40,7 +42,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect historical production implementation
+      - name: Inspect production prerequisites and historical code
         shell: bash
         run: |
           set -euo pipefail
@@ -51,26 +53,36 @@ jobs:
           OLD_DIR="$(find /root -maxdepth 1 -type d -name 'hamoon-image-ip-stage-20260719_150056' | head -n1)"
           echo "OLD_DIR_FOUND=$([ -n "$OLD_DIR" ] && echo yes || echo no)"
           if [ -n "$OLD_DIR" ]; then
-            echo '=== OLD HETZNER CREATE RESPONSE HANDLING ==='
-            grep -n -A55 -B15 "async function createServer" "$OLD_DIR/Hetzner/hetzner-api.js" | head -n 180 || true
-            echo '=== OLD PURCHASE DELIVERY CORE MARKERS ==='
-            sed -n '3035,3225p' "$OLD_DIR/index.js"
-            echo '=== OLD LIFECYCLE READINESS ==='
-            sed -n '265,325p' "$OLD_DIR/services/hetzner-lifecycle.js"
+            echo '=== OLD CREATE SERVER COMPLETE RETURN REGION ==='
+            sed -n '582,690p' "$OLD_DIR/Hetzner/hetzner-api.js"
+            echo '=== OLD DB LIFECYCLE SYMBOLS ==='
+            grep -nE "async function (markDelivered|listPendingProvisioning|updateScopedStatus|updatePublicIp|getPurchaseForOwner)|markDelivered|listPendingProvisioning" "$OLD_DIR/db.js" | head -n 160 || true
+            echo '=== OLD RECONCILIATION INDEX REGION ==='
+            grep -nE "reconcileProvisioning|markDelivered|pending_ssh|pending_ip" "$OLD_DIR/index.js" | tail -n 140 || true
           fi
 
-          echo '=== GLOBAL IP QUALITY / MULTI-REGION PROBE SEARCH ==='
-          find /root -maxdepth 5 -type f -size -3M \
-            ! -path '*/node_modules/*' ! -path '*/.git/objects/*' -print0 2>/dev/null \
-            | xargs -0 -r grep -nEHi "check[-_. ]?host|checkhost|ping\.pe|ping[-_. ]?admin|icmp|iran|tehran|mci|mtn|irancell|mokhaberat|clean[-_. ]?ip|ip[-_. ]?(quality|health|clean|check)|blacklist|blocklist|multi[-_. ]?(region|location)|probe[-_. ]?(node|region|location)|reachab(le|ility).*iran" 2>/dev/null \
-            | grep -vE '/node_modules/|package-lock\.json' \
-            | head -n 500 || true
-
-          echo '=== CRON/SYSTEMD POSSIBLE EXTERNAL PROBERS ==='
-          (crontab -l 2>/dev/null || true)
-          grep -RniE "check[-_. ]?host|ping\.pe|iran|clean[-_. ]?ip|blacklist|probe" /etc/cron* /etc/systemd/system 2>/dev/null | head -n 160 || true
-
-          echo '=== LIVE RECENT PURCHASE LOGS ==='
           cd "$APP_PATH"
-          pm2 logs hamoonbot --lines 500 --nostream 2>/dev/null | grep -Ei "HETZNER_CREATE|reset_password|pending_ssh|provision|deliver|readiness|ssh|ping|probe|iran|clean" | tail -n 220 || true
+          echo '=== SERVER SECRET KEY STATE ==='
+          if grep -q '^SERVER_SECRET_KEY=.' .env 2>/dev/null; then echo 'CURRENT_SECRET_KEY_PRESENT=yes'; else echo 'CURRENT_SECRET_KEY_PRESENT=no'; fi
+          found_old=no
+          for f in /root/*/.env /root/*/.env.* /root/*/*/.env 2>/dev/null; do
+            [ -f "$f" ] || continue
+            if grep -q '^SERVER_SECRET_KEY=.' "$f"; then found_old=yes; break; fi
+          done
+          echo "BACKUP_SECRET_KEY_PRESENT=$found_old"
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [[s]]=await c.query('SELECT COUNT(*) n FROM server_secrets').catch(()=>[[{n:-1}]]);
+            const [[p]]=await c.query("SELECT COUNT(*) n FROM purchases WHERE datacenter LIKE 'hetzner%' AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality')").catch(()=>[[{n:-1}]]);
+            console.log('SERVER_SECRETS_ROWS='+s.n);
+            console.log('HETZNER_PENDING_ROWS='+p.n);
+            await c.end();
+          })().catch(e=>{console.error('DB_DIAG_FAILED='+e.message);process.exitCode=1});
+          NODE
+
+          echo '=== CHECK-HOST IR NODES SAMPLE ==='
+          curl -fsSL -H 'Accept: application/json' https://check-host.net/nodes/hosts | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const a=Object.entries(j.nodes||{}).filter(([,v])=>String(v.location?.[0]||'').toLowerCase()==='ir');console.log('IR_NODE_COUNT='+a.length);console.log(a.slice(0,8).map(([k,v])=>k+' '+(v.location||[]).join('/')).join('\n'))})"
           REMOTE
