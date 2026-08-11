@@ -1121,7 +1121,6 @@ async function handleAfraSshResetConfirm(chatId, userId, serverId, dcConfig, mes
 async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
   if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
-  if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
   const keyboard = [
     [{ text: '✅ تأیید ریست پسورد', callback_data: makeShortCb(userId, { action: 'RESETPW', dcKey: dcConfig.key, serverId }) }],
     [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
