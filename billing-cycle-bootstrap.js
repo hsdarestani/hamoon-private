@@ -109,13 +109,17 @@ function applyBillingCyclePatches(source) {
       balance: result.newWallet
     });
 
+    const successLines = [
+      '✅ دوره پرداخت سرور «' + String(purchase.server_name || serverId) + '» با موفقیت از ' +
+        getCycleLabel(currentCycle) + ' به ' + getCycleLabel(newCycle) + ' تغییر کرد.',
+      settlementText,
+      'موجودی جدید: ' + formatToman(result.newWallet) + ' تومان'
+    ];
+
     return editOrSendMessage(
       chatId,
       messageId,
-      '✅ دوره پرداخت سرور «' + String(purchase.server_name || serverId) + '» با موفقیت از ' +
-      getCycleLabel(currentCycle) + ' به ' + getCycleLabel(newCycle) + ' تغییر کرد.\n' +
-      settlementText + '\n' +
-      'موجودی جدید: ' + formatToman(result.newWallet) + ' تومان'
+      successLines.join(String.fromCharCode(10))
     );
   } catch (error) {
     console.error('[BILLING_CYCLE_CHANGE_FAILED]', {
