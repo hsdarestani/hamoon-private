@@ -30,15 +30,17 @@ assert.notStrictEqual(
 const regionalAvailabilitySample = [
   {
     name: 'cpx11', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
-    prices: [{ location: 'ash', price_hourly: { gross: '0.0100' }, price_monthly: { gross: '5.00' } }],
+    prices: [{ location: 'hel1', price_hourly: { gross: '0.0100' }, price_monthly: { gross: '5.00' } }],
+    locations: [{ name: 'hel1', available: false, recommended: false, deprecation: { announced: '2025-10-16T06:00:00Z', unavailable_after: '2025-12-31T23:59:59Z' } }],
   },
   {
     name: 'cpx12', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
     prices: [{ location: 'hel1', price_hourly: { gross: '0.0120' }, price_monthly: { gross: '6.00' } }],
+    locations: [{ name: 'hel1', available: true, recommended: true, deprecation: null }],
   },
 ];
 const finlandAvailable = api.normalizeHetznerServerTypes(regionalAvailabilitySample, { key: 'hetzner-finland', HETZNER_LOCATION: 'hel1' });
-assert(!finlandAvailable.some(p => p.id === 'cpx11'), 'CPX11 without HEL1 pricing must not be offered in Finland');
+assert(!finlandAvailable.some(p => p.id === 'cpx11'), 'CPX11 unavailable in HEL1 must not be offered in Finland');
 assert(finlandAvailable.some(p => p.id === 'cpx12'), 'CPX12 with HEL1 pricing should remain available in Finland');
 
 const indexSource = fs.readFileSync(require.resolve('../index.js'), 'utf8');

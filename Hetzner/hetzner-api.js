@@ -67,6 +67,28 @@ function hasConfiguredLocationPrice(serverType, config = {}) {
   );
 }
 
+function hasConfiguredLocationAvailability(serverType, config = {}) {
+  const wantedLocations = configuredPriceLocations(config);
+  if (!wantedLocations.length) return true;
+
+  const perLocation = Array.isArray(serverType?.locations) ? serverType.locations : [];
+  if (!perLocation.length) {
+    // Backward compatibility for API responses without per-location metadata.
+    return hasConfiguredLocationPrice(serverType, config);
+  }
+
+  return wantedLocations.some(location => {
+    const entry = perLocation.find(item =>
+      normalizeLocation(item?.name || item?.location) === location
+    );
+    if (!entry || entry.available === false) return false;
+
+    const unavailableAfter = Date.parse(entry?.deprecation?.unavailable_after || '');
+    if (Number.isFinite(unavailableAfter) && unavailableAfter <= Date.now()) return false;
+    return true;
+  });
+}
+
 function firstPrice(serverType, config = {}) {
   const prices = Array.isArray(serverType?.prices) ? serverType.prices : [];
   const usable = prices.filter(p => p?.price_hourly || p?.price_monthly);
@@ -99,7 +121,7 @@ function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
   const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
   return (serverTypes || [])
-    .filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationPrice(st, config))
+    .filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))
     .map(st => {
       const price = firstPrice(st, config);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
