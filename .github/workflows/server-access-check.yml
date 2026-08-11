@@ -1,0 +1,56 @@
+name: Server Access Check
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/server-access-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ssh-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" || { echo 'HAMOON_SERVER_HOST is missing'; exit 1; }
+          test -n "$SSH_USER" || { echo 'HAMOON_SERVER_USER is missing'; exit 1; }
+          test -n "$SSH_KEY" || { echo 'HAMOON_SERVER_SSH_KEY is missing'; exit 1; }
+          if [ -z "${SSH_PORT:-}" ]; then echo 'HAMOON_SERVER_PORT is missing'; exit 1; fi
+          echo 'Required SSH secrets are present.'
+          if [ -n "${SERVER_PATH:-}" ]; then echo 'HAMOON_SERVER_PATH is present.'; else echo 'HAMOON_SERVER_PATH is not set (SSH test can still continue).'; fi
+
+      - name: Prepare SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keygen -y -f ~/.ssh/hamoon_server_key >/dev/null
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          echo 'SSH private key parsed successfully and host key was retrieved.'
+
+      - name: Test server connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hamoon_server_key \
+            -p "$SSH_PORT" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            "$SSH_USER@$SSH_HOST" \
+            'set -e; echo SSH_OK; echo "HOSTNAME=$(hostname)"; echo "USER=$(whoami)"; echo "PWD=$(pwd)"; if command -v pm2 >/dev/null 2>&1; then echo PM2_OK; pm2 ls --no-color | head -n 30; else echo PM2_NOT_FOUND; fi'
