@@ -83,14 +83,6 @@ jobs:
 
           node scripts/restore-server-secret-key.js .env
 
-          node - <<'NODE'
-          const db = require('./db');
-          db.initializeDatabase()
-            .then(() => db.pool.end())
-            .then(() => console.log('DB_SCHEMA_READY=yes'))
-            .catch(error => { console.error(error); process.exit(1); });
-          NODE
-
           node --check Hetzner/hetzner-api.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
@@ -100,7 +92,7 @@ jobs:
           npm run validate:hetzner-pricing
 
           pm2 restart hamoonbot --update-env >/dev/null
-          sleep 4
+          sleep 5
           pm2 describe hamoonbot | grep -E 'status|script path|uptime' || true
 
           echo '=== DEPLOY VERIFICATION ==='
@@ -118,13 +110,20 @@ jobs:
           node - <<'NODE'
           require('dotenv').config();
           const db = require('./db');
-          (async () => {
-            const [rows] = await db.pool.query("SELECT server_id FROM server_secrets WHERE secret_type='root_password' ORDER BY id DESC LIMIT 1");
-            if (!rows.length) throw new Error('no root password secret rows');
-            const value = await db.getServerSecret(rows[0].server_id, 'root_password');
-            console.log('SERVER_SECRET_DECRYPT_TEST=' + (value ? 'pass' : 'fail'));
-            await db.pool.end();
-            process.exit(value ? 0 : 1);
-          })().catch(() => { console.error('SERVER_SECRET_DECRYPT_TEST=fail'); process.exit(1); });
+          setTimeout(async () => {
+            try {
+              const [rows] = await db.pool.query("SELECT server_id FROM server_secrets WHERE secret_type='root_password' ORDER BY id DESC LIMIT 1");
+              if (!rows.length) throw new Error('no root password secret rows');
+              const value = await db.getServerSecret(rows[0].server_id, 'root_password');
+              console.log('SERVER_SECRET_DECRYPT_TEST=' + (value ? 'pass' : 'fail'));
+              await db.pool.end();
+              process.exit(value ? 0 : 1);
+            } catch (error) {
+              console.error('SERVER_SECRET_DECRYPT_TEST=fail');
+              process.exit(1);
+            }
+          }, 1500);
           NODE
+
+          pm2 logs hamoonbot --lines 80 --nostream 2>/dev/null | tail -n 80
           REMOTE
