@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths:
+      - 'billing-cycle-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-billing-cycle-change.js'
       - '.github/workflows/deploy-billing-cycle-fix.yml'
   workflow_dispatch:
 
