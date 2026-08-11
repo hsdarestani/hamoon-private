@@ -1,0 +1,166 @@
+name: Apply Hetzner Location Availability V2
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/apply-hetzner-location-availability-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch per-location availability
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          api_path = Path('Hetzner/hetzner-api.js')
+          text = api_path.read_text()
+
+          marker = 'function firstPrice(serverType, config = {}) {'
+          helper = '''function hasConfiguredLocationAvailability(serverType, config = {}) {
+            const wantedLocations = configuredPriceLocations(config);
+            if (!wantedLocations.length) return true;
+
+            const perLocation = Array.isArray(serverType?.locations) ? serverType.locations : [];
+            if (!perLocation.length) {
+              // Backward compatibility for API responses without per-location metadata.
+              return hasConfiguredLocationPrice(serverType, config);
+            }
+
+            return wantedLocations.some(location => {
+              const entry = perLocation.find(item =>
+                normalizeLocation(item?.name || item?.location) === location
+              );
+              if (!entry || entry.available === false) return false;
+
+              const unavailableAfter = Date.parse(entry?.deprecation?.unavailable_after || '');
+              if (Number.isFinite(unavailableAfter) && unavailableAfter <= Date.now()) return false;
+              return true;
+            });
+          }
+
+          function firstPrice(serverType, config = {}) {'''
+
+          if 'function hasConfiguredLocationAvailability(serverType, config = {}) {' not in text:
+              if marker not in text:
+                  raise SystemExit('firstPrice marker not found')
+              text = text.replace(marker, helper, 1)
+
+          old_filter = '.filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationPrice(st, config))'
+          new_filter = '.filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))'
+          if old_filter in text:
+              text = text.replace(old_filter, new_filter, 1)
+          elif new_filter not in text:
+              raise SystemExit('expected normalize filter not found')
+
+          api_path.write_text(text)
+
+          test_path = Path('scripts/validate-hetzner-pricing.js')
+          test = test_path.read_text()
+          old_sample = '''const regionalAvailabilitySample = [
+            {
+              name: 'cpx11', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+              prices: [{ location: 'ash', price_hourly: { gross: '0.0100' }, price_monthly: { gross: '5.00' } }],
+            },
+            {
+              name: 'cpx12', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+              prices: [{ location: 'hel1', price_hourly: { gross: '0.0120' }, price_monthly: { gross: '6.00' } }],
+            },
+          ];'''
+          new_sample = '''const regionalAvailabilitySample = [
+            {
+              name: 'cpx11', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+              prices: [{ location: 'hel1', price_hourly: { gross: '0.0100' }, price_monthly: { gross: '5.00' } }],
+              locations: [{ name: 'hel1', available: false, recommended: false, deprecation: { announced: '2025-10-16T06:00:00Z', unavailable_after: '2025-12-31T23:59:59Z' } }],
+            },
+            {
+              name: 'cpx12', cores: 2, memory: 2, disk: 40, deprecated: false, deprecation: null,
+              prices: [{ location: 'hel1', price_hourly: { gross: '0.0120' }, price_monthly: { gross: '6.00' } }],
+              locations: [{ name: 'hel1', available: true, recommended: true, deprecation: null }],
+            },
+          ];'''
+          if old_sample in test:
+              test = test.replace(old_sample, new_sample, 1)
+          elif new_sample not in test:
+              raise SystemExit('validator sample not found')
+
+          test = test.replace(
+              "assert(!finlandAvailable.some(p => p.id === 'cpx11'), 'CPX11 without HEL1 pricing must not be offered in Finland');",
+              "assert(!finlandAvailable.some(p => p.id === 'cpx11'), 'CPX11 unavailable in HEL1 must not be offered in Finland');"
+          )
+          test_path.write_text(test)
+          PY
+
+      - name: Validate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          node -c Hetzner/hetzner-api.js
+          npm run validate:hetzner-pricing
+
+      - name: Commit fix to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Hetzner/hetzner-api.js scripts/validate-hetzner-pricing.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(hetzner): honor per-location server type availability'
+            git push origin HEAD:main
+          fi
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git pull --ff-only origin main
+          node -c Hetzner/hetzner-api.js
+          npm run validate:hetzner-pricing
+          pm2 restart hamoonbot --update-env
+          sleep 3
+          echo '=== LIVE FINLAND CATALOG CHECK ==='
+          node - <<'NODE'
+          const dcs = require('./datacenters');
+          const api = require('./Hetzner/hetzner-api');
+          (async () => {
+            const plans = await api.getHetznerSellablePlans(dcs['hetzner-finland']);
+            const ids = plans.map(p => p.id);
+            console.log('CPX11_VISIBLE=' + ids.includes('cpx11'));
+            console.log('CPX12_VISIBLE=' + ids.includes('cpx12'));
+            console.log('AVAILABLE_PLANS=' + ids.join(','));
+            if (ids.includes('cpx11')) throw new Error('CPX11 is still visible in HEL1');
+            if (!ids.includes('cpx12')) throw new Error('CPX12 is unexpectedly missing in HEL1');
+          })().catch(err => { console.error(err.message); process.exit(1); });
+          NODE
+          pm2 show hamoonbot --no-color | sed -n '1,18p'
+          REMOTE
