@@ -1,0 +1,42 @@
+name: Audit Billing Cycle Data
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-billing-cycle-data.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Audit production billing records
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node -e 'require("dotenv").config(); const mysql=require("mysql2/promise"); (async()=>{const c=await mysql.createConnection({host:process.env.DB_HOST||"localhost",user:process.env.DB_USER||"root",password:process.env.DB_PASSWORD||"",database:process.env.DB_NAME||"hamooncloud_db"}); const [z]=await c.execute("SELECT datacenter,duration,status,COUNT(*) AS n,MIN(updated_at) AS first_seen,MAX(updated_at) AS last_seen FROM purchases WHERE amount=0 AND (status IS NULL OR status NOT IN (\"deleted\",\"cancelled\",\"provider_missing\")) GROUP BY datacenter,duration,status ORDER BY n DESC"); console.log("ZERO_ACTIVE_GROUPS="+z.length); for(const r of z) console.log(JSON.stringify(r)); const [recent]=await c.execute("SELECT type,COUNT(*) AS n,MIN(timestamp) AS first_seen,MAX(timestamp) AS last_seen FROM wallet_logs WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND (type IN (\"upgrade\",\"downgrade\",\"billing_cycle_change\",\"billing_cycle_refund\") OR description LIKE \"%تغییر دوره%\") GROUP BY type ORDER BY n DESC"); console.log("RECENT_CYCLE_LOG_GROUPS="+recent.length); for(const r of recent) console.log(JSON.stringify(r)); const [rz]=await c.execute("SELECT COUNT(*) AS n FROM purchases WHERE amount=0 AND updated_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND (status IS NULL OR status NOT IN (\"deleted\",\"cancelled\",\"provider_missing\"))"); console.log("RECENT_ZERO_ACTIVE="+Number(rz[0].n||0)); await c.end();})().catch(e=>{console.error("AUDIT_FAILED",e.code||e.message);process.exit(1);});'
+          REMOTE
