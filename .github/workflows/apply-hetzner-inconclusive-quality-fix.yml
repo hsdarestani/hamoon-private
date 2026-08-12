@@ -1,0 +1,92 @@
+name: Apply Hetzner Inconclusive Quality Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-hetzner-inconclusive-quality-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-hetzner-inconclusive-quality-fix.py
+          grep -q 'HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS' services/hetzner-lifecycle.js
+          grep -q 'quality_fail_open' services/hetzner-lifecycle.js
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check services/hetzner-lifecycle.js
+          node --check index-core.js
+          npm run validate:db-exports
+          npm run validate:hetzner-lifecycle
+
+      - name: Commit permanent source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Hossein Darestani'
+          git config user.email '45485005+hsdarestani@users.noreply.github.com'
+          git add services/hetzner-lifecycle.js
+          if git diff --cached --quiet; then
+            echo 'SOURCE_CHANGE=none'
+          else
+            git commit -m 'fix(hetzner): avoid indefinite inconclusive IP quality stalls'
+            git push origin HEAD:main
+            echo 'SOURCE_CHANGE=committed'
+          fi
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git pull --ff-only
+          node scripts/restore-server-secret-key.js .env >/dev/null
+          node --check services/hetzner-lifecycle.js
+          node --check index-core.js
+          grep -q 'HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS' services/hetzner-lifecycle.js
+          grep -q 'quality_fail_open' services/hetzner-lifecycle.js
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 4
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = 'online'
+          echo 'PRODUCTION_FIX=verified'
+          REMOTE
