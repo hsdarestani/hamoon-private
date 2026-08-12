@@ -1,4 +1,4 @@
-name: Recover Stuck Hetzner Delivery 299222228
+name: Recover Stuck Hetzner Delivery Srv-HET-d55d04
 
 on:
   push:
@@ -18,7 +18,10 @@ jobs:
       SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
-      TARGET_SERVER_ID: '299222228'
+      TARGET_SERVER_NAME: 'Srv-HET-d55d04'
+      TARGET_HINT_1: '161899726'
+      TARGET_HINT_2: '1367116495'
+      TARGET_HINT_3: '299222228'
     steps:
       - uses: actions/checkout@v4
 
@@ -31,13 +34,13 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Recover purchase and complete delivery
+      - name: Locate purchase and complete delivery
         shell: bash
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
           ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
-            "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+            "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_NAME='$TARGET_SERVER_NAME' TARGET_HINT_1='$TARGET_HINT_1' TARGET_HINT_2='$TARGET_HINT_2' TARGET_HINT_3='$TARGET_HINT_3' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -46,33 +49,73 @@ jobs:
 
           node - <<'NODE'
           require('dotenv').config();
+          process.env.DB_AUTO_INIT = 'false';
           const axios = require('axios');
           const db = require('./db');
           const datacenters = require('./datacenters');
           const cloud = require('./cloud-api');
           const lifecycle = require('./services/hetzner-lifecycle');
 
-          const serverId = String(process.env.TARGET_SERVER_ID || '299222228');
+          const targetName = String(process.env.TARGET_SERVER_NAME || 'Srv-HET-d55d04');
+          const hints = [process.env.TARGET_HINT_1, process.env.TARGET_HINT_2, process.env.TARGET_HINT_3]
+            .map(v => String(v || '').trim()).filter(Boolean);
+
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+          async function resetPasswordWithRetry(dc, serverId) {
+            let lastError = null;
+            for (let attempt = 1; attempt <= 5; attempt += 1) {
+              try {
+                return await cloud.resetServerPassword(dc, null, serverId);
+              } catch (error) {
+                lastError = error;
+                const status = Number(error?.response?.status || error?.status || 0);
+                const code = String(error?.response?.data?.error?.code || error?.code || '');
+                if (status !== 423 && code !== 'locked') throw error;
+                await sleep(attempt * 3000);
+              }
+            }
+            throw lastError || new Error('HETZNER_RESET_PASSWORD_FAILED');
+          }
 
           async function main() {
-            const [rows] = await db.pool.execute(
-              `SELECT telegram_id, server_id, datacenter, server_name, status, public_ip,
-                      delivered_at, provider_action_id, lifecycle_error_code
-                 FROM purchases
-                WHERE server_id = ?
-                LIMIT 1`,
-              [serverId]
-            );
-            if (!rows.length) throw new Error('PURCHASE_NOT_FOUND');
+            const placeholders = hints.map(() => '?').join(',');
+            const sql = `SELECT telegram_id, server_id, datacenter, server_name, status, public_ip,
+                                delivered_at, provider_action_id, lifecycle_error_code, created_at, updated_at
+                           FROM purchases
+                          WHERE server_name = ?
+                             OR server_id IN (${placeholders})
+                             OR telegram_id IN (${placeholders})
+                          ORDER BY (server_name = ?) DESC, created_at DESC
+                          LIMIT 20`;
+            const params = [targetName, ...hints, ...hints, targetName];
+            const [matches] = await db.pool.execute(sql, params);
 
-            const purchase = rows[0];
+            console.log('MATCH_COUNT=' + matches.length);
+            for (const row of matches) {
+              console.log('MATCH=' + JSON.stringify({
+                server_name: row.server_name,
+                server_id: row.server_id,
+                telegram_id: row.telegram_id,
+                datacenter: row.datacenter,
+                status: row.status,
+                delivered: !!row.delivered_at,
+                created_at: row.created_at
+              }));
+            }
+
+            let purchase = matches.find(row => String(row.server_name) === targetName);
+            if (!purchase && matches.length === 1) purchase = matches[0];
+            if (!purchase) throw new Error(matches.length ? 'TARGET_PURCHASE_AMBIGUOUS' : 'PURCHASE_NOT_FOUND_BY_ANY_HINT');
+
+            const serverId = String(purchase.server_id);
             const baseDc = datacenters[purchase.datacenter];
             if (!baseDc) throw new Error(`DATACENTER_NOT_FOUND:${purchase.datacenter}`);
             const dc = { ...baseDc, key: purchase.datacenter };
 
-            console.log('PURCHASE_FOUND=yes');
-            console.log('PURCHASE_SERVER_ID=' + purchase.server_id);
-            console.log('PURCHASE_DATACENTER=' + purchase.datacenter);
+            console.log('TARGET_RESOLVED=yes');
+            console.log('TARGET_SERVER_ID=' + serverId);
+            console.log('TARGET_TELEGRAM_ID=' + purchase.telegram_id);
             console.log('PURCHASE_STATUS_BEFORE=' + purchase.status);
             console.log('PURCHASE_DELIVERED_BEFORE=' + (purchase.delivered_at ? 'yes' : 'no'));
 
@@ -101,7 +144,7 @@ jobs:
 
             if (!rootPassword) {
               console.log('PASSWORD_SECRET_BEFORE=missing');
-              rootPassword = await cloud.resetServerPassword(dc, null, serverId);
+              rootPassword = await resetPasswordWithRetry(dc, serverId);
               if (!rootPassword) throw new Error('HETZNER_RESET_PASSWORD_RETURNED_EMPTY');
               await db.upsertServerSecret({
                 telegramId: purchase.telegram_id,
@@ -119,7 +162,7 @@ jobs:
               await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, 'provisioning');
             }
 
-            const readiness = await lifecycle.waitForReadiness(dc, serverId, { timeoutMs: 120000 });
+            let readiness = await lifecycle.waitForReadiness(dc, serverId, { timeoutMs: 120000 });
             console.log('READINESS_STATUS=' + readiness.status);
             console.log('READINESS_READY=' + (readiness.ready ? 'yes' : 'no'));
             console.log('READINESS_IP_PRESENT=' + (readiness.ip ? 'yes' : 'no'));
@@ -128,24 +171,40 @@ jobs:
               console.log('IP_QUALITY_OK=' + (readiness.quality.ok ? 'yes' : 'no'));
             }
 
+            if (!readiness.ready && readiness.status === 'pending_ip_quality' && readiness.quality?.definitive) {
+              console.log('IP_ROTATION_ATTEMPT=yes');
+              const rotated = await lifecycle.rotateProvisioningIp({ dc, serverId });
+              await db.updatePublicIp(purchase.telegram_id, serverId, purchase.datacenter, rotated.newIp);
+              readiness = await lifecycle.waitForReadiness(dc, serverId, { timeoutMs: 120000 });
+              console.log('READINESS_AFTER_ROTATION_STATUS=' + readiness.status);
+              console.log('READINESS_AFTER_ROTATION_READY=' + (readiness.ready ? 'yes' : 'no'));
+            }
+
             if (!readiness.ready) {
               await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, readiness.status || 'provisioning');
               throw new Error(`SERVER_NOT_READY:${readiness.status || 'unknown'}`);
             }
 
-            await db.markDelivered(purchase.telegram_id, serverId, purchase.datacenter, readiness.ip || providerIp || null);
+            if (!purchase.delivered_at) {
+              await db.markDelivered(purchase.telegram_id, serverId, purchase.datacenter, readiness.ip || providerIp || null);
+            } else {
+              await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, 'active');
+              await db.updatePublicIp?.(purchase.telegram_id, serverId, purchase.datacenter, readiness.ip || providerIp || null);
+            }
+
             console.log('DELIVERY_STATUS=active');
-            console.log('DELIVERY_IP=' + (readiness.ip || providerIp || 'unknown'));
+            console.log('DELIVERY_IP_PRESENT=yes');
 
             const token = process.env.TELEGRAM_BOT_TOKEN;
             if (token && purchase.telegram_id) {
+              const finalIp = readiness.ip || providerIp || '';
               const text = [
                 `✅ سرور ${purchase.server_name || serverId} آماده و تحویل شد.`,
-                `IP: ${readiness.ip || providerIp || 'نامشخص'}`,
+                `IP: ${finalIp || 'نامشخص'}`,
                 'SSH user: root',
                 `Root password: ${rootPassword}`,
                 '',
-                `ssh root@${readiness.ip || providerIp || ''}`
+                `ssh root@${finalIp}`
               ].join('\n');
               await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
                 chat_id: String(purchase.telegram_id),
@@ -155,6 +214,15 @@ jobs:
             } else {
               console.log('DELIVERY_NOTIFICATION_SENT=no');
             }
+
+            const [verifyRows] = await db.pool.execute(
+              `SELECT status, public_ip, delivered_at FROM purchases WHERE server_id = ? LIMIT 1`,
+              [serverId]
+            );
+            const verified = verifyRows[0] || {};
+            console.log('VERIFY_STATUS=' + String(verified.status || 'missing'));
+            console.log('VERIFY_DELIVERED=' + (verified.delivered_at ? 'yes' : 'no'));
+            console.log('VERIFY_IP_PRESENT=' + (verified.public_ip ? 'yes' : 'no'));
           }
 
           main()
