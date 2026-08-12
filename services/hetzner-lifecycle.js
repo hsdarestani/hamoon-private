@@ -337,6 +337,63 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
         await db.updateIpQualityResult(purchase.telegram_id, purchase.server_id, purchase.datacenter, qualitySummary(readiness.quality), false);
       }
 
+      // Check-Host is an external signal, not the server itself. If Hetzner is running,
+      // IPv4 exists and SSH/22 was reachable, an inconclusive probe must not strand a
+      // healthy purchase forever. Keep a grace period for repeated probes, then fail open
+      // only for non-definitive quality results. Definitive failures still rotate IPs below.
+      const configuredQualityFailOpenMs = Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS || 5 * 60 * 1000);
+      const qualityFailOpenMs = Number.isFinite(configuredQualityFailOpenMs)
+        ? Math.max(60 * 1000, configuredQualityFailOpenMs)
+        : 5 * 60 * 1000;
+      const purchaseCreatedMs = new Date(purchase.created_at || purchase.lifecycle_updated_at || 0).getTime();
+      const qualityPendingAgeMs = Number.isFinite(purchaseCreatedMs) && purchaseCreatedMs > 0
+        ? Math.max(0, Date.now() - purchaseCreatedMs)
+        : 0;
+      const qualityInconclusiveTimedOut = Boolean(
+        isDelivery &&
+        readiness.status === 'pending_ip_quality' &&
+        readiness.ip &&
+        readiness.quality &&
+        readiness.quality.definitive === false &&
+        qualityPendingAgeMs >= qualityFailOpenMs
+      );
+
+      if (qualityInconclusiveTimedOut) {
+        const failOpenQuality = {
+          ...readiness.quality,
+          fail_open: true,
+          reason: `${readiness.quality.reason || 'inconclusive'}:fail_open_after_timeout`
+        };
+        if (db.updateIpQualityResult) {
+          await db.updateIpQualityResult(
+            purchase.telegram_id,
+            purchase.server_id,
+            purchase.datacenter,
+            qualitySummary(failOpenQuality),
+            false
+          );
+        }
+        const newlyDelivered = Boolean(await db.markDelivered?.(
+          purchase.telegram_id,
+          purchase.server_id,
+          purchase.datacenter,
+          readiness.ip
+        ));
+        results.push({
+          server_id: purchase.server_id,
+          telegram_id: purchase.telegram_id,
+          datacenter: purchase.datacenter,
+          previous_status: purchase.status,
+          status: 'active',
+          ready: true,
+          newly_delivered: newlyDelivered,
+          ip: readiness.ip,
+          quality: failOpenQuality,
+          quality_fail_open: true
+        });
+        continue;
+      }
+
       if (readiness.ready) {
         let newlyDelivered = false;
         if (isDelivery) newlyDelivered = Boolean(await db.markDelivered?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, readiness.ip));
