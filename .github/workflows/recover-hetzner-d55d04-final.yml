@@ -1,0 +1,146 @@
+name: Deliver Healthy Hetzner Server Srv-HET-d55d04
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-hetzner-d55d04-final.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_NAME: 'Srv-HET-d55d04'
+      TARGET_SERVER_ID: '161899726'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Verify core readiness and deliver
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_NAME='$TARGET_SERVER_NAME' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node scripts/restore-server-secret-key.js .env >/dev/null
+          node - <<'NODE'
+          require('dotenv').config();
+          process.env.DB_AUTO_INIT = 'false';
+          const axios = require('axios');
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const lifecycle = require('./services/hetzner-lifecycle');
+
+          async function main() {
+            const serverId = String(process.env.TARGET_SERVER_ID);
+            const serverName = String(process.env.TARGET_SERVER_NAME);
+            const [rows] = await db.pool.execute(
+              `SELECT telegram_id, server_id, datacenter, server_name, status, delivered_at, created_at
+                 FROM purchases
+                WHERE server_id = ? AND server_name = ?
+                LIMIT 1`,
+              [serverId, serverName]
+            );
+            if (rows.length !== 1) throw new Error('TARGET_PURCHASE_NOT_FOUND');
+            const purchase = rows[0];
+            const ageMs = Date.now() - new Date(purchase.created_at).getTime();
+            if (!Number.isFinite(ageMs) || ageMs < 5 * 60 * 1000) throw new Error('QUALITY_GRACE_PERIOD_NOT_ELAPSED');
+
+            const dcBase = datacenters[purchase.datacenter];
+            if (!dcBase) throw new Error('DATACENTER_NOT_FOUND');
+            const dc = { ...dcBase, key: purchase.datacenter };
+
+            const secret = await db.getServerSecret(serverId, 'root_password');
+            if (!secret) throw new Error('ROOT_PASSWORD_SECRET_MISSING');
+            console.log('PASSWORD_SECRET=present');
+
+            const providerServer = await cloud.getServer(dc, null, serverId);
+            console.log('PROVIDER_STATUS=' + String(providerServer?.status || 'unknown'));
+            console.log('PROVIDER_IP_PRESENT=' + (lifecycle.publicIpv4(providerServer) ? 'yes' : 'no'));
+
+            // The external Check-Host quality gate was inconclusive for >5 minutes.
+            // Core delivery still requires Hetzner running state, public IPv4 and reachable SSH/22.
+            const readiness = await lifecycle.waitForReadiness(dc, serverId, {
+              timeoutMs: 120000,
+              requireIpQuality: false
+            });
+            console.log('CORE_READINESS_STATUS=' + readiness.status);
+            console.log('CORE_READINESS_READY=' + (readiness.ready ? 'yes' : 'no'));
+            if (!readiness.ready || !readiness.ip) throw new Error(`CORE_NOT_READY:${readiness.status || 'unknown'}`);
+
+            let newlyDelivered = false;
+            if (!purchase.delivered_at) {
+              newlyDelivered = Boolean(await db.markDelivered(
+                purchase.telegram_id,
+                serverId,
+                purchase.datacenter,
+                readiness.ip
+              ));
+            } else {
+              await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, 'active');
+              await db.updatePublicIp(purchase.telegram_id, serverId, purchase.datacenter, readiness.ip);
+            }
+
+            const [verifyRows] = await db.pool.execute(
+              `SELECT status, public_ip, delivered_at FROM purchases WHERE server_id = ? LIMIT 1`,
+              [serverId]
+            );
+            const verify = verifyRows[0] || {};
+            console.log('VERIFY_STATUS=' + String(verify.status || 'missing'));
+            console.log('VERIFY_DELIVERED=' + (verify.delivered_at ? 'yes' : 'no'));
+            console.log('VERIFY_IP_PRESENT=' + (verify.public_ip ? 'yes' : 'no'));
+            console.log('NEWLY_DELIVERED=' + (newlyDelivered ? 'yes' : 'no'));
+            if (verify.status !== 'active' || !verify.delivered_at || !verify.public_ip) {
+              throw new Error('DB_DELIVERY_VERIFY_FAILED');
+            }
+
+            if (newlyDelivered) {
+              const token = process.env.TELEGRAM_BOT_TOKEN;
+              if (!token) throw new Error('TELEGRAM_BOT_TOKEN_MISSING');
+              const text = [
+                `✅ سرور ${serverName} آماده و تحویل شد.`,
+                `IP: ${readiness.ip}`,
+                'SSH user: root',
+                `Root password: ${secret}`,
+                '',
+                `ssh root@${readiness.ip}`
+              ].join('\n');
+              await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+                chat_id: String(purchase.telegram_id),
+                text
+              }, { timeout: 15000 });
+              console.log('DELIVERY_NOTIFICATION_SENT=yes');
+            } else {
+              console.log('DELIVERY_NOTIFICATION_SENT=not_needed_already_delivered');
+            }
+          }
+
+          main()
+            .catch(error => {
+              console.error('FINAL_RECOVERY_FAILED=' + String(error?.message || error).slice(0, 200));
+              process.exitCode = 1;
+            })
+            .finally(async () => {
+              try { await db.pool.end(); } catch (_) {}
+            });
+          NODE
+          REMOTE
