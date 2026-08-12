@@ -1,0 +1,169 @@
+name: Recover Stuck Hetzner Delivery 299222228
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-hetzner-299222228.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_ID: '299222228'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Recover purchase and complete delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          node scripts/restore-server-secret-key.js .env >/dev/null
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const axios = require('axios');
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const lifecycle = require('./services/hetzner-lifecycle');
+
+          const serverId = String(process.env.TARGET_SERVER_ID || '299222228');
+
+          async function main() {
+            const [rows] = await db.pool.execute(
+              `SELECT telegram_id, server_id, datacenter, server_name, status, public_ip,
+                      delivered_at, provider_action_id, lifecycle_error_code
+                 FROM purchases
+                WHERE server_id = ?
+                LIMIT 1`,
+              [serverId]
+            );
+            if (!rows.length) throw new Error('PURCHASE_NOT_FOUND');
+
+            const purchase = rows[0];
+            const baseDc = datacenters[purchase.datacenter];
+            if (!baseDc) throw new Error(`DATACENTER_NOT_FOUND:${purchase.datacenter}`);
+            const dc = { ...baseDc, key: purchase.datacenter };
+
+            console.log('PURCHASE_FOUND=yes');
+            console.log('PURCHASE_SERVER_ID=' + purchase.server_id);
+            console.log('PURCHASE_DATACENTER=' + purchase.datacenter);
+            console.log('PURCHASE_STATUS_BEFORE=' + purchase.status);
+            console.log('PURCHASE_DELIVERED_BEFORE=' + (purchase.delivered_at ? 'yes' : 'no'));
+
+            if (purchase.provider_action_id) {
+              try {
+                await cloud.waitHetznerAction(dc, purchase.provider_action_id, 180000);
+                console.log('CREATE_ACTION_READY=yes');
+              } catch (error) {
+                console.log('CREATE_ACTION_READY=no');
+                console.log('CREATE_ACTION_ERROR=' + String(error?.message || error).slice(0, 160));
+              }
+            }
+
+            const providerServer = await cloud.getServer(dc, null, serverId);
+            const providerIp = lifecycle.publicIpv4(providerServer);
+            console.log('PROVIDER_FOUND=yes');
+            console.log('PROVIDER_STATUS=' + String(providerServer?.status || 'unknown'));
+            console.log('PROVIDER_IP_PRESENT=' + (providerIp ? 'yes' : 'no'));
+
+            let rootPassword = null;
+            try {
+              rootPassword = await db.getServerSecret(serverId, 'root_password');
+            } catch (error) {
+              if (error?.code !== 'SERVER_SECRET_KEY_MISSING') throw error;
+            }
+
+            if (!rootPassword) {
+              console.log('PASSWORD_SECRET_BEFORE=missing');
+              rootPassword = await cloud.resetServerPassword(dc, null, serverId);
+              if (!rootPassword) throw new Error('HETZNER_RESET_PASSWORD_RETURNED_EMPTY');
+              await db.upsertServerSecret({
+                telegramId: purchase.telegram_id,
+                serverId,
+                datacenter: purchase.datacenter,
+                secretType: 'root_password',
+                secretValue: rootPassword
+              });
+              console.log('PASSWORD_SECRET_RECOVERED=yes');
+            } else {
+              console.log('PASSWORD_SECRET_BEFORE=present');
+            }
+
+            if (!purchase.delivered_at) {
+              await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, 'provisioning');
+            }
+
+            const readiness = await lifecycle.waitForReadiness(dc, serverId, { timeoutMs: 120000 });
+            console.log('READINESS_STATUS=' + readiness.status);
+            console.log('READINESS_READY=' + (readiness.ready ? 'yes' : 'no'));
+            console.log('READINESS_IP_PRESENT=' + (readiness.ip ? 'yes' : 'no'));
+            if (readiness.quality) {
+              console.log('IP_QUALITY_REASON=' + String(readiness.quality.reason || 'unknown'));
+              console.log('IP_QUALITY_OK=' + (readiness.quality.ok ? 'yes' : 'no'));
+            }
+
+            if (!readiness.ready) {
+              await db.updateScopedStatus(purchase.telegram_id, serverId, purchase.datacenter, readiness.status || 'provisioning');
+              throw new Error(`SERVER_NOT_READY:${readiness.status || 'unknown'}`);
+            }
+
+            await db.markDelivered(purchase.telegram_id, serverId, purchase.datacenter, readiness.ip || providerIp || null);
+            console.log('DELIVERY_STATUS=active');
+            console.log('DELIVERY_IP=' + (readiness.ip || providerIp || 'unknown'));
+
+            const token = process.env.TELEGRAM_BOT_TOKEN;
+            if (token && purchase.telegram_id) {
+              const text = [
+                `✅ سرور ${purchase.server_name || serverId} آماده و تحویل شد.`,
+                `IP: ${readiness.ip || providerIp || 'نامشخص'}`,
+                'SSH user: root',
+                `Root password: ${rootPassword}`,
+                '',
+                `ssh root@${readiness.ip || providerIp || ''}`
+              ].join('\n');
+              await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+                chat_id: String(purchase.telegram_id),
+                text
+              }, { timeout: 15000 });
+              console.log('DELIVERY_NOTIFICATION_SENT=yes');
+            } else {
+              console.log('DELIVERY_NOTIFICATION_SENT=no');
+            }
+          }
+
+          main()
+            .catch(error => {
+              console.error('RECOVERY_FAILED=' + String(error?.message || error).slice(0, 220));
+              process.exitCode = 1;
+            })
+            .finally(async () => {
+              try { await db.pool.end(); } catch (_) {}
+            });
+          NODE
+          REMOTE
