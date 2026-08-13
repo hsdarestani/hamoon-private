@@ -1,4 +1,4 @@
-# Production deployment with validation and authenticated read-only smoke checks.
+# Production dashboard deployment with validation and authenticated read-only smoke checks.
 name: Deploy Admin Dashboard
 
 on:
