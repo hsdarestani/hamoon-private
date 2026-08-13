@@ -1,0 +1,70 @@
+name: Diagnose Dashboard Charts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-dashboard-charts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Diagnose production chart queries
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== VERSION ==='
+          git rev-parse --short HEAD
+          echo '=== PM2 STATUS ==='
+          pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+          echo '=== DASHBOARD ERRORS ==='
+          pm2 logs dashboard-server --lines 300 --nostream 2>&1 | grep -Ei 'DASHBOARD_API_ERROR|charts|ER_|SQL|syntax|Incorrect|INTERVAL|DATE_FORMAT|ONLY_FULL_GROUP_BY|Unknown column|parse' | tail -n 120 || true
+          echo '=== DIRECT DB DAILY STATS TEST ==='
+          node <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          (async () => {
+            const tests = [
+              ['revenue', () => db.getAdminRevenueStats(30)],
+              ['purchases', () => db.getAdminPurchaseStats(30)],
+              ['wallet-flow', () => db.getAdminWalletFlowStats(30)]
+            ];
+            for (const [name, fn] of tests) {
+              try {
+                const rows = await fn();
+                console.log(name, 'OK', Array.isArray(rows) ? rows.length : typeof rows, Array.isArray(rows) ? rows.slice(-2) : '');
+              } catch (error) {
+                console.log(name, 'FAIL', error && error.code, error && error.errno, error && error.sqlState, error && error.sqlMessage, error && error.message);
+                if (error && error.sql) console.log('SQL:', error.sql);
+              }
+            }
+            await db.pool.end();
+          })().catch(error => { console.error(error); process.exit(1); });
+          NODE
+          REMOTE
