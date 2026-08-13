@@ -1,0 +1,68 @@
+name: Fix Dashboard Chart Grouping
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-dashboard-chart-grouping.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch ONLY_FULL_GROUP_BY compatible chart query
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('db.js')
+          text = p.read_text()
+          old = "const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY DATE(${dateField})`, [series.length]);"
+          new = "const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE_FORMAT(${dateField}, '%Y-%m-%d') ORDER BY day`, [series.length]);"
+          if new in text:
+              print('dailyStats grouping already fixed')
+          elif old in text:
+              p.write_text(text.replace(old, new, 1))
+              print('patched dailyStats grouping')
+          else:
+              raise SystemExit('Expected dailyStats query not found; refusing unsafe edit')
+
+          v = Path('scripts/validate-dashboard-v2.js')
+          val = v.read_text()
+          marker = "assert(/SUM\\(wallet\\).*totalWalletBalance FROM users/.test(db), 'overview total balance uses current user wallets');"
+          assertion = "assert(db.includes(\"GROUP BY DATE_FORMAT(${dateField}, '%Y-%m-%d') ORDER BY day\"), 'chart dailyStats is ONLY_FULL_GROUP_BY compatible');"
+          if assertion not in val:
+              if marker not in val:
+                  raise SystemExit('Validator insertion marker not found')
+              v.write_text(val.replace(marker, marker + "\n" + assertion, 1))
+              print('added chart grouping regression assertion')
+          PY
+
+          node --check db.js
+          node --check scripts/validate-dashboard-v2.js
+          node scripts/validate-dashboard.js
+          node scripts/validate-dashboard-v2.js
+
+      - name: Commit chart fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add db.js scripts/validate-dashboard-v2.js
+          if git diff --cached --quiet; then
+            echo 'No source changes needed.'
+          else
+            git commit -m 'Fix dashboard charts under ONLY_FULL_GROUP_BY'
+            git push origin HEAD:main
+          fi
