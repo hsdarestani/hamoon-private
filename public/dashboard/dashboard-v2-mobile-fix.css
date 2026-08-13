@@ -1,11 +1,11 @@
 /* Mobile interaction hardening for Dashboard v2 */
 @media(max-width:980px){
-  main>header{grid-template-columns:minmax(0,1fr)!important;gap:8px!important;align-items:stretch!important;padding-right:58px!important;overflow:visible!important}
-  main>header>div:first-of-type{display:block!important;width:100%!important;min-width:0!important;position:static!important}
-  main>header .mobile-menu-btn{display:grid!important;place-items:center!important;position:absolute!important;right:10px!important;top:10px!important;left:auto!important;width:38px!important;height:38px!important;min-width:38px!important;padding:0!important;z-index:100!important;pointer-events:auto!important;touch-action:manipulation!important}
-  main>header #title{display:block!important;min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;padding:0!important}
-  main>header #health{display:flex!important;margin-top:2px!important;min-width:0!important}
-  main>header #globalSearch{grid-column:1 / -1!important;width:100%!important;max-width:none!important;min-width:0!important;position:relative!important;z-index:1!important}
+  main>header{grid-template-columns:minmax(0,1fr)!important;gap:8px!important;align-items:stretch!important;padding-right:58px!important;overflow:visible!important;pointer-events:none!important}
+  main>header>div:first-of-type{display:block!important;width:100%!important;min-width:0!important;position:static!important;pointer-events:none!important}
+  main>header .mobile-menu-btn{display:grid!important;place-items:center!important;position:absolute!important;right:10px!important;top:10px!important;left:auto!important;width:38px!important;height:38px!important;min-width:38px!important;padding:0!important;z-index:1000!important;pointer-events:auto!important;touch-action:manipulation!important}
+  main>header #title{display:block!important;min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;padding:0!important;pointer-events:none!important}
+  main>header #health{display:flex!important;margin-top:2px!important;min-width:0!important;pointer-events:none!important}
+  main>header #globalSearch{grid-column:1 / -1!important;width:100%!important;max-width:none!important;min-width:0!important;position:relative!important;z-index:10!important;pointer-events:auto!important}
 }
 @media(max-width:720px){
   main>header{position:sticky!important;top:6px!important;padding:8px 54px 8px 8px!important}
