@@ -19,6 +19,42 @@
     }
   }
 
+  // Scale wallet-flow bars relative to the largest value in the selected range.
+  // The old renderer treated rial values as CSS percentages directly, which
+  // saturated almost every non-zero bar at 100%.
+  flowBars = function flowBarsScaled(rows) {
+    if (!rows?.length || rows.every(r => !Number(r.credits) && !Number(r.debits))) return empty();
+    const max = Math.max(1, ...rows.flatMap(r => [Number(r.credits) || 0, Number(r.debits) || 0]));
+    return `<div class="flow">${rows.map(r => {
+      const credits = Number(r.credits) || 0;
+      const debits = Number(r.debits) || 0;
+      const creditHeight = credits ? Math.max(3, credits / max * 100) : 0;
+      const debitHeight = debits ? Math.max(3, debits / max * 100) : 0;
+      return `<span title="${esc(r.day)} +${esc(credits)} -${esc(debits)}"><i style="height:${creditHeight}%"></i><b style="height:${debitHeight}%"></b></span>`;
+    }).join('')}</div>`;
+  };
+
+  function datacenterSummary(rows) {
+    if (!rows?.length) return empty();
+    const grouped = new Map();
+    for (const row of rows) {
+      const key = String(row.datacenter || 'نامشخص');
+      const item = grouped.get(key) || { datacenter: key, total: 0, active: 0, pending: 0, deleted: 0 };
+      const count = Number(row.count) || 0;
+      item.total += count;
+      if (row.status === 'active') item.active += count;
+      else if (row.status === 'deleted') item.deleted += count;
+      else item.pending += count;
+      grouped.set(key, item);
+    }
+    const items = [...grouped.values()].sort((a, b) => b.total - a.total);
+    return `<div class="dc-summary">${items.map(item => `
+      <div class="dc-row">
+        <div class="dc-name"><b>${esc(item.datacenter)}</b><span>${fmt(item.total)} سرور</span></div>
+        <div class="dc-counts"><span class="dc-active">فعال ${fmt(item.active)}</span>${item.pending ? `<span class="dc-pending">در انتظار ${fmt(item.pending)}</span>` : ''}${item.deleted ? `<span class="dc-deleted">حذف ${fmt(item.deleted)}</span>` : ''}</div>
+      </div>`).join('')}</div>`;
+  }
+
   // The original loader returned promises from inside try/catch without awaiting
   // them, so rejected API/render promises left the skeleton on screen forever.
   load = async function loadSafe(s = current) {
@@ -85,15 +121,11 @@
         <div class="cards kpi-grid">
           ${cards.map(c => `<button class="card kpi-card" onclick="metricDetails('${c[0]}')"><span>${c[1]}</span><b>${fmt(c[2])}</b><small>برای مشاهده جزئیات کلیک کنید</small></button>`).join('')}
         </div>
-        <div class="cards wide">
+        <div class="cards wide overview-panels">
           <div class="panel"><h3>درآمد ۳۰ روز</h3>${bars(rev, 'value')}</div>
           <div class="panel"><h3>خریدها</h3>${bars(pur, 'value')}</div>
           <div class="panel"><h3>جریان کیف پول</h3>${flowBars(flow)}</div>
-          <div class="panel"><h3>دیتاسنترها</h3>${table(dc, [
-            ['datacenter', 'دیتاسنتر'],
-            ['status', 'وضعیت', r => badge(r.status)],
-            ['count', 'تعداد', r => fmt(r.count)]
-          ], () => '')}</div>
+          <div class="panel overview-dc"><h3>دیتاسنترها</h3>${datacenterSummary(dc)}</div>
         </div>`;
     } catch (error) {
       renderLoadError(error);
