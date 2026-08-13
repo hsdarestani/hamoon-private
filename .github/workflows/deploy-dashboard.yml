@@ -9,6 +9,8 @@ on:
       - 'server.js'
       - 'db.js'
       - 'scripts/validate-dashboard.js'
+      - 'scripts/validate-dashboard-v2.js'
+      - 'scripts/smoke-dashboard-live.js'
       - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
 
@@ -37,9 +39,13 @@ jobs:
           set -euo pipefail
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
+          node --check public/dashboard/dashboard-v2.js
           node --check dashboard-api.js
+          node --check db.js
           node --check server.js
+          node --check scripts/smoke-dashboard-live.js
           node scripts/validate-dashboard.js
+          node scripts/validate-dashboard-v2.js
 
       - name: Prepare SSH
         shell: bash
@@ -76,9 +82,13 @@ jobs:
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
+          node --check public/dashboard/dashboard-v2.js
           node --check dashboard-api.js
+          node --check db.js
           node --check server.js
+          node --check scripts/smoke-dashboard-live.js
           node scripts/validate-dashboard.js
+          node scripts/validate-dashboard-v2.js
 
           echo '=== RESTART DASHBOARD ==='
           pm2 restart dashboard-server --update-env
@@ -89,8 +99,11 @@ jobs:
           curl -fsS --max-time 8 http://127.0.0.1:3000/health
           echo
 
+          echo '=== LIVE READ-ONLY SMOKE ==='
+          DASHBOARD_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-dashboard-live.js
+
           echo '=== RECENT DASHBOARD ERRORS ==='
-          pm2 logs dashboard-server --lines 100 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|dashboard|error|failed' | tail -n 50 || true
+          pm2 logs dashboard-server --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|DASHBOARD_API_ERROR|dashboard.*failed' | tail -n 60 || true
 
           echo '=== AFTER ==='
           git rev-parse --short HEAD
