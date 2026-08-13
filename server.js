@@ -37,6 +37,14 @@ const dashboardDir = path.join(__dirname, 'public', 'dashboard');
 const consoleDir = path.join(__dirname, 'public', 'console');
 const noVncDir = path.join(__dirname, 'node_modules', '@novnc', 'novnc');
 
+app.use('/dashboard', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+
 function requireDashboardPage(req, res, next) {
   return requireAuth(req, {
     ...res,

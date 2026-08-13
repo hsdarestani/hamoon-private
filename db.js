@@ -1220,14 +1220,14 @@ async function getAdminOverviewStats() {
     try {
         const userSetSql = await adminUserCanonicalSetSql(conn);
         const [[users]] = await conn.query(`SELECT COUNT(*) totalUsers FROM (${userSetSql}) cu`);
-        const [[walletTotal]] = await conn.query(`SELECT COALESCE(SUM(amount),0) totalWalletBalance FROM wallet_logs`);
+        const [[walletTotal]] = await conn.query(`SELECT COALESCE(SUM(wallet),0) totalWalletBalance FROM users`);
         const [[shahkar]] = await conn.query(`SELECT COALESCE(SUM(shahkar_verified = 1),0) shahkarVerifiedUsers FROM users`).catch(async()=>[[{shahkarVerifiedUsers:0}]]);
         users.shahkarVerifiedUsers = shahkar.shahkarVerifiedUsers;
         users.totalWalletBalance = walletTotal.totalWalletBalance;
-        const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,
+        const [[servers]] = await conn.query(`SELECT COALESCE(SUM(status='active'),0) activeServers, COALESCE(SUM(status IN ('suspended','stopped','stop','shutoff','powered_off','poweroff','paused','shelved','shelved_offloaded','pending_ssh','pending_ip','pending_ip_quality','provisioning','building','rebuilding','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,
             COALESCE(SUM(status='deleted'),0) deletedServers, COUNT(*) totalPurchases,
-            COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter IN (${hetznerDatacenterSqlList})),0) hetznerServers,
-            COALESCE(SUM(datacenter LIKE '%openstack%'),0) openstackServers, COALESCE(SUM(datacenter='tebyan'),0) tebyanServers,
+            COALESCE(SUM(datacenter='afracloud' AND status<>'deleted'),0) afraServers, COALESCE(SUM(datacenter IN (${hetznerDatacenterSqlList}) AND status<>'deleted'),0) hetznerServers,
+            COALESCE(SUM(datacenter LIKE '%openstack%' AND status<>'deleted'),0) openstackServers, COALESCE(SUM(datacenter='tebyan' AND status<>'deleted'),0) tebyanServers,
             COALESCE(SUM(CASE WHEN status='active' THEN amount ELSE 0 END),0) estimatedMonthlyRevenue FROM purchases`);
         const [[purchases]] = await conn.query(`SELECT COALESCE(SUM(DATE(created_at)=CURDATE()),0) purchasesToday, COALESCE(SUM(created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')),0) purchasesThisMonth FROM purchases`);
         const [[revenue]] = await conn.query(`SELECT COALESCE(SUM(CASE WHEN type IN ('credit','deposit','payment','topup','admin_credit') AND amount > 0 AND DATE(timestamp)=CURDATE() THEN amount ELSE 0 END),0) revenueToday,
@@ -1269,7 +1269,7 @@ async function getAdminWalletFlowStats(days) {
 }
 
 
-const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','pending_ip_quality','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];
+const PENDING_SERVER_STATUSES = ['suspended','stopped','stop','shutoff','powered_off','poweroff','paused','shelved','shelved_offloaded','pending_ssh','pending_ip','pending_ip_quality','provisioning','building','rebuilding','deletion_pending','manual_review','provider_missing','provisioning_failed'];
 const REVENUE_WALLET_TYPES = ['credit','deposit','payment','topup','admin_credit'];
 const APPROVED_TOPUP_TYPES = ['credit','deposit','payment','topup','admin_credit'];
 
@@ -1312,10 +1312,10 @@ function metricConfig(metric) {
         revenue_today: { title:'درآمد امروز', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_today','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
         revenue_month: { title:'درآمد ماه', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_month','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
         revenue_30d: { title:'درآمد ۳۰ روز', kind:'wallet', columns:walletCols, where:`w.amount > 0 AND w.type IN (${sqlIn(REVENUE_WALLET_TYPES)}) AND ${metricDateWhere('revenue_30d','w.timestamp')}`, params:[...REVENUE_WALLET_TYPES] },
-        datacenter_tebyan: { title:'سرورهای Tebyan', kind:'purchases', columns:purchaseCols, where:"p.datacenter='tebyan'" },
-        datacenter_hetzner: { title:'سرورهای Hetzner', kind:'purchases', columns:purchaseCols, where:`p.datacenter IN (${hetznerDatacenterSqlList})` },
-        datacenter_afracloud: { title:'سرورهای AfraCloud', kind:'purchases', columns:purchaseCols, where:"p.datacenter='afracloud'" },
-        datacenter_openstack: { title:'سرورهای OpenStack', kind:'purchases', columns:purchaseCols, where:"p.datacenter LIKE '%openstack%'" },
+        datacenter_tebyan: { title:'سرورهای Tebyan', kind:'purchases', columns:purchaseCols, where:"p.datacenter='tebyan' AND p.status<>'deleted'" },
+        datacenter_hetzner: { title:'سرورهای Hetzner', kind:'purchases', columns:purchaseCols, where:`p.datacenter IN (${hetznerDatacenterSqlList}) AND p.status<>'deleted'` },
+        datacenter_afracloud: { title:'سرورهای AfraCloud', kind:'purchases', columns:purchaseCols, where:"p.datacenter='afracloud' AND p.status<>'deleted'" },
+        datacenter_openstack: { title:'سرورهای OpenStack', kind:'purchases', columns:purchaseCols, where:"p.datacenter LIKE '%openstack%' AND p.status<>'deleted'" },
         errors_24h: { title:'خطاهای ۲۴ ساعت', kind:'audit', columns:[{key:'actor',label:'ادمین'},{key:'action',label:'عملیات'},{key:'target_type',label:'نوع'},{key:'target_id',label:'هدف'},{key:'metadata',label:'جزئیات'},{key:'created_at',label:'زمان'}], where:"a.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR) AND a.action LIKE '%failed%'" }
     };
     const cfg = configs[metric];
@@ -1452,7 +1452,7 @@ async function listAdminUsers(filters = {}) {
                 FROM purchases GROUP BY telegram_id) pa ON pa.telegram_id = cu.telegram_id`;
         const sort = adminUserSortSql(filters.sort);
         const select = `SELECT cu.telegram_id, ${phoneExpr} phone, ${nationalExpr} national_id, ${shahkarExpr} shahkar_verified,
-                COALESCE(wl.wallet_balance,0) wallet_balance, COALESCE(wl.wallet_balance,0) wallet,
+                COALESCE(u.wallet, wl.wallet_balance, 0) wallet_balance, COALESCE(u.wallet, wl.wallet_balance, 0) wallet,
                 COALESCE(pa.purchases_count,0) purchases_count, COALESCE(pa.active_servers,0) active_servers,
                 COALESCE(pa.pending_servers,0) pending_servers, COALESCE(pa.deleted_servers,0) deleted_servers,
                 pa.last_purchase_at, wl.last_wallet_log_at, ${createdExpr} created_at, ${updatedExpr} updated_at,
