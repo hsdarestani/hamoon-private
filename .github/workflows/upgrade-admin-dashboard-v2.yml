@@ -5,6 +5,9 @@ on:
     branches:
       - upgrade/admin-dashboard-v2
     paths:
+      - 'public/dashboard/**'
+      - 'scripts/validate-dashboard-v2.js'
+      - 'scripts/smoke-dashboard-ui.mjs'
       - '.github/workflows/upgrade-admin-dashboard-v2.yml'
   workflow_dispatch:
 
