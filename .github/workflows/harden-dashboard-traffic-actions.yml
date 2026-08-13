@@ -1,0 +1,116 @@
+name: Harden Dashboard Traffic Actions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/harden-dashboard-traffic-actions.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch traffic capability handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  print('OK already:', label)
+                  return
+              if old not in text:
+                  raise SystemExit(f'Expected source not found for {label}')
+              p.write_text(text.replace(old, new, 1))
+              print('OK patched:', label)
+
+          replace_once(
+              'dashboard-api.js',
+              "trafficSupport: !!(dc.BILL_TRAFFIC || dc.capabilities?.traffic)",
+              "trafficSupport: !!dc.TRAFFIC_API_BASE_URL",
+              'datacenter traffic support reflects configured endpoint'
+          )
+
+          replace_once(
+              'dashboard-api.js',
+              "r.provider=dc.provider||dc.apiType||'openstack'; r.datacenter_label=dc.name||r.datacenter; r.capabilities=capsFor({purchase:r});",
+              "r.provider=dc.provider||dc.apiType||'openstack'; r.datacenter_label=dc.name||r.datacenter; r.capabilities=capsFor({purchase:r}); r.traffic_supported=!!dc.TRAFFIC_API_BASE_URL; r.secret_storage_configured=!!process.env.SERVER_SECRET_KEY;",
+              'server list capabilities'
+          )
+
+          replace_once(
+              'dashboard-api.js',
+              "d.provider=providerOf(d); d.datacenter_label=dc.name||d.purchase.datacenter; d.capabilities=capsFor(d); d.purchase.ip = ipFromPurchase(d.purchase);",
+              "d.provider=providerOf(d); d.datacenter_label=dc.name||d.purchase.datacenter; d.capabilities=capsFor(d); d.traffic_supported=!!dc.TRAFFIC_API_BASE_URL; d.secret_storage_configured=!!process.env.SERVER_SECRET_KEY; d.purchase.ip = ipFromPurchase(d.purchase);",
+              'server detail capabilities'
+          )
+
+          replace_once(
+              'dashboard-api.js',
+              "async function serverTrafficPreview(serverId){ const d=await db.getAdminServerDetail(serverId); if(!d) throw new Error('SERVER_NOT_FOUND'); const dc=datacenters[d.purchase.datacenter]; if(!dc) throw new Error('DATACENTER_NOT_FOUND'); const calc=await calculateTrafficCost(d.purchase, d.purchase.created_at, new Date(), dc);",
+              "async function serverTrafficPreview(serverId){ const d=await db.getAdminServerDetail(serverId); if(!d) throw new Error('SERVER_NOT_FOUND'); const dc=datacenters[d.purchase.datacenter]; if(!dc) throw new Error('DATACENTER_NOT_FOUND'); if(!dc.TRAFFIC_API_BASE_URL){ const err=new Error('TRAFFIC_NOT_SUPPORTED'); err.code='TRAFFIC_NOT_SUPPORTED'; throw err; } const calc=await calculateTrafficCost(d.purchase, d.purchase.created_at, new Date(), dc);",
+              'traffic preview unsupported-provider guard'
+          )
+
+          replace_once(
+              'dashboard-api.js',
+              "router.use((err,_req,res,_next)=>{ console.error('[DASHBOARD_API_ERROR]', err.code || err.message); jsonError(res,500,'DASHBOARD_API_ERROR','خطای داخلی داشبورد رخ داد.'); });",
+              "router.use((err,_req,res,_next)=>{ if(err.code==='TRAFFIC_NOT_SUPPORTED'||err.message==='TRAFFIC_API_BASE_URL_MISSING') return jsonError(res,400,'TRAFFIC_NOT_SUPPORTED','گزارش ترافیک برای این دیتاسنتر تنظیم نشده است.'); console.error('[DASHBOARD_API_ERROR]', err.code || err.message); jsonError(res,500,'DASHBOARD_API_ERROR','خطای داخلی داشبورد رخ داد.'); });",
+              'graceful traffic API error'
+          )
+
+          replace_once(
+              'public/dashboard/dashboard-v2.js',
+              "      `<button onclick='trafficPreview(${id})'>ترافیک</button>`,",
+              "      row.traffic_supported ? `<button onclick='trafficPreview(${id})'>ترافیک</button>` : '',",
+              'hide unsupported traffic action in server list'
+          )
+
+          replace_once(
+              'public/dashboard/dashboard-v2.js',
+              "<div class=\"detail-actions\"><button onclick='trafficPreview(${jsArg(cleanId)})'>ترافیک</button><button onclick='setBilling(${jsArg(cleanId)})'>Billing</button>",
+              "<div class=\"detail-actions\">${d.traffic_supported ? `<button onclick='trafficPreview(${jsArg(cleanId)})'>ترافیک</button>` : ''}<button onclick='setBilling(${jsArg(cleanId)})'>Billing</button>",
+              'hide unsupported traffic action in server detail'
+          )
+
+          v = Path('scripts/validate-dashboard-v2.js')
+          text = v.read_text()
+          marker = "assert(db.includes(\"GROUP BY DATE_FORMAT(${dateField}, '%Y-%m-%d') ORDER BY day\"), 'chart dailyStats is ONLY_FULL_GROUP_BY compatible');"
+          addition = "assert(api.includes('traffic_supported=!!dc.TRAFFIC_API_BASE_URL'), 'server API exposes configured traffic support');\nassert(v2.includes('row.traffic_supported ?'), 'UI hides unsupported traffic action');"
+          if addition not in text:
+              if marker not in text:
+                  raise SystemExit('Validator marker not found')
+              v.write_text(text.replace(marker, marker + '\n' + addition, 1))
+          PY
+
+          node --check dashboard-api.js
+          node --check public/dashboard/dashboard-v2.js
+          node --check scripts/validate-dashboard-v2.js
+          node scripts/validate-dashboard.js
+          node scripts/validate-dashboard-v2.js
+
+      - name: Commit traffic hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dashboard-api.js public/dashboard/dashboard-v2.js scripts/validate-dashboard-v2.js
+          if git diff --cached --quiet; then
+            echo 'No source changes needed.'
+          else
+            git commit -m 'Hide unsupported dashboard traffic actions'
+            git push origin HEAD:main
+          fi
