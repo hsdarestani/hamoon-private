@@ -1254,8 +1254,8 @@ async function dailyStats(table, dateField, valueExpr, days = 30) {
     const series = emptySeries(days);
     const conn = await pool.getConnection();
     try {
-        const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [series.length]);
-        const byDay = new Map(rows.map(r => [String(r.day).slice(0,10), Number(r.value) || 0]));
+        const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY DATE(${dateField})`, [series.length]);
+        const byDay = new Map(rows.map(r => [String(r.day), Number(r.value) || 0]));
         return series.map(r => ({ ...r, value: byDay.get(r.day) || 0 }));
     } finally { conn.release(); }
 }
