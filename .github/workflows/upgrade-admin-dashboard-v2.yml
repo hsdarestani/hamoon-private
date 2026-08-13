@@ -1,0 +1,138 @@
+name: Upgrade Admin Dashboard V2
+
+on:
+  push:
+    branches:
+      - upgrade/admin-dashboard-v2
+    paths:
+      - '.github/workflows/upgrade-admin-dashboard-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: upgrade/admin-dashboard-v2
+
+      - name: Apply guarded backend correctness patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  print(f'OK already patched: {label}')
+                  return
+              if old not in text:
+                  raise SystemExit(f'Expected source not found for: {label}')
+              p.write_text(text.replace(old, new, 1))
+              print(f'OK patched: {label}')
+
+          replace_once(
+              'dashboard-api.js',
+              "if (req.method !== 'POST') return next();",
+              "if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();",
+              'protect all mutating dashboard methods'
+          )
+
+          replace_once(
+              'db.js',
+              "const [[walletTotal]] = await conn.query(`SELECT COALESCE(SUM(amount),0) totalWalletBalance FROM wallet_logs`);",
+              "const [[walletTotal]] = await conn.query(`SELECT COALESCE(SUM(wallet),0) totalWalletBalance FROM users`);",
+              'overview current wallet balance'
+          )
+
+          replace_once(
+              'db.js',
+              "COALESCE(SUM(status IN ('pending_ssh','pending_ip','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,",
+              "COALESCE(SUM(status IN ('suspended','stopped','stop','shutoff','powered_off','poweroff','paused','shelved','shelved_offloaded','pending_ssh','pending_ip','pending_ip_quality','provisioning','building','rebuilding','deletion_pending','manual_review','provider_missing','provisioning_failed')),0) suspendedServers,",
+              'overview suspended/pending status coverage'
+          )
+
+          replace_once(
+              'db.js',
+              "COALESCE(SUM(datacenter='afracloud'),0) afraServers, COALESCE(SUM(datacenter IN (${hetznerDatacenterSqlList})),0) hetznerServers,\n            COALESCE(SUM(datacenter LIKE '%openstack%'),0) openstackServers, COALESCE(SUM(datacenter='tebyan'),0) tebyanServers,",
+              "COALESCE(SUM(datacenter='afracloud' AND status<>'deleted'),0) afraServers, COALESCE(SUM(datacenter IN (${hetznerDatacenterSqlList}) AND status<>'deleted'),0) hetznerServers,\n            COALESCE(SUM(datacenter LIKE '%openstack%' AND status<>'deleted'),0) openstackServers, COALESCE(SUM(datacenter='tebyan' AND status<>'deleted'),0) tebyanServers,",
+              'provider KPI counts exclude deleted purchases'
+          )
+
+          replace_once(
+              'db.js',
+              "const PENDING_SERVER_STATUSES = ['pending_ssh','pending_ip','pending_ip_quality','provisioning','building','deletion_pending','manual_review','provider_missing','provisioning_failed'];",
+              "const PENDING_SERVER_STATUSES = ['suspended','stopped','stop','shutoff','powered_off','poweroff','paused','shelved','shelved_offloaded','pending_ssh','pending_ip','pending_ip_quality','provisioning','building','rebuilding','deletion_pending','manual_review','provider_missing','provisioning_failed'];",
+              'shared pending status coverage'
+          )
+
+          replace_once(
+              'db.js',
+              "COALESCE(wl.wallet_balance,0) wallet_balance, COALESCE(wl.wallet_balance,0) wallet,",
+              "COALESCE(u.wallet, wl.wallet_balance, 0) wallet_balance, COALESCE(u.wallet, wl.wallet_balance, 0) wallet,",
+              'user list current wallet balance'
+          )
+
+          for old, new, label in [
+              ("where:\"p.datacenter='tebyan'\"", "where:\"p.datacenter='tebyan' AND p.status<>'deleted'\"", 'Tebyan metric'),
+              ("where:`p.datacenter IN (${hetznerDatacenterSqlList})`", "where:`p.datacenter IN (${hetznerDatacenterSqlList}) AND p.status<>'deleted'`", 'Hetzner metric'),
+              ("where:\"p.datacenter='afracloud'\"", "where:\"p.datacenter='afracloud' AND p.status<>'deleted'\"", 'Afra metric'),
+              ("where:\"p.datacenter LIKE '%openstack%'\"", "where:\"p.datacenter LIKE '%openstack%' AND p.status<>'deleted'\"", 'OpenStack metric')
+          ]:
+              replace_once('db.js', old, new, label)
+
+          replace_once(
+              'server.js',
+              "const noVncDir = path.join(__dirname, 'node_modules', '@novnc', 'novnc');",
+              "const noVncDir = path.join(__dirname, 'node_modules', '@novnc', 'novnc');\n\napp.use('/dashboard', (_req, res, next) => {\n  res.setHeader('Cache-Control', 'no-store, max-age=0');\n  res.setHeader('Pragma', 'no-cache');\n  res.setHeader('X-Content-Type-Options', 'nosniff');\n  res.setHeader('X-Frame-Options', 'DENY');\n  next();\n});",
+              'dashboard no-store/security headers'
+          )
+          PY
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm install --no-save --no-package-lock playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Validate source and dashboard contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check dashboard-api.js
+          node --check db.js
+          node --check server.js
+          node --check public/dashboard/app.js
+          node --check public/dashboard/runtime-fix.js
+          node --check public/dashboard/dashboard-v2.js
+          node scripts/validate-dashboard.js
+          node scripts/validate-dashboard-v2.js
+
+      - name: Desktop and mobile browser smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/smoke-dashboard-ui.mjs
+
+      - name: Commit guarded backend patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dashboard-api.js db.js server.js
+          if git diff --cached --quiet; then
+            echo 'No backend patch commit needed.'
+          else
+            git commit -m 'Harden dashboard backend data and mutation handling'
+            git push origin HEAD:upgrade/admin-dashboard-v2
+          fi
