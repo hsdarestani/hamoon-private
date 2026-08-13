@@ -1,0 +1,97 @@
+name: Fix Dashboard Chart Dates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-dashboard-chart-dates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch MySQL day bucketing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('db.js')
+          text = p.read_text()
+          old = """        const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [series.length]);
+          const byDay = new Map(rows.map(r => [String(r.day).slice(0,10), Number(r.value) || 0]));"""
+          new = """        const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY DATE(${dateField})`, [series.length]);
+          const byDay = new Map(rows.map(r => [String(r.day), Number(r.value) || 0]));"""
+          if old in text:
+              p.write_text(text.replace(old, new, 1))
+          elif "DATE_FORMAT(${dateField}, '%Y-%m-%d') day" in text:
+              print('Chart date bucketing is already patched.')
+          else:
+              raise SystemExit('Expected dailyStats source was not found; refusing unsafe patch.')
+          PY
+          node --check db.js
+
+      - name: Commit source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add db.js
+          if git diff --cached --quiet; then
+            echo 'No db.js change needed.'
+          else
+            git commit -m 'Fix admin dashboard chart day bucketing'
+            git push origin HEAD:main
+          fi
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy corrected charts
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          node --check db.js
+          node --check public/dashboard/runtime-fix.js
+          pm2 restart dashboard-server --update-env
+          sleep 4
+          echo '=== HEALTH ==='
+          curl -fsS --max-time 8 http://127.0.0.1:3000/health
+          echo
+          echo '=== VERSION ==='
+          git rev-parse --short HEAD
+          REMOTE
