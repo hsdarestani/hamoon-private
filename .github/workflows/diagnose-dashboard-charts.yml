@@ -29,7 +29,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Diagnose production chart queries
+      - name: Audit production dashboard configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -38,33 +38,24 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-
           echo '=== VERSION ==='
           git rev-parse --short HEAD
-          echo '=== PM2 STATUS ==='
-          pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
-          echo '=== DASHBOARD ERRORS ==='
-          pm2 logs dashboard-server --lines 300 --nostream 2>&1 | grep -Ei 'DASHBOARD_API_ERROR|charts|ER_|SQL|syntax|Incorrect|INTERVAL|DATE_FORMAT|ONLY_FULL_GROUP_BY|Unknown column|parse' | tail -n 120 || true
-          echo '=== DIRECT DB DAILY STATS TEST ==='
           node <<'NODE'
           require('dotenv').config();
           const db = require('./db');
+          const datacenters = require('./datacenters');
           (async () => {
-            const tests = [
-              ['revenue', () => db.getAdminRevenueStats(30)],
-              ['purchases', () => db.getAdminPurchaseStats(30)],
-              ['wallet-flow', () => db.getAdminWalletFlowStats(30)]
-            ];
-            for (const [name, fn] of tests) {
-              try {
-                const rows = await fn();
-                console.log(name, 'OK', Array.isArray(rows) ? rows.length : typeof rows, Array.isArray(rows) ? rows.slice(-2) : '');
-              } catch (error) {
-                console.log(name, 'FAIL', error && error.code, error && error.errno, error && error.sqlState, error && error.sqlMessage, error && error.message);
-                if (error && error.sql) console.log('SQL:', error.sql);
-              }
+            console.log('SERVER_SECRET_KEY_CONFIGURED', Boolean(process.env.SERVER_SECRET_KEY));
+            const [exists] = await db.pool.query("SELECT COUNT(*) count FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_secrets'");
+            let secretRows = 0;
+            if (Number(exists[0]?.count || 0) > 0) {
+              const [rows] = await db.pool.query('SELECT COUNT(*) count FROM server_secrets');
+              secretRows = Number(rows[0]?.count || 0);
             }
+            console.log('SERVER_SECRETS_ROWS', secretRows);
+            const traffic = Object.values(datacenters).filter(dc => dc && dc.key).map(dc => ({ key: dc.key, configured: Boolean(dc.TRAFFIC_API_BASE_URL) }));
+            console.log('TRAFFIC_SUPPORT', JSON.stringify(traffic));
             await db.pool.end();
-          })().catch(error => { console.error(error); process.exit(1); });
+          })().catch(error => { console.error(error.code || error.message); process.exit(1); });
           NODE
           REMOTE
