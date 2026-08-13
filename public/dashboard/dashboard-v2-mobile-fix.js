@@ -1,29 +1,48 @@
 'use strict';
 
-// Keep the mobile menu control outside the sticky header. Some mobile browsers
+// Keep one mobile menu control outside the sticky header. Some mobile browsers
 // can hit-test transformed/sticky descendants against the parent main element,
-// making a visually visible nested button untappable. A fixed direct child of
-// #app has an independent hit target and avoids that entire class of bugs.
+// making a visually visible nested button untappable. The original v2 shell can
+// re-run its enhancer after login, so this reconciler also removes duplicates.
 (() => {
-  function detachMenuButton() {
+  let reconciling = false;
+
+  function reconcileMenuButton() {
+    if (reconciling) return false;
     const app = document.getElementById('app');
-    const button = document.querySelector('.mobile-menu-btn');
-    if (!app || !button) return false;
-    if (button.parentElement !== app) app.appendChild(button);
-    button.type = 'button';
-    button.setAttribute('aria-label', 'باز کردن منو');
-    button.onclick = () => app.classList.add('mobile-nav-open');
-    return true;
+    if (!app) return false;
+    const buttons = [...document.querySelectorAll('.mobile-menu-btn')];
+    if (!buttons.length) return false;
+
+    reconciling = true;
+    try {
+      const keep = buttons.find(button => button.parentElement === app) || buttons[0];
+      if (keep.parentElement !== app) app.appendChild(keep);
+      for (const button of buttons) {
+        if (button !== keep) button.remove();
+      }
+      keep.type = 'button';
+      keep.setAttribute('aria-label', 'باز کردن منو');
+      keep.onclick = () => app.classList.add('mobile-nav-open');
+      return true;
+    } finally {
+      reconciling = false;
+    }
   }
 
-  const observer = new MutationObserver(() => {
-    if (detachMenuButton()) observer.disconnect();
-  });
+  let queued = false;
+  const scheduleReconcile = () => {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      reconcileMenuButton();
+    });
+  };
 
-  if (!detachMenuButton()) {
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  }
-
-  document.addEventListener('DOMContentLoaded', detachMenuButton, { once: true });
-  window.addEventListener('resize', detachMenuButton, { passive: true });
+  const observer = new MutationObserver(scheduleReconcile);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  reconcileMenuButton();
+  document.addEventListener('DOMContentLoaded', reconcileMenuButton, { once: true });
+  window.addEventListener('resize', reconcileMenuButton, { passive: true });
 })();
