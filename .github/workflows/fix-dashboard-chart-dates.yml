@@ -32,13 +32,14 @@ jobs:
           from pathlib import Path
           p = Path('db.js')
           text = p.read_text()
-          old = """        const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [series.length]);
-          const byDay = new Map(rows.map(r => [String(r.day).slice(0,10), Number(r.value) || 0]));"""
-          new = """        const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY DATE(${dateField})`, [series.length]);
-          const byDay = new Map(rows.map(r => [String(r.day), Number(r.value) || 0]));"""
-          if old in text:
-              p.write_text(text.replace(old, new, 1))
-          elif "DATE_FORMAT(${dateField}, '%Y-%m-%d') day" in text:
+          old_query = "const [rows] = await conn.query(`SELECT DATE(${dateField}) day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY day`, [series.length]);"
+          new_query = "const [rows] = await conn.query(`SELECT DATE_FORMAT(${dateField}, '%Y-%m-%d') day, ${valueExpr} value FROM ${table} WHERE ${dateField} >= DATE_SUB(CURDATE(), INTERVAL ? DAY) GROUP BY DATE(${dateField}) ORDER BY DATE(${dateField})`, [series.length]);"
+          old_map = "const byDay = new Map(rows.map(r => [String(r.day).slice(0,10), Number(r.value) || 0]));"
+          new_map = "const byDay = new Map(rows.map(r => [String(r.day), Number(r.value) || 0]));"
+          if old_query in text and old_map in text:
+              text = text.replace(old_query, new_query, 1).replace(old_map, new_map, 1)
+              p.write_text(text)
+          elif new_query in text and new_map in text:
               print('Chart date bucketing is already patched.')
           else:
               raise SystemExit('Expected dailyStats source was not found; refusing unsafe patch.')
