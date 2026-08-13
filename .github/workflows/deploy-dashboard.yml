@@ -86,7 +86,7 @@ jobs:
           pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
 
           echo '=== HEALTH ==='
-          curl -fsS --max-time 8 http://127.0.0.1/health || true
+          curl -fsS --max-time 8 http://127.0.0.1:3000/health
           echo
 
           echo '=== RECENT DASHBOARD ERRORS ==='
