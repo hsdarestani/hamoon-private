@@ -1,0 +1,97 @@
+name: Deploy Admin Dashboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'public/dashboard/**'
+      - 'dashboard-api.js'
+      - 'server.js'
+      - 'db.js'
+      - 'scripts/validate-dashboard.js'
+      - '.github/workflows/deploy-dashboard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-admin-dashboard-production
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate dashboard source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check public/dashboard/app.js
+          node --check public/dashboard/runtime-fix.js
+          node --check dashboard-api.js
+          node --check server.js
+          node scripts/validate-dashboard.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy dashboard production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== BEFORE ==='
+          git rev-parse --short HEAD
+
+          echo '=== UPDATE SOURCE ==='
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+
+          echo '=== VALIDATE PRODUCTION SOURCE ==='
+          node --check public/dashboard/app.js
+          node --check public/dashboard/runtime-fix.js
+          node --check dashboard-api.js
+          node --check server.js
+          node scripts/validate-dashboard.js
+
+          echo '=== RESTART DASHBOARD ==='
+          pm2 restart dashboard-server --update-env
+          sleep 4
+          pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+
+          echo '=== HEALTH ==='
+          curl -fsS --max-time 8 http://127.0.0.1/health || true
+          echo
+
+          echo '=== RECENT DASHBOARD ERRORS ==='
+          pm2 logs dashboard-server --lines 100 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|dashboard|error|failed' | tail -n 50 || true
+
+          echo '=== AFTER ==='
+          git rev-parse --short HEAD
+          REMOTE
