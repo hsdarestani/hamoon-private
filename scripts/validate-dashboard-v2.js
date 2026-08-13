@@ -53,6 +53,7 @@ assert(css.includes('@media(prefers-reduced-motion:reduce)'), 'reduced-motion ac
 
 assert(/\['POST','PUT','PATCH','DELETE'\]\.includes\(req\.method\)/.test(api), 'backend protects POST/PUT/PATCH/DELETE admin writes');
 assert(/SUM\(wallet\).*totalWalletBalance FROM users/.test(db), 'overview total balance uses current user wallets');
+assert(db.includes("GROUP BY DATE_FORMAT(${dateField}, '%Y-%m-%d') ORDER BY day"), 'chart dailyStats is ONLY_FULL_GROUP_BY compatible');
 assert(/COALESCE\(u\.wallet,\s*wl\.wallet_balance,\s*0\) wallet_balance/.test(db), 'users list prefers current wallet balance');
 assert(db.includes("'pending_ip_quality'") && db.includes("'suspended'"), 'overview pending/suspended status coverage is complete');
 assert(server.includes("Cache-Control', 'no-store, max-age=0'"), 'dashboard assets are served no-store');
