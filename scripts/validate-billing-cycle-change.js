@@ -24,6 +24,9 @@ assert(!handler.includes('updatePurchaseCycle(serverId, newCycle)'), 'legacy par
 assert(!handler.includes("parse_mode: 'MarkdownV2'"), 'cycle result still depends on MarkdownV2 escaping');
 assert(handler.includes('BILLING_CYCLE_CHANGE_SUCCESS'), 'success audit marker is missing');
 assert(handler.includes('BILLING_CYCLE_CHANGE_FAILED'), 'failure audit marker is missing');
+assert(handler.includes('openstackApi.listFlavors(dcConfig)'), 'cycle change does not load the live purchase catalog');
+assert(handler.includes('getFlavorCyclePrice(selectedFlavor, newCycle)'), 'target cycle does not use the catalog cycle price');
+assert(!handler.includes('Math.round(hourlyPrice * targetCycleHours)'), 'target price still extrapolates hourly price by cycle hours');
 
 new vm.Script(patched, { filename: 'index-core.patched.js' });
 console.log('validate-billing-cycle-change: ok');
