@@ -50,9 +50,43 @@ function applyBillingCyclePatches(source) {
       return editOrSendMessage(chatId, messageId, '❌ دوره پرداخت فعلی یا انتخاب‌شده نامعتبر است.');
     }
 
-    const currentCycleAmount = Number(normalizeStoredCycleAmount(purchase, dcConfig) || 0);
+    // Use the exact same plan catalog that the normal purchase flow uses. In
+    // particular, Hetzner monthly prices must come from amount_monthly rather
+    // than from hourly * 720, because Hetzner's monthly cap can be lower.
+    let pricingDc = dcConfig;
+    try {
+      const liveFlavors = await openstackApi.listFlavors(dcConfig);
+      if (Array.isArray(liveFlavors) && liveFlavors.length) {
+        pricingDc = { ...dcConfig, flavors: liveFlavors };
+      }
+    } catch (pricingError) {
+      console.warn('[BILLING_CYCLE_LIVE_PRICE_FALLBACK]', {
+        server_id: serverId,
+        datacenter: purchase.datacenter,
+        message: pricingError?.message || String(pricingError)
+      });
+    }
+
+    const purchaseFlavorId = String(purchase.flavor_id || '').trim().toLowerCase();
+    const selectedFlavor = (Array.isArray(pricingDc?.flavors) ? pricingDc.flavors : []).find((flavor) => {
+      const ids = [flavor?.id, flavor?.hetzner_type, flavor?.server_type]
+        .filter(Boolean)
+        .map((value) => String(value).trim().toLowerCase());
+      return ids.includes(purchaseFlavorId);
+    });
+
+    if (!selectedFlavor) {
+      throw Object.assign(new Error('BILLING_FLAVOR_NOT_FOUND'), { code: 'BILLING_FLAVOR_NOT_FOUND' });
+    }
+
+    const currentCycleAmount = Number(normalizeStoredCycleAmount(purchase, pricingDc) || 0);
     if (!(currentCycleAmount > 0)) {
       throw Object.assign(new Error('INVALID_BILLING_AMOUNT'), { code: 'INVALID_BILLING_AMOUNT' });
+    }
+
+    const catalogTargetPrice = Number(getFlavorCyclePrice(selectedFlavor, newCycle) || 0);
+    if (!(catalogTargetPrice > 0)) {
+      throw Object.assign(new Error('INVALID_TARGET_BILLING_AMOUNT'), { code: 'INVALID_TARGET_BILLING_AMOUNT' });
     }
 
     const now = new Date();
@@ -61,7 +95,7 @@ function applyBillingCyclePatches(source) {
     const hourlyPrice = currentCycleAmount / currentCycleHours;
     const unusedHours = Math.max(0, currentCycleHours - elapsedHours);
     const creditForUnusedTime = unusedHours * hourlyPrice;
-    const newCyclePrice = Math.max(1, Math.round(hourlyPrice * targetCycleHours));
+    const newCyclePrice = Math.max(1, Math.round(catalogTargetPrice));
     const difference = Math.round(newCyclePrice - creditForUnusedTime);
 
     let result;
@@ -129,8 +163,9 @@ function applyBillingCyclePatches(source) {
       message: error?.message || String(error)
     });
 
-    const safeMessage = error?.code === 'INVALID_BILLING_AMOUNT'
-      ? '❌ مبلغ دوره فعلی این سرور معتبر نیست و برای جلوگیری از محاسبه اشتباه تغییری انجام نشد. لطفاً با پشتیبانی تماس بگیرید.'
+    const pricingErrorCodes = new Set(['INVALID_BILLING_AMOUNT', 'INVALID_TARGET_BILLING_AMOUNT', 'BILLING_FLAVOR_NOT_FOUND']);
+    const safeMessage = pricingErrorCodes.has(error?.code)
+      ? '❌ قیمت دوره این سرور به‌صورت معتبر پیدا نشد و برای جلوگیری از محاسبه اشتباه تغییری انجام نشد. لطفاً با پشتیبانی تماس بگیرید.'
       : '❌ تغییر دوره پرداخت انجام نشد. لطفاً دوباره تلاش کنید و اگر مشکل ادامه داشت با پشتیبانی تماس بگیرید.';
 
     return editOrSendMessage(chatId, messageId, safeMessage);
