@@ -48,6 +48,20 @@ assert(indexSource.includes('const amountForDb = finalPrice;'));
 assert(indexSource.includes('function normalizeStoredCycleAmount('));
 assert(indexSource.includes('instanceCost = normalizeStoredCycleAmount(purchase)'));
 
+const billingCyclePatchSource = fs.readFileSync(require.resolve('../billing-cycle-bootstrap.js'), 'utf8');
+assert(
+  billingCyclePatchSource.includes('getFlavorCyclePrice(selectedFlavor, newCycle)'),
+  'cycle changes must use the target cycle catalog price'
+);
+assert(
+  billingCyclePatchSource.includes('openstackApi.listFlavors(dcConfig)'),
+  'cycle changes must use the same live flavor catalog as normal purchases'
+);
+assert(
+  !billingCyclePatchSource.includes('Math.round(hourlyPrice * targetCycleHours)'),
+  'monthly cycle changes must not extrapolate the hourly price by 720 hours'
+);
+
 const reconcileSource = fs.readFileSync(require.resolve('./reconcile-hetzner-billing-amounts.js'), 'utf8');
 assert(reconcileSource.includes("reason: 'legacy_hourly_storage'"));
 assert(reconcileSource.includes("reason: 'preserved_cycle_price'"));
