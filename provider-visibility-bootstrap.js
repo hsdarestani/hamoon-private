@@ -85,6 +85,68 @@ function applyProviderVisibilityPatches(coreSource) {
     'use owned purchase fallback when provider list misses a server'
   );
 
+  const buyMenuNeedle = [
+    ' const keys = Object.keys(dcs).filter(key => {',
+    '   // فقط موقع تست، فیلتر کن',
+    "   if (actionPrefix !== 'DC_TEST') return true;"
+  ].join('\n');
+  const buyMenuReplacement = [
+    ' const keys = Object.keys(dcs).filter(key => {',
+    '   // Afracloud/Afranet is being retired: do not expose it for new purchases.',
+    "   if (actionPrefix === 'DC_BUY' && (dcs[key]?.provider === 'afracloud' || dcs[key]?.apiType === 'afracloud')) return false;",
+    '   // فقط موقع تست، فیلتر کن',
+    "   if (actionPrefix !== 'DC_TEST') return true;"
+  ].join('\n');
+
+  source = replaceOnce(
+    source,
+    buyMenuNeedle,
+    buyMenuReplacement,
+    'hide Afracloud from the buy datacenter menu'
+  );
+
+  const buyCallbackNeedle = [
+    "    } else if (flowType === 'BUY') {",
+    '      const dbUser = await getUser(effectiveUserId);'
+  ].join('\n');
+  const buyCallbackReplacement = [
+    "    } else if (flowType === 'BUY') {",
+    "      if (dcConfig?.provider === 'afracloud' || dcConfig?.apiType === 'afracloud') {",
+    "        return sendMessage(effectiveChatId, '⛔️ فروش سرویس افرانت/افراکلود متوقف شده و امکان خرید جدید وجود ندارد.');",
+    '      }',
+    '      const dbUser = await getUser(effectiveUserId);'
+  ].join('\n');
+
+  source = replaceOnce(
+    source,
+    buyCallbackNeedle,
+    buyCallbackReplacement,
+    'block stale Afracloud buy callbacks'
+  );
+
+  const finalPurchaseNeedle = [
+    '    const isHetzner = isHetznerDc(effectiveDc);',
+    "    const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';",
+    "    const isTebyan = effectiveDc.key === 'tebyan';"
+  ].join('\n');
+  const finalPurchaseReplacement = [
+    '    const isHetzner = isHetznerDc(effectiveDc);',
+    "    const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';",
+    "    const isTebyan = effectiveDc.key === 'tebyan';",
+    '',
+    '    // Hard stop for any already-open or deep-linked Afracloud purchase flow.',
+    '    if (isAfra) {',
+    "      return sendMessage(chatId, '⛔️ فروش سرویس افرانت/افراکلود متوقف شده و امکان خرید جدید وجود ندارد.', mainMenu);",
+    '    }'
+  ].join('\n');
+
+  source = replaceOnce(
+    source,
+    finalPurchaseNeedle,
+    finalPurchaseReplacement,
+    'hard-block Afracloud before server creation'
+  );
+
   return source;
 }
 
