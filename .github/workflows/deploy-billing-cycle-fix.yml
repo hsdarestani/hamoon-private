@@ -6,7 +6,10 @@ on:
     paths:
       - 'billing-cycle-bootstrap.js'
       - 'runtime-bootstrap.js'
+      - 'provider-visibility.js'
+      - 'provider-visibility-bootstrap.js'
       - 'scripts/validate-billing-cycle-change.js'
+      - 'scripts/validate-provider-visibility.js'
       - '.github/workflows/deploy-billing-cycle-fix.yml'
   workflow_dispatch:
 
@@ -31,7 +34,10 @@ jobs:
           set -euo pipefail
           node --check billing-cycle-bootstrap.js
           node --check runtime-bootstrap.js
+          node --check provider-visibility.js
+          node --check provider-visibility-bootstrap.js
           node scripts/validate-billing-cycle-change.js
+          node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
 
       - name: Prepare SSH
@@ -58,14 +64,17 @@ jobs:
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check billing-cycle-bootstrap.js
           node --check runtime-bootstrap.js
+          node --check provider-visibility.js
+          node --check provider-visibility-bootstrap.js
           node scripts/validate-billing-cycle-change.js
+          node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
           echo '=== RESTART ==='
           pm2 restart hamoonbot --update-env
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 80 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|billing-cycle-bootstrap|BILLING_CYCLE_CHANGE_FAILED' | tail -n 40 || true
+          pm2 logs hamoonbot --lines 80 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|provider-visibility|billing-cycle-bootstrap|BILLING_CYCLE_CHANGE_FAILED' | tail -n 40 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
