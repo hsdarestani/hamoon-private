@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'billing-cycle-bootstrap.js'
+      - 'rebuild-bootstrap.js'
       - 'runtime-bootstrap.js'
       - 'provider-visibility.js'
       - 'provider-visibility-bootstrap.js'
@@ -33,6 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           node --check billing-cycle-bootstrap.js
+          node --check rebuild-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
@@ -63,6 +65,7 @@ jobs:
           git pull --ff-only
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check billing-cycle-bootstrap.js
+          node --check rebuild-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
@@ -74,7 +77,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 80 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|provider-visibility|billing-cycle-bootstrap|BILLING_CYCLE_CHANGE_FAILED' | tail -n 40 || true
+          pm2 logs hamoonbot --lines 100 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|provider-visibility|billing-cycle-bootstrap|rebuild-bootstrap|REBUILD|BILLING_CYCLE_CHANGE_FAILED' | tail -n 50 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
