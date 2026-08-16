@@ -20,7 +20,7 @@ function applyRebuildPatches(coreSource) {
   source = replaceOnce(
     source,
     "  const serverType = state[userId]?.selectedFlavor?.id || '';\n  const compatible = hetznerLifecycle.filterCompatibleImages(images, serverType);\n  state[userId] = { ...(state[userId] || {}), rebuildInfo: { serverId, dcConfig } };\n  const keyboard = compatible.slice(0, 20).map(img => [{ text: img.label || img.name || String(img.id), callback_data: `rebuild:IMG:${img.id}` }]);",
-    "  const purchase = await getPurchaseForUserServer(userId, serverId).catch(() => null);\n  const serverType = purchase?.flavor_id || state[userId]?.selectedFlavor?.id || '';\n  const compatible = hetznerLifecycle.filterCompatibleImages(images, serverType);\n  state[userId] = { ...(state[userId] || {}), rebuildInfo: { serverId, dcConfig } };\n  const dcKey = dcConfig?.key || dcConfig?.__baseKey;\n  const keyboard = compatible.slice(0, 20).map(img => [{\n    text: img.label || img.name || String(img.id),\n    callback_data: makeShortCb(userId, { action: 'REBUILD_IMG', dcKey, serverId, imageId: img.id })\n  }]);",
+    "  const dcKey = dcConfig?.key || dcConfig?.__baseKey;\n  const purchase = await getPurchaseForUserServer(userId, serverId, dcKey).catch(() => null);\n  const serverType = purchase?.flavor_id || state[userId]?.selectedFlavor?.id || '';\n  const compatible = hetznerLifecycle.filterCompatibleImages(images, serverType);\n  state[userId] = { ...(state[userId] || {}), rebuildInfo: { serverId, dcConfig } };\n  const keyboard = compatible.slice(0, 20).map(img => [{\n    text: img.label || img.name || String(img.id),\n    callback_data: makeShortCb(userId, { action: 'REBUILD_IMG', dcKey, serverId, imageId: img.id })\n  }]);",
     'rebuild image buttons'
   );
 
