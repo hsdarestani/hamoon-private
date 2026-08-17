@@ -41,23 +41,5 @@ jobs:
           git rev-parse --short HEAD
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT 422 / PURCHASE CONTEXT ==='
-          pm2 logs hamoonbot --lines 9000 --nostream 2>/dev/null | grep -A 12 -B 5 -Ei 'status code 422|Hetzner createServer error|image has wrong architecture|\[PURCHASE\]|HETZNER_CREATE_ATTEMPT' | tail -n 1000 || true
-          echo '=== CURRENT SELLABLE PLANS AROUND 1000 TOMAN/HR ==='
-          node <<'NODE'
-          require('dotenv').config();
-          const hz = require('./Hetzner/hetzner-api');
-          const cfg = require('./config');
-          const dcs = cfg.DATACENTERS || cfg.datacenters || cfg;
-          const entries = Object.entries(dcs || {}).filter(([k,v]) => k === 'hetzner' || k.startsWith('hetzner-'));
-          (async()=>{
-            for (const [key,dc0] of entries) {
-              const dc = {...dc0,key};
-              try {
-                const plans = await hz.getHetznerSellablePlans(dc);
-                const rows = plans.filter(p => Number(p.amount_hourly||p.price||0) <= 2500).map(p => ({id:p.id,arch:p.architecture,hourly:p.amount_hourly||p.price,monthly:p.amount_monthly||p.monthly_toman}));
-                console.log(key, JSON.stringify(rows));
-              } catch(e) { console.log(key, 'PLAN_ERROR', e.message); }
-            }
-          })();
-NODE
+          pm2 logs hamoonbot --lines 9000 --nostream 2>/dev/null | grep -A 14 -B 6 -Ei 'status code 422|Hetzner createServer error|image has wrong architecture|\[PURCHASE\]|HETZNER_CREATE_ATTEMPT' | tail -n 1200 || true
           REMOTE
