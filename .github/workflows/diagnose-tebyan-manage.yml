@@ -1,0 +1,74 @@
+name: Diagnose Tebyan Manage Production
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-tebyan-manage.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Diagnose recent manage requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== REV ==='
+          git rev-parse --short HEAD
+          echo '=== RECENT MANAGE / TEBYAN LOGS ==='
+          pm2 logs hamoonbot --lines 2500 --nostream 2>/dev/null | grep -Ei '\[MANAGE\]|تبیان|tebyan|Could not fetch servers' | tail -n 350 || true
+          echo '=== TEBYAN PURCHASE STATUS SUMMARY ==='
+          node <<'NODE'
+          const db = require('./db');
+          (async () => {
+            try {
+              const rows = await db.getAllPurchases();
+              const teb = (rows || []).filter(p => String(p.datacenter || '').toLowerCase() === 'tebyan');
+              const summary = {};
+              for (const p of teb) summary[String(p.status || 'NULL')] = (summary[String(p.status || 'NULL')] || 0) + 1;
+              console.log(JSON.stringify({ total: teb.length, byStatus: summary }, null, 2));
+              for (const p of teb.slice(0, 20)) {
+                const sid = String(p.server_id || '');
+                const uid = String(p.telegram_id || '');
+                console.log(JSON.stringify({
+                  server: sid ? `${sid.slice(0,8)}...${sid.slice(-4)}` : '',
+                  user: uid ? `${uid.slice(0,3)}...${uid.slice(-3)}` : '',
+                  status: p.status,
+                  name: p.server_name,
+                  updated_at: p.updated_at,
+                  created_at: p.created_at
+                }));
+              }
+            } catch (e) {
+              console.error('DB_DIAG_ERROR', e.message);
+              process.exitCode = 1;
+            } finally {
+              process.exit();
+            }
+          })();
+NODE
+          REMOTE
