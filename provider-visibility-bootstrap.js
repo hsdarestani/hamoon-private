@@ -45,6 +45,37 @@ function applyProviderVisibilityPatches(coreSource) {
     'keep shared non-OpenStack providers for custom-project users'
   );
 
+  source = replaceOnce(
+    source,
+    ' const promises = datacenterKeys.map(dcKey => {',
+    [
+      ' const manageProviderErrors = [];',
+      ' const promises = datacenterKeys.map(dcKey => {'
+    ].join('\n'),
+    'track manage provider errors'
+  );
+
+  const manageCatchNeedle = [
+    '                    .catch(error => {',
+    'console.error(`Could not fetch servers from ${dcConfig?.name || dcKey}: ${error.message}`);',
+    '  return [];',
+    '                    });'
+  ].join('\n');
+  const manageCatchReplacement = [
+    '                    .catch(error => {',
+    'console.error(`Could not fetch servers from ${dcConfig?.name || dcKey}: ${error.message}`);',
+    '  manageProviderErrors.push({ dcKey, name: dcConfig?.name || dcKey, message: String(error?.message || error) });',
+    '  return [];',
+    '                    });'
+  ].join('\n');
+
+  source = replaceOnce(
+    source,
+    manageCatchNeedle,
+    manageCatchReplacement,
+    'remember unavailable providers during manage'
+  );
+
   const manageNeedle = [
     '            const results = await Promise.all(promises);',
     '            const userServers = results.flat();',
@@ -74,6 +105,11 @@ function applyProviderVisibilityPatches(coreSource) {
     "              console.warn('[MANAGE] provider list missed owned server; using purchase fallback', { datacenter: dcKey, server_id: serverId });",
     '            }',
     "  console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);",
+    '',
+    '            if (userServers.length === 0 && manageProviderErrors.length > 0) {',
+    '              const failedNames = [...new Set(manageProviderErrors.map(item => item.name))].join("، ");',
+    "              return sendMessage(effectiveChatId, `⚠️ در حال حاضر ارتباط با ${failedNames} برقرار نیست و لیست سرورها قابل دریافت نیست. این پیام به معنی حذف شدن یا نداشتن سرور نیست. لطفاً کمی بعد دوباره تلاش کنید.`);",
+    '            }',
     '',
     '            if (userServers.length === 0) {'
   ].join('\n');
