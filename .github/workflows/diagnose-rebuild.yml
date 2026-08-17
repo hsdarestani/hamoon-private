@@ -1,4 +1,4 @@
-name: Diagnose Hetzner 422 Purchase
+name: Diagnose Rebuild Production
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect recent 422 purchases
+      - name: Read recent rebuild diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -37,9 +37,8 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== REV / PM2 ==='
+          echo '=== REV ==='
           git rev-parse --short HEAD
-          pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
-          echo '=== RECENT 422 / PURCHASE CONTEXT ==='
-          pm2 logs hamoonbot --lines 9000 --nostream 2>/dev/null | grep -A 14 -B 6 -Ei 'status code 422|Hetzner createServer error|image has wrong architecture|\[PURCHASE\]|HETZNER_CREATE_ATTEMPT' | tail -n 1200 || true
+          echo '=== REBUILD EVENTS ==='
+          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
           REMOTE
