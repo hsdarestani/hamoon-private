@@ -1,4 +1,4 @@
-name: Diagnose Rebuild Production
+name: Diagnose Tebyan Manage Production
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Read recent rebuild diagnostics
+      - name: Read recent Tebyan manage diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -39,6 +39,6 @@ jobs:
           cd "$APP_PATH"
           echo '=== REV ==='
           git rev-parse --short HEAD
-          echo '=== REBUILD EVENTS ==='
-          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
+          echo '=== MANAGE / TEBYAN EVENTS ==='
+          pm2 logs hamoonbot --lines 3000 --nostream 2>/dev/null | grep -Ei '\[MANAGE\]|تبیان|tebyan|Could not fetch servers' | tail -n 500 || true
           REMOTE
