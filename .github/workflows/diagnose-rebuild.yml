@@ -1,4 +1,4 @@
-name: Deploy Hetzner Purchase Architecture Hotfix
+name: Diagnose Rebuild Production
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  diagnose:
     runs-on: ubuntu-latest
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Validate and deploy production
+      - name: Read recent rebuild diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -37,22 +37,8 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== BEFORE ==='
+          echo '=== REV ==='
           git rev-parse --short HEAD
-          git fetch origin main
-          git checkout main
-          git merge --ff-only FETCH_HEAD
-          echo '=== VALIDATE ==='
-          node --check hetzner-purchase-images.js
-          node --check hetzner-purchase-architecture-bootstrap.js
-          node --check runtime-bootstrap.js
-          node scripts/validate-hetzner-purchase-architecture.js
-          echo '=== RESTART ==='
-          pm2 restart hamoonbot --update-env
-          sleep 5
-          pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
-          echo '=== STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|hetzner-purchase-architecture-bootstrap|patch target|expected 1 match' | tail -n 80 || true
-          echo '=== AFTER ==='
-          git rev-parse --short HEAD
+          echo '=== REBUILD EVENTS ==='
+          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
           REMOTE
