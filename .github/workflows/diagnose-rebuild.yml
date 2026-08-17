@@ -1,4 +1,4 @@
-name: Diagnose Tebyan Manage Production
+name: Diagnose Rebuild Production
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect affected Tebyan server
+      - name: Read recent rebuild diagnostics
         shell: bash
         run: |
           set -euo pipefail
@@ -39,11 +39,6 @@ jobs:
           cd "$APP_PATH"
           echo '=== REV ==='
           git rev-parse --short HEAD
-          echo '=== DB RECORD ==='
-          node -e "const db=require('./db'); db.getAllPurchases().then(rows=>{const found=(rows||[]).filter(p=>String(p.server_name||'')==='Srv-TEB-4af998'||String(p.public_ip||'')==='185.232.155.74'); console.log(JSON.stringify(found.map(p=>({telegram_id:p.telegram_id,server_id:p.server_id,server_name:p.server_name,datacenter:p.datacenter,status:p.status,public_ip:p.public_ip,duration:p.duration,auto_renew:p.auto_renew,updated_at:p.updated_at,created_at:p.created_at})),null,2));}).catch(e=>{console.error(e);process.exitCode=1}).finally(()=>process.exit())"
-          echo '=== SERVER REACHABILITY ==='
-          (timeout 7 bash -c 'cat < /dev/null > /dev/tcp/185.232.155.74/22' && echo 'SSH_22=OPEN') || echo 'SSH_22=CLOSED_OR_TIMEOUT'
-          (ping -c 2 -W 2 185.232.155.74 >/dev/null 2>&1 && echo 'PING=OK') || echo 'PING=NO_REPLY'
-          echo '=== TEBYAN CONTROL PLANE ==='
-          (timeout 7 bash -c 'cat < /dev/null > /dev/tcp/94.232.171.61/5000' && echo 'KEYSTONE_5000=OPEN') || echo 'KEYSTONE_5000=CLOSED_OR_TIMEOUT'
+          echo '=== REBUILD EVENTS ==='
+          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
           REMOTE
