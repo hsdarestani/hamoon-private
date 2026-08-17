@@ -9,14 +9,17 @@ const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
+const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
 
 function applyPatches(coreSource) {
-  return applyRebuildPatches(
-    applyBillingCyclePatches(
-      applyHetznerChangeIpPatches(
-        applyHetznerTrafficPatches(
-          applyFeaturePatches(
-            applyProviderVisibilityPatches(coreSource)
+  return applyHetznerPurchaseArchitecturePatches(
+    applyRebuildPatches(
+      applyBillingCyclePatches(
+        applyHetznerChangeIpPatches(
+          applyHetznerTrafficPatches(
+            applyFeaturePatches(
+              applyProviderVisibilityPatches(coreSource)
+            )
           )
         )
       )
