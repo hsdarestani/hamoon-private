@@ -1,4 +1,4 @@
-name: Diagnose Hetzner Purchase Failures
+name: Diagnose Hetzner Create Error Details
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect failures and capacity
+      - name: Capture error context
         shell: bash
         run: |
           set -euo pipefail
@@ -37,10 +37,6 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== PURCHASE FAILURE LINES ==='
-          pm2 logs hamoonbot --lines 7000 --nostream 2>/dev/null | grep -Ei 'Purchase Error in|Hetzner createServer error|HETZNER_CREATE_ATTEMPT|HETZNER_PLACEMENT_UNAVAILABLE|CRITICAL_orphan_server_after_provider_create|سرور ساخته شد اما ثبت خرید|خطا در خرید سرور|resource_unavailable|placement|server_type.*not available|insufficient|not enough|موجودی.*کافی' | tail -n 900 || true
-          echo '=== GERMANY SERVER TYPE AVAILABILITY ==='
-          node -e "require('dotenv').config();const axios=require('axios');const t=process.env.HETZNER_API_TOKEN||process.env.HETZNER_TOKEN||process.env.HCLOUD_TOKEN;axios.get('https://api.hetzner.cloud/v1/server_types?per_page=200',{headers:{Authorization:'Bearer '+t},timeout:12000}).then(r=>{const names=['cax11','cax21','cax31','cx23','cx33','cx43','ccx13'];const out=(r.data.server_types||[]).filter(x=>names.includes(String(x.name).toLowerCase())).map(x=>({name:x.name,deprecated:x.deprecated,locations:(x.locations||[]).filter(l=>['nbg1','fsn1'].includes(String(l.name||l.location).toLowerCase())).map(l=>({name:l.name||l.location,available:l.available,deprecation:l.deprecation||null}))}));console.log(JSON.stringify(out,null,2))}).catch(e=>console.log(JSON.stringify({status:e.response?.status||null,code:e.code||null,message:e.message,data:e.response?.data||null})))"
-          echo '=== USER PURCHASE ATTEMPT CLUSTERS ==='
-          pm2 logs hamoonbot --lines 7000 --nostream 2>/dev/null | grep -Ei 'handleImageSelection|\[PURCHASE\]|HETZNER_CREATE_ATTEMPT|Purchase Error in|Hetzner createServer error' | tail -n 500 || true
+          echo '=== CREATE ERROR CONTEXT ==='
+          pm2 logs hamoonbot --lines 7000 --nostream 2>/dev/null | grep -A 14 -B 2 -Ei 'Hetzner createServer error|Purchase Error in' | tail -n 700 || true
           REMOTE
