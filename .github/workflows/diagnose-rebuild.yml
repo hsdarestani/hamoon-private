@@ -1,4 +1,4 @@
-name: Diagnose Rebuild Production
+name: Diagnose Hetzner 422 Purchase
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Read recent rebuild diagnostics
+      - name: Inspect recent 422 purchases
         shell: bash
         run: |
           set -euo pipefail
@@ -37,8 +37,27 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== REV ==='
+          echo '=== REV / PM2 ==='
           git rev-parse --short HEAD
-          echo '=== REBUILD EVENTS ==='
-          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
+          pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
+          echo '=== RECENT 422 / PURCHASE CONTEXT ==='
+          pm2 logs hamoonbot --lines 9000 --nostream 2>/dev/null | grep -A 12 -B 5 -Ei 'status code 422|Hetzner createServer error|image has wrong architecture|\[PURCHASE\]|HETZNER_CREATE_ATTEMPT' | tail -n 1000 || true
+          echo '=== CURRENT SELLABLE PLANS AROUND 1000 TOMAN/HR ==='
+          node <<'NODE'
+          require('dotenv').config();
+          const hz = require('./Hetzner/hetzner-api');
+          const cfg = require('./config');
+          const dcs = cfg.DATACENTERS || cfg.datacenters || cfg;
+          const entries = Object.entries(dcs || {}).filter(([k,v]) => k === 'hetzner' || k.startsWith('hetzner-'));
+          (async()=>{
+            for (const [key,dc0] of entries) {
+              const dc = {...dc0,key};
+              try {
+                const plans = await hz.getHetznerSellablePlans(dc);
+                const rows = plans.filter(p => Number(p.amount_hourly||p.price||0) <= 2500).map(p => ({id:p.id,arch:p.architecture,hourly:p.amount_hourly||p.price,monthly:p.amount_monthly||p.monthly_toman}));
+                console.log(key, JSON.stringify(rows));
+              } catch(e) { console.log(key, 'PLAN_ERROR', e.message); }
+            }
+          })();
+NODE
           REMOTE
