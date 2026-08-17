@@ -1,4 +1,4 @@
-name: Diagnose Rebuild Production
+name: Diagnose Hetzner Purchase Production
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Read recent rebuild diagnostics
+      - name: Inspect purchase activity
         shell: bash
         run: |
           set -euo pipefail
@@ -37,8 +37,13 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== REV ==='
+          echo '=== REV / PM2 ==='
           git rev-parse --short HEAD
-          echo '=== REBUILD EVENTS ==='
-          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null | grep -Ei 'HETZNER_REBUILD_FAILED|OPERATION_IN_PROGRESS|rebuild|actions/[0-9]+|timed out|locked' | tail -n 180 || true
+          pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
+          echo '=== RECENT PURCHASE / HETZNER LOGS ==='
+          pm2 logs hamoonbot --lines 5000 --nostream 2>/dev/null | grep -Ei '\[PURCHASE\]|HETZNER|provision|pending_ssh|pending_ip|manual_review|health|createServer|SERVER_SECRET|timeout|ETIMEDOUT|ECONN|429|rate.limit|quota|unavailable' | tail -n 700 || true
+          echo '=== RECENT HETZNER PURCHASES LAST 3H ==='
+          node -e "const db=require('./db');db.getAllPurchases().then(rows=>{const n=Date.now();const r=(rows||[]).filter(p=>{const d=String(p.datacenter||'').toLowerCase();const t=new Date(p.created_at||p.updated_at||0).getTime();return(d==='hetzner'||d.startsWith('hetzner-'))&&t&&(n-t<=10800000)});console.log(JSON.stringify(r.map(p=>({telegram_id:String(p.telegram_id||''),server_id:String(p.server_id||''),server_name:p.server_name,datacenter:p.datacenter,flavor_id:p.flavor_id,duration:p.duration,amount:p.amount,status:p.status,public_ip:p.public_ip,lifecycle_error_code:p.lifecycle_error_code,created_at:p.created_at,updated_at:p.updated_at,delivered_at:p.delivered_at})),null,2))}).finally(()=>process.exit())"
+          echo '=== HETZNER API BASIC CHECK ==='
+          node -e "require('dotenv').config();const axios=require('axios');const t=process.env.HETZNER_API_TOKEN||process.env.HETZNER_TOKEN||process.env.HCLOUD_TOKEN;axios.get('https://api.hetzner.cloud/v1/servers?per_page=1',{headers:{Authorization:'Bearer '+t},timeout:12000}).then(r=>console.log(JSON.stringify({status:r.status,total:r.data?.meta?.pagination?.total_entries||null}))).catch(e=>console.log(JSON.stringify({status:e.response?.status||null,code:e.code||null,message:e.message,providerError:e.response?.data?.error||null})))"
           REMOTE
