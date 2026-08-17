@@ -9,6 +9,9 @@ on:
       - 'runtime-bootstrap.js'
       - 'provider-visibility.js'
       - 'provider-visibility-bootstrap.js'
+      - 'hetzner-purchase-images.js'
+      - 'hetzner-purchase-architecture-bootstrap.js'
+      - 'scripts/validate-hetzner-purchase-architecture.js'
       - 'scripts/validate-billing-cycle-change.js'
       - 'scripts/validate-provider-visibility.js'
       - '.github/workflows/deploy-billing-cycle-fix.yml'
@@ -35,12 +38,15 @@ jobs:
           set -euo pipefail
           node --check billing-cycle-bootstrap.js
           node --check rebuild-bootstrap.js
+          node --check hetzner-purchase-images.js
+          node --check hetzner-purchase-architecture-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
+          node scripts/validate-hetzner-purchase-architecture.js
 
       - name: Prepare SSH
         shell: bash
@@ -62,22 +68,27 @@ jobs:
           cd "$APP_PATH"
           echo '=== BEFORE ==='
           git rev-parse --short HEAD
-          git pull --ff-only
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check billing-cycle-bootstrap.js
           node --check rebuild-bootstrap.js
+          node --check hetzner-purchase-images.js
+          node --check hetzner-purchase-architecture-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
+          node scripts/validate-hetzner-purchase-architecture.js
           echo '=== RESTART ==='
           pm2 restart hamoonbot --update-env
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 100 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|provider-visibility|billing-cycle-bootstrap|rebuild-bootstrap|REBUILD|BILLING_CYCLE_CHANGE_FAILED' | tail -n 50 || true
+          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|provider-visibility|billing-cycle-bootstrap|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED' | tail -n 60 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
