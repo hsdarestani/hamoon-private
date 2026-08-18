@@ -1,0 +1,24 @@
+name: Check Tebyan API
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-tebyan-api.yml'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe Tebyan API
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'TCP test:'
+          timeout 8 bash -c '</dev/tcp/94.232.171.61/5000' && echo 'TCP_OK' || echo 'TCP_FAIL'
+          echo 'HTTP test:'
+          curl -sS -o /tmp/body -D /tmp/headers --connect-timeout 8 --max-time 12 -w 'HTTP_CODE=%{http_code}\n' http://94.232.171.61:5000/ || true
+          echo 'HEADERS:'
+          cat /tmp/headers 2>/dev/null || true
+          echo 'BODY:'
+          head -c 500 /tmp/body 2>/dev/null || true
