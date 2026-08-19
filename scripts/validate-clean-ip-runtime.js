@@ -7,15 +7,24 @@ const datacenters = require('../datacenters');
 const baseChange = require('../services/hetzner-change-ip');
 const lifecycle = require('../services/hetzner-lifecycle');
 const cleanChange = require('../services/hetzner-clean-ip-change');
+const strictCheckHost = require('../services/check-host-strict-fetch');
 
 (async () => {
   assert(datacenters.afracloud, 'fixture should start with Afracloud configured');
   runtime.applyRuntimeSafetyDefaults();
   assert(!datacenters.afracloud, 'Afracloud must be removed from runtime datacenters');
+  assert.strictEqual(process.env.HETZNER_IP_QUALITY_REQUIRED, 'true');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_NODES, '6');
-  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '4');
+  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '5');
   assert.strictEqual(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS, '20');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);
+
+  // Regression: the previous parser considered a node healthy if only one out of
+  // four ICMP attempts returned OK. Strict mode must reject that case.
+  assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['TIMEOUT'], ['TIMEOUT'], ['TIMEOUT']]]), false);
+  assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['OK'], ['OK'], ['TIMEOUT']]]), true);
+  assert.strictEqual(strictCheckHost.tcpNodeState([{ time: 0.12, address: '1.2.3.4' }]), true);
+  assert.strictEqual(strictCheckHost.tcpNodeState([{ error: 'Connection timed out' }]), false);
 
   const originalChange = baseChange.changeHetznerPublicIp;
   const originalRemember = baseChange.rememberIp;
