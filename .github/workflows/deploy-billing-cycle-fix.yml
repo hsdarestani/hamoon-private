@@ -11,6 +11,7 @@ on:
       - 'provider-visibility-bootstrap.js'
       - 'hetzner-purchase-images.js'
       - 'hetzner-purchase-architecture-bootstrap.js'
+      - 'services/check-host-strict-fetch.js'
       - 'services/hetzner-clean-ip-change.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-hetzner-purchase-architecture.js'
@@ -45,6 +46,7 @@ jobs:
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
+          node --check services/check-host-strict-fetch.js
           node --check services/hetzner-clean-ip-change.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
@@ -83,6 +85,7 @@ jobs:
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
+          node --check services/check-host-strict-fetch.js
           node --check services/hetzner-clean-ip-change.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
@@ -94,7 +97,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|clean-ip|IP_QUALITY|provider-visibility|billing-cycle-bootstrap|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED' | tail -n 60 || true
+          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|clean-ip|IP_QUALITY|provider-visibility|billing-cycle-bootstrap|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED' | tail -n 60 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
