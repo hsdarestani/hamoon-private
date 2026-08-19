@@ -1,0 +1,31 @@
+name: Cancel Stale Hetzner Verifier
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/cancel-stale-hetzner-trigger.txt'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-stale-run:
+    if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel old mutating verifier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/body -w '%{http_code}' \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/32286070453/cancel")
+          echo "cancel_http=$code"
+          cat /tmp/body || true
+          test "$code" = "202" || test "$code" = "409"
