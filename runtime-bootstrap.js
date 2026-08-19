@@ -10,6 +10,7 @@ const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap')
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
+const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 
 function applyRuntimeSafetyDefaults() {
   // Afracloud/Afranet is fully retired. Remove it from the runtime datacenter map
@@ -19,15 +20,20 @@ function applyRuntimeSafetyDefaults() {
     delete datacenters.afracloud;
   }
 
-  // Strict Hetzner IP quality defaults. Never fail-open an unverified IP during
-  // normal purchase lifetime; instead keep checking/rotating until Iran reachability passes.
-  const defaults = {
+  // These are safety constraints, not tuning hints. Force them even when an old
+  // production .env still contains the previous, weaker values.
+  const forced = {
+    HETZNER_IP_QUALITY_REQUIRED: 'true',
     HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(10 * 365 * 24 * 60 * 60 * 1000),
     HETZNER_MAX_IP_QUALITY_ROTATIONS: '20',
     HETZNER_IP_QUALITY_IR_NODES: '6',
-    HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
+    HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '5',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
-    HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
+    HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67'
+  };
+  for (const [key, value] of Object.entries(forced)) process.env[key] = value;
+
+  const defaults = {
     HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3'
@@ -63,6 +69,10 @@ function applyPatches(coreSource) {
 
 function run() {
   applyRuntimeSafetyDefaults();
+  // The lifecycle quality checker already calls Check-Host. This fetch adapter makes
+  // each selected node pass only when ICMP is stable AND TCP/22 is reachable from
+  // the same node, eliminating the previous one-packet false positives.
+  installStrictCheckHostFetch();
   installCleanIpChangeModule();
   const corePath = path.join(__dirname, 'index-core.js');
   const source = applyPatches(fs.readFileSync(corePath, 'utf8'));
