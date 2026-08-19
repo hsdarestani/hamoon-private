@@ -1,0 +1,52 @@
+name: Diagnose Pending Hetzner
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/pending-diagnose-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Diagnose production pending provisioning
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -u
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== COMMIT ==='
+          git rev-parse HEAD
+          echo '=== PM2 ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a.filter(x=>x.name==='hamoonbot')) console.log(JSON.stringify({name:p.name,status:p.pm2_env?.status,restarts:p.pm2_env?.restart_time,uptime:p.pm2_env?.pm_uptime}))})" || true
+          echo '=== RECONCILE WIRING ==='
+          grep -RIn --exclude-dir=node_modules -E 'reconcileProvisioning|listPendingProvisioning|pending_ip_quality' . | head -n 100 || true
+          echo '=== RECENT HETZNER/PENDING LOGS ==='
+          pm2 logs hamoonbot --lines 2000 --nostream 2>&1 | grep -Ei 'HETZNER|pending_ip|pending_ssh|pending_ip_quality|ip_quality|check-host|clean_rejected|clean_success|rotation|rotate|provision|manual_review|Srv-' | tail -n 500 || true
+          echo '=== RECENT ERRORS ==='
+          pm2 logs hamoonbot --lines 1000 --nostream 2>&1 | grep -Ei 'error|exception|timeout|abort|fetch|CHECK_HOST|TypeError|ReferenceError|SyntaxError' | tail -n 250 || true
+          REMOTE
