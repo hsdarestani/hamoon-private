@@ -37,6 +37,14 @@ function applyRuntimeSafetyDefaults() {
   }
 }
 
+function installCleanIpChangeModule() {
+  // Keep the existing bootstrap/callback code untouched, but transparently replace
+  // the manual change-IP service with the Iran-quality-aware wrapper at runtime.
+  const legacyPath = require.resolve('./services/hetzner-change-ip');
+  const cleanModule = require('./services/hetzner-clean-ip-change');
+  if (require.cache[legacyPath]) require.cache[legacyPath].exports = cleanModule;
+}
+
 function applyPatches(coreSource) {
   return applyHetznerPurchaseArchitecturePatches(
     applyRebuildPatches(
@@ -55,6 +63,7 @@ function applyPatches(coreSource) {
 
 function run() {
   applyRuntimeSafetyDefaults();
+  installCleanIpChangeModule();
   const corePath = path.join(__dirname, 'index-core.js');
   const source = applyPatches(fs.readFileSync(corePath, 'utf8'));
   const child = new Module(corePath, module.parent);
@@ -65,4 +74,4 @@ function run() {
   return child.exports;
 }
 
-module.exports = { applyPatches, applyRuntimeSafetyDefaults, run };
+module.exports = { applyPatches, applyRuntimeSafetyDefaults, installCleanIpChangeModule, run };
