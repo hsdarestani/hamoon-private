@@ -1,0 +1,121 @@
+name: Verify Clean IP Production
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-production-clean-ip.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Verify required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull, validate, restart and verify production
+        id: prod
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          REMOTE_OUTPUT="$(ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main >/dev/null
+          git checkout main >/dev/null
+          git merge --ff-only origin/main >/dev/null
+          node --check runtime-bootstrap.js
+          node --check services/hetzner-clean-ip-change.js
+          node --check scripts/validate-clean-ip-runtime.js
+          node scripts/validate-clean-ip-runtime.js >/dev/null
+          RUNTIME_JSON="$(node - <<'NODE'
+          const runtime = require('./runtime-bootstrap');
+          runtime.applyRuntimeSafetyDefaults();
+          const dcs = require('./datacenters');
+          const out = {
+            afracloudVisible: Boolean(dcs.afracloud),
+            iranNodes: process.env.HETZNER_IP_QUALITY_IR_NODES,
+            iranMinSuccess: process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS,
+            maxRotations: process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS,
+            failOpenMs: process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS
+          };
+          process.stdout.write(JSON.stringify(out));
+          NODE
+          )"
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 4
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          test "$PM2_STATUS" = 'online'
+          COMMIT="$(git rev-parse HEAD)"
+          printf 'commit=%s\npm2=%s\nruntime=%s\n' "$COMMIT" "$PM2_STATUS" "$RUNTIME_JSON"
+          REMOTE
+          )"
+          printf '%s\n' "$REMOTE_OUTPUT"
+          COMMIT="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^commit=//p' | tail -n1)"
+          PM2_STATUS="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^pm2=//p' | tail -n1)"
+          RUNTIME="$(printf '%s\n' "$REMOTE_OUTPUT" | sed -n 's/^runtime=//p' | tail -n1)"
+          test -n "$COMMIT"
+          test "$PM2_STATUS" = 'online'
+          test -n "$RUNTIME"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "pm2=$PM2_STATUS" >> "$GITHUB_OUTPUT"
+          echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
+
+      - name: Record safe verification status
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROD_COMMIT: ${{ steps.prod.outputs.commit }}
+          PROD_PM2: ${{ steps.prod.outputs.pm2 }}
+          PROD_RUNTIME: ${{ steps.prod.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          CONTENT="verified_at=$NOW\ncommit=$PROD_COMMIT\npm2=$PROD_PM2\nruntime=$PROD_RUNTIME\n"
+          ENCODED="$(printf '%b' "$CONTENT" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github/production-clean-ip-status.txt"
+          SHA="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)"
+          if [ -n "$SHA" ]; then
+            BODY="$(python3 - <<PY
+          import json
+          print(json.dumps({'message':'ops: record clean IP production verification','content':'$ENCODED','sha':'$SHA'}))
+          PY
+          )"
+          else
+            BODY="$(python3 - <<PY
+          import json
+          print(json.dumps({'message':'ops: record clean IP production verification','content':'$ENCODED'}))
+          PY
+          )"
+          fi
+          curl -fsSL -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" -d "$BODY" >/dev/null
