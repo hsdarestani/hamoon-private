@@ -8,6 +8,7 @@ const baseChange = require('../services/hetzner-change-ip');
 const lifecycle = require('../services/hetzner-lifecycle');
 const cleanChange = require('../services/hetzner-clean-ip-change');
 const strictCheckHost = require('../services/check-host-strict-fetch');
+const reconcilePolicy = require('../services/hetzner-reconcile-policy');
 
 (async () => {
   assert(datacenters.afracloud, 'fixture should start with Afracloud configured');
@@ -15,7 +16,8 @@ const strictCheckHost = require('../services/check-host-strict-fetch');
   assert(!datacenters.afracloud, 'Afracloud must be removed from runtime datacenters');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_REQUIRED, 'true');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_NODES, '6');
-  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '5');
+  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '4');
+  assert.strictEqual(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES, '2');
   assert.strictEqual(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS, '20');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);
 
@@ -25,6 +27,15 @@ const strictCheckHost = require('../services/check-host-strict-fetch');
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['OK'], ['OK'], ['TIMEOUT']]]), true);
   assert.strictEqual(strictCheckHost.tcpNodeState([{ time: 0.12, address: '1.2.3.4' }]), true);
   assert.strictEqual(strictCheckHost.tcpNodeState([{ error: 'Connection timed out' }]), false);
+
+  assert.strictEqual(reconcilePolicy.shouldCountInconclusive({
+    status: 'pending_ip_quality', ip: '1.2.3.4',
+    quality: { checked: true, definitive: false, reason: 'insufficient_results' }
+  }), true);
+  assert.strictEqual(reconcilePolicy.shouldCountInconclusive({
+    status: 'pending_ip_quality', ip: '1.2.3.4',
+    quality: { checked: false, definitive: false, reason: 'probe_error:timeout' }
+  }), false);
 
   const originalChange = baseChange.changeHetznerPublicIp;
   const originalRemember = baseChange.rememberIp;
