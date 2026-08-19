@@ -1,0 +1,81 @@
+name: Verify Production via PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/production-verify-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-production:
+    if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Verify required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          echo 'Required production SSH secrets are available.'
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Verify production bot
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main >/dev/null
+          git checkout main >/dev/null
+          git merge --ff-only origin/main >/dev/null
+          node --check runtime-bootstrap.js
+          node --check services/hetzner-clean-ip-change.js
+          node --check scripts/validate-clean-ip-runtime.js
+          node scripts/validate-clean-ip-runtime.js
+          node - <<'NODE'
+          const runtime = require('./runtime-bootstrap');
+          runtime.applyRuntimeSafetyDefaults();
+          const dcs = require('./datacenters');
+          const state = {
+            afracloudVisible: Boolean(dcs.afracloud),
+            iranNodes: process.env.HETZNER_IP_QUALITY_IR_NODES,
+            iranMinSuccess: process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS,
+            maxRotations: process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS,
+            failOpenMs: process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS
+          };
+          console.log('RUNTIME_STATE=' + JSON.stringify(state));
+          if (state.afracloudVisible) process.exit(2);
+          if (state.iranNodes !== '6' || state.iranMinSuccess !== '4' || state.maxRotations !== '20') process.exit(3);
+          NODE
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 4
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          echo "PRODUCTION_COMMIT=$(git rev-parse HEAD)"
+          test "$PM2_STATUS" = 'online'
+          REMOTE
