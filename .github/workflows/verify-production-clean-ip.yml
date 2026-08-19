@@ -21,6 +21,25 @@ jobs:
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
     steps:
+      - name: Record runner start
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          CONTENT="state=started\nstarted_at=$NOW\nrun_id=${GITHUB_RUN_ID}\n"
+          ENCODED="$(printf '%b' "$CONTENT" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github/production-clean-ip-status.txt"
+          SHA="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)"
+          python3 - "$ENCODED" "$SHA" > /tmp/body.json <<'PY'
+          import json,sys
+          body={'message':'ops: record clean IP production verification start','content':sys.argv[1]}
+          if sys.argv[2]: body['sha']=sys.argv[2]
+          print(json.dumps(body))
+          PY
+          curl -fsSL -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" --data-binary @/tmp/body.json >/dev/null
+
       - name: Verify required secrets
         shell: bash
         run: |
@@ -90,7 +109,7 @@ jobs:
           echo "pm2=$PM2_STATUS" >> "$GITHUB_OUTPUT"
           echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
 
-      - name: Record safe verification status
+      - name: Record successful verification
         if: success()
         shell: bash
         env:
@@ -101,21 +120,32 @@ jobs:
         run: |
           set -euo pipefail
           NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          CONTENT="verified_at=$NOW\ncommit=$PROD_COMMIT\npm2=$PROD_PM2\nruntime=$PROD_RUNTIME\n"
+          CONTENT="state=success\nverified_at=$NOW\ncommit=$PROD_COMMIT\npm2=$PROD_PM2\nruntime=$PROD_RUNTIME\nrun_id=${GITHUB_RUN_ID}\n"
+          ENCODED="$(printf '%b' "$CONTENT" | base64 -w0)"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github/production-clean-ip-status.txt"
+          SHA="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))")"
+          python3 - "$ENCODED" "$SHA" > /tmp/body.json <<'PY'
+          import json,sys
+          print(json.dumps({'message':'ops: record clean IP production verification','content':sys.argv[1],'sha':sys.argv[2]}))
+          PY
+          curl -fsSL -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" --data-binary @/tmp/body.json >/dev/null
+
+      - name: Record failed verification
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOW="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          CONTENT="state=failed\nfailed_at=$NOW\nrun_id=${GITHUB_RUN_ID}\n"
           ENCODED="$(printf '%b' "$CONTENT" | base64 -w0)"
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github/production-clean-ip-status.txt"
           SHA="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "$API" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)"
-          if [ -n "$SHA" ]; then
-            BODY="$(python3 - <<PY
-          import json
-          print(json.dumps({'message':'ops: record clean IP production verification','content':'$ENCODED','sha':'$SHA'}))
+          python3 - "$ENCODED" "$SHA" > /tmp/body.json <<'PY'
+          import json,sys
+          body={'message':'ops: record failed clean IP production verification','content':sys.argv[1]}
+          if sys.argv[2]: body['sha']=sys.argv[2]
+          print(json.dumps(body))
           PY
-          )"
-          else
-            BODY="$(python3 - <<PY
-          import json
-          print(json.dumps({'message':'ops: record clean IP production verification','content':'$ENCODED'}))
-          PY
-          )"
-          fi
-          curl -fsSL -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" -d "$BODY" >/dev/null
+          curl -fsSL -X PUT -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'Content-Type: application/json' "$API" --data-binary @/tmp/body.json >/dev/null
