@@ -1,0 +1,69 @@
+name: Watch Pending Hetzner
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/watch-pending-hetzner-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Watch target without mutation
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=6 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo "PRODUCTION_COMMIT=$(git rev-parse HEAD)"
+          for i in 1 2 3 4 5 6 7 8; do
+            LINE="$(node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [rows]=await c.query('SELECT server_id,server_name,status,public_ip,ip_quality_attempts,lifecycle_updated_at FROM purchases WHERE server_id=? LIMIT 1',['162766405']);
+            process.stdout.write(JSON.stringify(rows[0]||null));
+            await c.end();
+          })().catch(e=>{console.error(e.message);process.exit(2)});
+          NODE
+          )"
+            echo "WATCH_${i}=$LINE"
+            STATUS="$(printf '%s' "$LINE" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s)?.status||'missing')}catch{process.stdout.write('parse_error')}})")"
+            if [ "$STATUS" = "active" ] || [ "$STATUS" = "manual_review" ] || [ "$STATUS" = "provider_missing" ] || [ "$STATUS" = "provisioning_failed" ]; then break; fi
+            sleep 15
+          done
+          node - <<'NODE'
+          require('dotenv').config();
+          const cloud=require('./cloud-api');
+          const dcs=require('./datacenters');
+          const lifecycle=require('./services/hetzner-lifecycle');
+          (async()=>{
+            const server=await cloud.getServer(dcs['hetzner-finland'],null,'162766405');
+            console.log('PROVIDER_FINAL='+JSON.stringify({status:server?.status||null,ip:lifecycle.publicIpv4(server)}));
+          })().catch(e=>{console.error('PROVIDER_FINAL_ERROR='+e.message);process.exitCode=1});
+          NODE
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log('PM2_FINAL='+JSON.stringify({status:p?.pm2_env?.status||'missing',restarts:p?.pm2_env?.restart_time}))})"
+          REMOTE
