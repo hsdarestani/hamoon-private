@@ -14,6 +14,8 @@ on:
       - 'services/check-host-strict-fetch.js'
       - 'services/hetzner-reconcile-policy.js'
       - 'services/hetzner-clean-ip-change.js'
+      - 'services/hetzner-lifecycle.js'
+      - 'services/hetzner-change-ip.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-hetzner-purchase-architecture.js'
       - 'scripts/validate-billing-cycle-change.js'
@@ -50,6 +52,8 @@ jobs:
           node --check services/check-host-strict-fetch.js
           node --check services/hetzner-reconcile-policy.js
           node --check services/hetzner-clean-ip-change.js
+          node --check services/hetzner-lifecycle.js
+          node --check services/hetzner-change-ip.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
@@ -90,6 +94,8 @@ jobs:
           node --check services/check-host-strict-fetch.js
           node --check services/hetzner-reconcile-policy.js
           node --check services/hetzner-clean-ip-change.js
+          node --check services/hetzner-lifecycle.js
+          node --check services/hetzner-change-ip.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
