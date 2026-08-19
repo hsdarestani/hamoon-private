@@ -1,0 +1,94 @@
+name: Backfill Rejected Hetzner IP History
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/backfill-rejected-ip-history-trigger.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Backfill history and reset legacy attempts
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo "PRODUCTION_COMMIT=$(git rev-parse HEAD)"
+          node --check services/hetzner-lifecycle.js
+          node --check services/hetzner-change-ip.js
+          node --check services/hetzner-reconcile-policy.js
+          node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const { ensureHistoryTable, rememberIp } = require('./services/hetzner-change-ip');
+          const TARGET = { telegramId: '278773395', datacenter: 'hetzner-finland', serverId: '162766405' };
+          const rejected = ['65.109.209.86', '65.109.211.154', '65.109.176.251'];
+          (async () => {
+            await ensureHistoryTable(db);
+            for (const ip of rejected) {
+              await rememberIp(db, { ...TARGET, ip, event: 'backfill_rejected_quality' });
+            }
+            await db.pool.query(
+              `UPDATE purchases
+               SET ip_quality_attempts = 0,
+                   lifecycle_updated_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE server_id = ? AND telegram_id = ? AND datacenter = ?
+                 AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')`,
+              [TARGET.serverId, TARGET.telegramId, TARGET.datacenter]
+            );
+            const [history] = await db.pool.query(
+              `SELECT ip_address,last_event,seen_count
+               FROM server_ip_history
+               WHERE datacenter=? AND server_id=?
+               ORDER BY first_seen_at`,
+              [TARGET.datacenter, TARGET.serverId]
+            );
+            const [purchase] = await db.pool.query(
+              `SELECT server_id,server_name,status,public_ip,ip_quality_attempts,lifecycle_updated_at
+               FROM purchases WHERE server_id=? LIMIT 1`,
+              [TARGET.serverId]
+            );
+            console.log('HISTORY=' + JSON.stringify(history));
+            console.log('PURCHASE=' + JSON.stringify(purchase[0] || null));
+            await db.pool.end();
+          })().catch(e => { console.error(e); process.exit(2); });
+          NODE
+          node - <<'NODE'
+          require('dotenv').config();
+          const cloud=require('./cloud-api');
+          const dcs=require('./datacenters');
+          const lifecycle=require('./services/hetzner-lifecycle');
+          (async()=>{
+            const server=await cloud.getServer(dcs['hetzner-finland'],null,'162766405');
+            console.log('PROVIDER=' + JSON.stringify({status:server?.status||null,ip:lifecycle.publicIpv4(server)}));
+          })().catch(e=>{console.error(e);process.exit(3)});
+          NODE
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log('PM2='+JSON.stringify({status:p?.pm2_env?.status||'missing',restarts:p?.pm2_env?.restart_time}))})"
+          REMOTE
