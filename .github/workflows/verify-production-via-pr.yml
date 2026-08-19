@@ -13,7 +13,7 @@ jobs:
   verify-production:
     if: github.actor == 'hsdarestani' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
@@ -40,7 +40,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Verify production bot and kick current pending server
+      - name: Verify production bot
         shell: bash
         run: |
           set -euo pipefail
@@ -49,9 +49,7 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          git fetch origin main >/dev/null
-          git checkout main >/dev/null
-          git merge --ff-only origin/main >/dev/null
+          echo "PRODUCTION_COMMIT=$(git rev-parse HEAD)"
           node --check runtime-bootstrap.js
           node --check services/check-host-strict-fetch.js
           node --check services/hetzner-reconcile-policy.js
@@ -68,65 +66,13 @@ jobs:
             iranNodes: process.env.HETZNER_IP_QUALITY_IR_NODES,
             iranMinSuccess: process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS,
             inconclusiveRotateProbes: process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES,
-            maxRotations: process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS,
-            failOpenMs: process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS
+            maxRotations: process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS
           };
           console.log('RUNTIME_STATE=' + JSON.stringify(state));
           if (state.afracloudVisible) process.exit(2);
           if (state.required !== 'true' || state.iranNodes !== '6' || state.iranMinSuccess !== '4' || state.inconclusiveRotateProbes !== '2' || state.maxRotations !== '20') process.exit(3);
           NODE
-          pm2 restart hamoonbot --update-env >/dev/null
-          sleep 4
           PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
           echo "PM2_STATUS=$PM2_STATUS"
           test "$PM2_STATUS" = 'online'
-
-          echo '=== KICK CURRENT PENDING SERVER ==='
-          node - <<'NODE'
-          require('dotenv').config();
-          const runtime = require('./runtime-bootstrap');
-          runtime.applyRuntimeSafetyDefaults();
-          require('./services/check-host-strict-fetch').installStrictCheckHostFetch();
-          require('./services/hetzner-reconcile-policy').installHetznerReconcilePolicy();
-          const lifecycle = require('./services/hetzner-lifecycle');
-          const db = require('./db');
-          const datacenters = require('./datacenters');
-          const target = '162766405';
-          const sleep = ms => new Promise(r => setTimeout(r, ms));
-          const resolveDatacenter = datacenter => {
-            const dc = datacenters[datacenter];
-            return dc ? { ...dc, key: datacenter } : null;
-          };
-          (async () => {
-            for (let i = 1; i <= 4; i += 1) {
-              const results = await lifecycle.reconcileProvisioning({ db, resolveDatacenter, timeoutMs: 12000 });
-              const hit = results.find(x => String(x.server_id) === target);
-              console.log(`TARGET_RECONCILE_${i}=` + JSON.stringify(hit ? {
-                status: hit.status,
-                ready: !!hit.ready,
-                ip: hit.ip || null,
-                ip_rotated: !!hit.ip_rotated,
-                reason: hit.reason || null,
-                quality_reason: hit.quality?.reason || null,
-                iran_success: hit.quality?.iran?.success ?? null,
-                iran_selected: hit.quality?.iran?.selected ?? null,
-                inconclusive_probe_count: hit.inconclusive_probe_count || null
-              } : { missing: true }));
-              if (!hit || hit.ready || hit.status === 'active' || hit.status === 'manual_review' || hit.status === 'provider_missing') break;
-              await sleep(1500);
-            }
-          })().catch(e => { console.error('TARGET_KICK_FAILED=' + e.message); process.exit(4); });
-          NODE
-
-          node - <<'NODE'
-          require('dotenv').config();
-          const mysql=require('mysql2/promise');
-          (async()=>{
-            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
-            const [rows]=await c.query('SELECT server_id,server_name,status,public_ip,ip_quality_attempts,lifecycle_updated_at FROM purchases WHERE server_id=? LIMIT 1',['162766405']);
-            console.log('TARGET_FINAL=' + JSON.stringify(rows[0] || null));
-            await c.end();
-          })().catch(e=>{console.error('TARGET_DB_FAILED='+e.message);process.exit(5)});
-          NODE
-          echo "PRODUCTION_COMMIT=$(git rev-parse HEAD)"
           REMOTE
