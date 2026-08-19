@@ -43,10 +43,28 @@ jobs:
           git rev-parse HEAD
           echo '=== PM2 ==='
           pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a.filter(x=>x.name==='hamoonbot')) console.log(JSON.stringify({name:p.name,status:p.pm2_env?.status,restarts:p.pm2_env?.restart_time,uptime:p.pm2_env?.pm_uptime}))})" || true
-          echo '=== RECONCILE WIRING ==='
-          grep -RIn --exclude-dir=node_modules -E 'reconcileProvisioning|listPendingProvisioning|pending_ip_quality' . | head -n 100 || true
+          echo '=== PENDING DB STATE ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [cols]=await c.query('SHOW COLUMNS FROM purchases');
+            const have=new Set(cols.map(x=>x.Field));
+            const wanted=['id','server_id','telegram_id','datacenter','status','public_ip','ip','ip_quality_attempts','ip_quality_result','created_at','lifecycle_updated_at','updated_at','server_name','name'];
+            const selected=wanted.filter(x=>have.has(x));
+            const orderCol=['lifecycle_updated_at','updated_at','created_at','id'].find(x=>have.has(x)) || selected[0];
+            const [rows]=await c.query(`SELECT ${selected.map(x=>'`'+x+'`').join(',')} FROM purchases WHERE datacenter LIKE 'hetzner%' AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') ORDER BY \`${orderCol}\` DESC LIMIT 12`);
+            for(const r of rows) console.log('PENDING_ROW='+JSON.stringify(r));
+            if(have.has('server_id')) {
+              const [target]=await c.query(`SELECT ${selected.map(x=>'`'+x+'`').join(',')} FROM purchases WHERE server_id=? LIMIT 1`,['162766405']);
+              for(const r of target) console.log('TARGET_162766405='+JSON.stringify(r));
+            }
+            await c.end();
+          })().catch(e=>{console.error('DB_DIAG_FAILED='+e.message);process.exitCode=1});
+          NODE
           echo '=== RECENT HETZNER/PENDING LOGS ==='
-          pm2 logs hamoonbot --lines 2000 --nostream 2>&1 | grep -Ei 'HETZNER|pending_ip|pending_ssh|pending_ip_quality|ip_quality|check-host|clean_rejected|clean_success|rotation|rotate|provision|manual_review|Srv-' | tail -n 500 || true
+          pm2 logs hamoonbot --lines 2500 --nostream 2>&1 | grep -Ei 'HETZNER|pending_ip|pending_ssh|pending_ip_quality|ip_quality|check-host|clean_rejected|clean_success|rotation|rotate|provision|manual_review|Srv-|162766405' | tail -n 650 || true
           echo '=== RECENT ERRORS ==='
-          pm2 logs hamoonbot --lines 1000 --nostream 2>&1 | grep -Ei 'error|exception|timeout|abort|fetch|CHECK_HOST|TypeError|ReferenceError|SyntaxError' | tail -n 250 || true
+          pm2 logs hamoonbot --lines 1200 --nostream 2>&1 | grep -Ei 'error|exception|timeout|abort|fetch|CHECK_HOST|TypeError|ReferenceError|SyntaxError' | tail -n 300 || true
           REMOTE
