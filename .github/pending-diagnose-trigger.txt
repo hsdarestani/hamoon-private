@@ -1,0 +1,1 @@
+read final pending state after mutex deploy
