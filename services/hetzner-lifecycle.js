@@ -1,6 +1,7 @@
 const net = require('net');
 const cloud = require('../cloud-api');
 const { isHetznerConfig } = require('../provider-detector');
+const { reserveUniquePrimaryIpv4, rememberIp } = require('./hetzner-change-ip');
 
 const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
 const NON_BILLABLE_STATUSES = new Set([
@@ -245,15 +246,36 @@ async function waitActionMaybe(dc, action) {
   if (id) await cloud.waitHetznerAction(dc, id, 180000);
 }
 
-async function rotateProvisioningIp({ dc, serverId }) {
+async function rotateProvisioningIp({ dc, serverId, db, telegramId, datacenter }) {
   const provider = cloud.pick(dc);
   if (typeof provider.getHetznerServer !== 'function') throw new Error('HETZNER_RAW_SERVER_UNAVAILABLE');
   const raw = await provider.getHetznerServer(dc, serverId);
   const oldIpId = raw?.public_net?.ipv4?.id;
   const oldIp = raw?.public_net?.ipv4?.ip;
   const location = raw?.datacenter?.location?.name || dc?.HETZNER_LOCATION;
-  if (!oldIpId || !location) throw new Error('HETZNER_PRIMARY_IP_METADATA_MISSING');
-  const newIp = await cloud.createPrimaryIpv4(dc, null, location);
+  if (!oldIpId || !oldIp || !location) throw new Error('HETZNER_PRIMARY_IP_METADATA_MISSING');
+
+  let newIp;
+  if (db && telegramId != null && datacenter) {
+    await rememberIp(db, {
+      telegramId,
+      datacenter,
+      serverId,
+      ip: oldIp,
+      event: 'provisioning_quality_rejected'
+    });
+    newIp = await reserveUniquePrimaryIpv4(db, {
+      dc,
+      telegramId,
+      datacenter,
+      serverId,
+      location,
+      oldIp
+    });
+  } else {
+    newIp = await cloud.createPrimaryIpv4(dc, null, location);
+  }
+
   if (!newIp?.id || !newIp?.ip) throw new Error('HETZNER_NEW_IP_CREATE_FAILED');
   let oldUnassigned = false;
   let newAssigned = false;
@@ -265,6 +287,15 @@ async function rotateProvisioningIp({ dc, serverId }) {
     newAssigned = true;
     await cloud.deletePrimaryIp(dc, null, oldIpId);
     await waitActionMaybe(dc, await cloud.powerOnHetznerServer(dc, serverId));
+    if (db && telegramId != null && datacenter) {
+      await rememberIp(db, {
+        telegramId,
+        datacenter,
+        serverId,
+        ip: newIp.ip,
+        event: 'provisioning_candidate_assigned'
+      }).catch(() => null);
+    }
     return { oldIp, newIp: newIp.ip, newIpId: newIp.id };
   } catch (error) {
     try {
@@ -412,7 +443,13 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
         }
         await db.updateIpQualityResult?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, qualitySummary(readiness.quality), true);
         try {
-          const rotated = await rotateProvisioningIp({ dc, serverId: purchase.server_id });
+          const rotated = await rotateProvisioningIp({
+            dc,
+            serverId: purchase.server_id,
+            db,
+            telegramId: purchase.telegram_id,
+            datacenter: purchase.datacenter
+          });
           await db.updatePublicIp?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, rotated.newIp);
           await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'pending_ssh');
           results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'pending_ssh', ready: false, ip_rotated: true, quality: readiness.quality });
