@@ -1,1 +1,1 @@
-strict iran clean-ip verification
+verify bounded clean IP and kick 162766405 2026-08-19
