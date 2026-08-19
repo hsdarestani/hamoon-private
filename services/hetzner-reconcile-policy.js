@@ -114,7 +114,10 @@ function installHetznerReconcilePolicy() {
 
           const rotated = await lifecycle.rotateProvisioningIp({
             dc,
-            serverId: result.server_id
+            serverId: result.server_id,
+            db,
+            telegramId: result.telegram_id,
+            datacenter: result.datacenter
           });
 
           await db?.updatePublicIp?.(
