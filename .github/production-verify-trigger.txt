@@ -1,1 +1,1 @@
-strict iran clean-ip verification
+strict iran clean-ip verification 2026-08-19
