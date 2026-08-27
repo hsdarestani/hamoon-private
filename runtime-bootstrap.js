@@ -10,6 +10,7 @@ const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap')
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
+const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
@@ -56,13 +57,15 @@ function installCleanIpChangeModule() {
 }
 
 function applyPatches(coreSource) {
-  return applyHetznerPurchaseArchitecturePatches(
-    applyRebuildPatches(
-      applyBillingCyclePatches(
-        applyHetznerChangeIpPatches(
-          applyHetznerTrafficPatches(
-            applyFeaturePatches(
-              applyProviderVisibilityPatches(coreSource)
+  return applyHetznerManagementScopePatch(
+    applyHetznerPurchaseArchitecturePatches(
+      applyRebuildPatches(
+        applyBillingCyclePatches(
+          applyHetznerChangeIpPatches(
+            applyHetznerTrafficPatches(
+              applyFeaturePatches(
+                applyProviderVisibilityPatches(coreSource)
+              )
             )
           )
         )
