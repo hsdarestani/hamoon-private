@@ -22,6 +22,8 @@ const required = [
   "case 'HETZNER_TRAFFIC':",
   "case 'HCONSOLE':",
   "case 'RENAME_SERVER':",
+  "const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';",
+  'if (isAfra || isHetzner) return idMatch;',
 ];
 
 for (const marker of required) {
