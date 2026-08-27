@@ -1,0 +1,120 @@
+name: Diagnose user 138279367 Hetzner servers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-user-138279367.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect production DB and Hetzner state
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== APP ==='
+          printf 'path=%s commit=' "$APP_PATH"
+          git rev-parse --short HEAD
+          printf 'pm2='; pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const a=JSON.parse(s);const x=a.find(v=>v.name==='hamoonbot');console.log(x?.pm2_env?.status||'missing')}catch{console.log('unknown')}})" || true
+          echo '=== USER SERVER DIAGNOSTIC ==='
+          node <<'NODE'
+          const net = require('net');
+          const db = require('./db');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const telegramId = '138279367';
+
+          function ipv4(s) {
+            return s?.public_net?.ipv4?.ip || s?.public_ip || s?.addresses?.public?.find?.(a => Number(a.version) === 4)?.addr || null;
+          }
+          function tcp22(ip, timeout = 3500) {
+            return new Promise(resolve => {
+              if (!ip) return resolve(false);
+              const socket = net.createConnection({host: ip, port: 22, timeout}, () => { socket.destroy(); resolve(true); });
+              socket.on('error', () => resolve(false));
+              socket.on('timeout', () => { socket.destroy(); resolve(false); });
+            });
+          }
+          function errInfo(e) {
+            return {
+              status: e?.status || e?.statusCode || e?.response?.status || null,
+              code: e?.code || e?.response?.data?.error?.code || null,
+              message: String(e?.message || e).slice(0, 140)
+            };
+          }
+
+          (async () => {
+            const [rows] = await db.pool.execute(
+              `SELECT server_id, telegram_id, datacenter, server_name, flavor_id, status, public_ip,
+                      provider_action_id, lifecycle_error_code, ip_quality_attempts, ip_quality_summary,
+                      created_at, updated_at, lifecycle_updated_at, delivered_at, deleted_at
+                 FROM purchases
+                WHERE telegram_id = ?
+                ORDER BY created_at ASC`,
+              [telegramId]
+            );
+            console.log('DB_ROWS=' + rows.length);
+            for (const r of rows) {
+              const safeRow = {...r};
+              for (const k of ['created_at','updated_at','lifecycle_updated_at','delivered_at','deleted_at']) {
+                if (safeRow[k] instanceof Date) safeRow[k] = safeRow[k].toISOString();
+              }
+              console.log('DB ' + JSON.stringify(safeRow));
+              const dc = dcs[r.datacenter];
+              if (!dc || String(dc.provider || dc.apiType || '').toLowerCase() !== 'hetzner') {
+                console.log('PROVIDER ' + JSON.stringify({server_id:r.server_id, datacenter:r.datacenter, skipped:'not_hetzner_or_missing_dc'}));
+                continue;
+              }
+              try {
+                const s = await cloud.getServer(dc, null, r.server_id);
+                const ip = ipv4(s);
+                console.log('PROVIDER ' + JSON.stringify({
+                  db_server_id: String(r.server_id),
+                  provider_server_id: String(s?.id ?? ''),
+                  name: s?.name || null,
+                  status: s?.status || null,
+                  ip,
+                  location: s?.datacenter?.location?.name || s?.datacenter?.location?.city || s?.location?.name || null,
+                  datacenter: s?.datacenter?.name || null,
+                  server_type: s?.server_type?.name || s?.server_type?.id || null,
+                  tcp22: await tcp22(ip)
+                }));
+              } catch (e) {
+                console.log('PROVIDER_ERROR ' + JSON.stringify({server_id:String(r.server_id),datacenter:r.datacenter,...errInfo(e)}));
+              }
+            }
+            const duplicateIps = Object.entries(rows.reduce((m,r)=>{const ip=String(r.public_ip||'').trim(); if(ip)(m[ip]??=[]).push(String(r.server_id)); return m;},{})).filter(([,ids])=>ids.length>1);
+            const duplicateNames = Object.entries(rows.reduce((m,r)=>{const n=String(r.server_name||'').trim(); if(n)(m[n]??=[]).push(String(r.server_id)); return m;},{})).filter(([,ids])=>ids.length>1);
+            console.log('DB_DUPLICATE_IPS ' + JSON.stringify(duplicateIps));
+            console.log('DB_DUPLICATE_NAMES ' + JSON.stringify(duplicateNames));
+          })().then(async()=>{ try{await db.pool.end();}catch{} }).catch(async e=>{ console.error('DIAG_FATAL', errInfo(e)); try{await db.pool.end();}catch{} process.exitCode=1; });
+          NODE
+          echo '=== RECENT USER LOGS ==='
+          pm2 logs hamoonbot --lines 800 --nostream 2>/dev/null | grep -F '138279367' | tail -n 80 || true
+          REMOTE
