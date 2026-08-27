@@ -50,7 +50,7 @@ jobs:
           node <<'NODE'
           const net = require('net');
           require('dotenv').config();
-          const db = require('./db');
+          const mysql = require('mysql2/promise');
           const dcs = require('./datacenters');
           const hetzner = require('./Hetzner/hetzner-api');
           const userId = '138279367';
@@ -69,23 +69,30 @@ jobs:
           }
           const safeDate = v => v instanceof Date ? v.toISOString() : v;
           const safeErr = e => ({status:e?.status||e?.response?.status||null, code:e?.code||e?.data?.error?.code||e?.response?.data?.error?.code||null, message:String(e?.message||e).slice(0,180)});
+          const redact = row => {
+            const out = {};
+            for (const [k,v] of Object.entries(row || {})) {
+              if (/password|secret|private|token/i.test(k)) continue;
+              out[k] = safeDate(v);
+            }
+            return out;
+          };
 
           (async () => {
-            const [rows] = await db.pool.execute(
-              `SELECT server_id, telegram_id, datacenter, server_name, flavor_id, image_id, status, public_ip,
-                      duration, amount, auto_renew, suspend_reason,
-                      provider_action_id, lifecycle_error_code, ip_quality_attempts, ip_quality_summary,
-                      created_at, updated_at, lifecycle_updated_at, delivered_at, deleted_at
-                 FROM purchases
-                WHERE telegram_id = ?
-                ORDER BY created_at ASC`, [userId]
-            );
-            console.log('DB_PURCHASE_COUNT=' + rows.length);
-            for (const r of rows) {
-              const o = {};
-              for (const [k,v] of Object.entries(r)) o[k] = safeDate(v);
-              console.log('DB_PURCHASE ' + JSON.stringify(o));
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || '127.0.0.1',
+              user: process.env.DB_USER,
+              password: process.env.DB_PASSWORD,
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            let rows;
+            try {
+              [rows] = await conn.execute('SELECT * FROM purchases WHERE telegram_id = ? ORDER BY created_at ASC', [userId]);
+            } finally {
+              await conn.end();
             }
+            console.log('DB_PURCHASE_COUNT=' + rows.length);
+            for (const r of rows) console.log('DB_PURCHASE ' + JSON.stringify(redact(r)));
 
             const cfg = dcs.hetzner || Object.values(dcs).find(x => String(x?.provider||x?.apiType||'').toLowerCase()==='hetzner');
             if (!cfg) throw new Error('HETZNER_CONFIG_NOT_FOUND');
@@ -136,7 +143,7 @@ jobs:
             const dupNames = Object.entries(rows.reduce((m,r)=>{const n=String(r.server_name||'').trim(); if(n)(m[n]??=[]).push(String(r.server_id)); return m;},{})).filter(([,ids])=>ids.length>1);
             console.log('DB_DUP_IPS ' + JSON.stringify(dupIps));
             console.log('DB_DUP_NAMES ' + JSON.stringify(dupNames));
-          })().then(async()=>{ try{await db.pool.end();}catch{} }).catch(async e=>{ console.error('DIAG_FATAL ' + JSON.stringify(safeErr(e))); try{await db.pool.end();}catch{} process.exitCode=1; });
+          })().catch(e=>{ console.error('DIAG_FATAL ' + JSON.stringify(safeErr(e))); process.exitCode=1; });
           NODE
 
           echo '=== RECENT USER LOGS ==='
