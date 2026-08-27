@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   validate-and-deploy:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
