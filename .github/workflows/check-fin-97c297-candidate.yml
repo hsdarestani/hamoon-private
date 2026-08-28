@@ -1,0 +1,68 @@
+name: Check Srv-FIN-97c297 candidate quality
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-fin-97c297-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Verify candidate and primary IP state
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const dcs=require('./datacenters');
+          const hz=require('./Hetzner/hetzner-api');
+          const lifecycle=require('./services/hetzner-lifecycle');
+          (async()=>{
+            const dc=dcs['hetzner-finland'];
+            const serverId='161588280';
+            const s=(await hz.hetznerRequest(dc,'GET',`/servers/${serverId}`)).server;
+            console.log('SERVER='+JSON.stringify({status:s?.status||null,ipv4:s?.public_net?.ipv4?{id:String(s.public_net.ipv4.id||''),ip:s.public_net.ipv4.ip,blocked:!!s.public_net.ipv4.blocked}:null}));
+            for (const id of ['146989333','146990479']) {
+              try {
+                const x=(await hz.hetznerRequest(dc,'GET',`/primary_ips/${id}`)).primary_ip;
+                console.log('PRIMARY_'+id+'='+JSON.stringify({id:String(x.id),ip:x.ip,assignee_id:x.assignee_id==null?null:String(x.assignee_id),assignee_type:x.assignee_type||null,blocked:!!x.blocked,auto_delete:!!x.auto_delete}));
+              } catch(e) {
+                console.log('PRIMARY_'+id+'_ERROR='+JSON.stringify({status:e?.status||e?.response?.status||null,message:String(e?.message||e)}));
+              }
+            }
+            const ip=s?.public_net?.ipv4?.ip;
+            if(!ip) throw new Error('NO_CURRENT_IPV4');
+            for(let attempt=1;attempt<=3;attempt++) {
+              const q=await lifecycle.checkIpQuality(ip);
+              console.log('QUALITY_'+attempt+'='+JSON.stringify({ip,ok:!!q?.ok,definitive:!!q?.definitive,reason:q?.reason||null,summary:lifecycle.qualitySummary(q),iran:q?.iran||null,global:q?.global||null}));
+              if(q?.ok||q?.definitive) break;
+              await new Promise(r=>setTimeout(r,1800));
+            }
+          })().catch(e=>{console.error('CHECK_FATAL='+String(e?.message||e));process.exitCode=1;});
+          NODE
+          REMOTE
