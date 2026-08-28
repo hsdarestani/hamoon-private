@@ -8,6 +8,7 @@ const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstr
 const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
+const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
 const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
@@ -57,14 +58,16 @@ function installCleanIpChangeModule() {
 }
 
 function applyPatches(coreSource) {
-  return applyHetznerManagementScopePatch(
-    applyHetznerPurchaseArchitecturePatches(
-      applyRebuildPatches(
-        applyBillingCyclePatches(
-          applyHetznerChangeIpPatches(
-            applyHetznerTrafficPatches(
-              applyFeaturePatches(
-                applyProviderVisibilityPatches(coreSource)
+  return applyBillingRenewalGuardPatches(
+    applyHetznerManagementScopePatch(
+      applyHetznerPurchaseArchitecturePatches(
+        applyRebuildPatches(
+          applyBillingCyclePatches(
+            applyHetznerChangeIpPatches(
+              applyHetznerTrafficPatches(
+                applyFeaturePatches(
+                  applyProviderVisibilityPatches(coreSource)
+                )
               )
             )
           )
