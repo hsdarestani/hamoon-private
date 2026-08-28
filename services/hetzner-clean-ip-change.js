@@ -1,5 +1,6 @@
 'use strict';
 
+const net = require('net');
 const base = require('./hetzner-change-ip');
 const lifecycle = require('./hetzner-lifecycle');
 
@@ -13,6 +14,36 @@ function clampInt(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function tcpProbeOnce(ip, port, timeoutMs) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ host: ip, port });
+    let settled = false;
+    const finish = (ok, reason) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ok, reason });
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true, 'connected'));
+    socket.once('timeout', () => finish(false, 'timeout'));
+    socket.once('error', error => finish(false, error?.code || error?.message || 'error'));
+  });
+}
+
+async function probeSshReachability(ip, options = {}) {
+  const attempts = clampInt(options.attempts ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_ATTEMPTS, 3, 1, 6);
+  const timeoutMs = clampInt(options.timeoutMs ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_TIMEOUT_MS, 5000, 1000, 15000);
+  const port = clampInt(options.port ?? process.env.HETZNER_CHANGE_IP_SSH_PORT, 22, 1, 65535);
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await tcpProbeOnce(ip, port, timeoutMs);
+    if (last.ok) return { ...last, attempts: attempt, port };
+    if (attempt < attempts) await sleep(1500);
+  }
+  return { ...(last || { ok: false, reason: 'unknown' }), attempts, port };
+}
+
 async function probeIranQuality(ip) {
   const probeAttempts = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, 3, 1, 6);
   let last = null;
@@ -24,21 +55,44 @@ async function probeIranQuality(ip) {
   return last;
 }
 
+async function verifyCleanCandidate(ip, args = {}) {
+  const sshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : probeSshReachability;
+  const ssh = await sshProbe(ip);
+  if (!ssh?.ok) {
+    return {
+      ok: false,
+      definitive: true,
+      reason: 'ssh_unreachable',
+      ssh,
+      quality: null
+    };
+  }
+
+  const qualityProbe = typeof args.qualityProbe === 'function' ? args.qualityProbe : probeIranQuality;
+  const quality = await qualityProbe(ip);
+  return {
+    ok: Boolean(quality?.ok),
+    definitive: Boolean(quality?.definitive),
+    reason: quality?.ok ? 'ok' : (quality?.reason || 'quality_inconclusive'),
+    ssh,
+    quality
+  };
+}
+
 async function changeHetznerPublicIp(args) {
   const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 20, 1, 30);
   let firstOldIp = null;
-  let lastResult = null;
-  let lastQuality = null;
+  let lastCandidateIp = null;
+  let lastVerification = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const result = await base.changeHetznerPublicIp(args);
-    if (!firstOldIp) firstOldIp = result.oldIp;
-    lastResult = result;
-
-    const quality = await probeIranQuality(result.newIp);
-    lastQuality = quality;
-
-    if (quality?.ok) {
+    try {
+      const result = await base.changeHetznerPublicIp({
+        ...args,
+        verifyCandidate: async ({ ip }) => verifyCleanCandidate(ip, args)
+      });
+      if (!firstOldIp) firstOldIp = result.oldIp;
+      const verification = result.verification || null;
       await base.rememberIp(args.db, {
         telegramId: args.telegramId,
         datacenter: args.datacenter,
@@ -50,67 +104,93 @@ async function changeHetznerPublicIp(args) {
         server_id: String(args.serverId),
         attempt,
         ip: result.newIp,
-        quality: lifecycle.qualitySummary(quality)
+        quality: lifecycle.qualitySummary(verification?.quality || verification)
       });
       return {
         ...result,
-        oldIp: firstOldIp,
+        oldIp: firstOldIp || result.oldIp,
         attempts: attempt,
-        quality
+        quality: verification?.quality || verification,
+        ssh: verification?.ssh || null
       };
-    }
+    } catch (error) {
+      if (!firstOldIp && error?.oldIp) firstOldIp = error.oldIp;
+      lastCandidateIp = error?.candidateIp || lastCandidateIp;
+      lastVerification = error?.verification || lastVerification;
 
-    await base.rememberIp(args.db, {
-      telegramId: args.telegramId,
-      datacenter: args.datacenter,
-      serverId: args.serverId,
-      ip: result.newIp,
-      event: quality?.definitive ? 'clean_ip_rejected' : 'clean_ip_unverified'
-    }).catch(() => {});
+      if (error?.code === 'CANDIDATE_REJECTED') {
+        const verification = error.verification || {};
+        await base.rememberIp(args.db, {
+          telegramId: args.telegramId,
+          datacenter: args.datacenter,
+          serverId: args.serverId,
+          ip: error.candidateIp,
+          event: verification?.definitive ? 'clean_ip_rejected_rolled_back' : 'clean_ip_unverified_rolled_back'
+        }).catch(() => {});
 
-    console.warn('[HETZNER_CHANGE_IP_CLEAN_REJECTED]', {
-      server_id: String(args.serverId),
-      attempt,
-      ip: result.newIp,
-      definitive: Boolean(quality?.definitive),
-      quality: lifecycle.qualitySummary(quality)
-    });
+        console.warn('[HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK]', {
+          server_id: String(args.serverId),
+          attempt,
+          candidate_ip: error.candidateIp,
+          restored_ip: error.oldIp,
+          definitive: Boolean(verification?.definitive),
+          reason: verification?.reason || 'unknown',
+          quality: lifecycle.qualitySummary(verification?.quality || verification)
+        });
 
-    // If the external probe itself is unavailable/inconclusive after retries,
-    // do not burn through the whole Hetzner pool blindly. Stop and report that
-    // the IP was changed but could not be verified as clean.
-    if (!quality?.definitive) {
-      const error = new Error('IP_QUALITY_CHECK_UNAVAILABLE');
-      error.code = 'IP_QUALITY_CHECK_UNAVAILABLE';
-      error.currentIp = result.newIp;
-      error.quality = quality;
+        if (!verification?.definitive) {
+          const unavailable = new Error('IP_QUALITY_CHECK_UNAVAILABLE');
+          unavailable.code = 'IP_QUALITY_CHECK_UNAVAILABLE';
+          unavailable.currentIp = error.oldIp || firstOldIp || null;
+          unavailable.candidateIp = error.candidateIp || null;
+          unavailable.verification = verification;
+          throw unavailable;
+        }
+        continue;
+      }
+
+      if (error?.code === 'CANDIDATE_REJECTED_ROLLBACK_FAILED') {
+        const rollbackError = new Error('IP_CHANGE_ROLLBACK_FAILED');
+        rollbackError.code = 'IP_CHANGE_ROLLBACK_FAILED';
+        rollbackError.currentIp = error.oldIp || firstOldIp || null;
+        rollbackError.candidateIp = error.candidateIp || null;
+        rollbackError.verification = error.verification || null;
+        throw rollbackError;
+      }
+
       throw error;
     }
   }
 
   const error = new Error('NO_CLEAN_IPV4_AVAILABLE');
   error.code = 'NO_CLEAN_IPV4_AVAILABLE';
-  error.currentIp = lastResult?.newIp || null;
-  error.quality = lastQuality;
+  error.currentIp = firstOldIp || null;
+  error.lastCandidateIp = lastCandidateIp;
+  error.verification = lastVerification;
   throw error;
 }
 
 function userMessageForError(error) {
   const code = String(error?.code || error?.message || '');
   if (code === 'IP_QUALITY_CHECK_UNAVAILABLE') {
-    const suffix = error?.currentIp ? `\nIP فعلی: ${error.currentIp}` : '';
-    return `IP تغییر کرد، اما سرویس بررسی دسترسی از ایران فعلاً نتیجه قطعی نداد؛ ربات این IP را به عنوان «تمیز» تأیید نکرد.${suffix}`;
+    const suffix = error?.currentIp ? `\nIP قبلی حفظ شد: ${error.currentIp}` : '';
+    return `سرویس بررسی دسترسی از ایران فعلاً نتیجه قطعی نداد. برای جلوگیری از قطعی، IP جدید اعمال نشد و ربات به IP قبلی برگشت.${suffix}`;
   }
   if (code === 'NO_CLEAN_IPV4_AVAILABLE') {
-    const suffix = error?.currentIp ? `\nآخرین IP: ${error.currentIp}` : '';
-    return `چندین IP جدید بررسی شد اما هیچ‌کدام معیار دسترسی از ایران را پاس نکردند. ربات IP تأییدنشده را سالم اعلام نمی‌کند.${suffix}`;
+    const suffix = error?.currentIp ? `\nIP قبلی حفظ شد: ${error.currentIp}` : '';
+    return `چندین IP جدید بررسی شد اما هیچ‌کدام هم‌زمان SSH و معیار دسترسی از ایران را پاس نکردند. هیچ IP تأییدنشده‌ای روی سرور نهایی نشد.${suffix}`;
+  }
+  if (code === 'IP_CHANGE_ROLLBACK_FAILED') {
+    return 'IP جدید تأیید نشد و بازگردانی خودکار کامل نشد. برای جلوگیری از تغییر بیشتر، عملیات متوقف شد؛ لطفاً با پشتیبانی تماس بگیرید.';
   }
   return base.userMessageForError(error);
 }
 
 module.exports = {
   ...base,
+  probeSshReachability,
   probeIranQuality,
+  verifyCleanCandidate,
   changeHetznerPublicIp,
   userMessageForError
 };
