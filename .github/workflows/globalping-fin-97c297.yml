@@ -68,7 +68,7 @@ jobs:
                 target:ip,
                 type:'ping',
                 limit:probeLimit,
-                locations:[{country:'IR',limit:probeLimit}],
+                locations:[{country:'IR'}],
                 measurementOptions:{packets:3,protocol:'TCP',port:22}
               })
             });
