@@ -1,0 +1,61 @@
+name: Verify billing Srv-FIN-0cd415 after deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-billing-fin-0cd415-post.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_PORT" && test -n "$SSH_KEY" && test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Verify live record and purchase charge
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo "APP_COMMIT=$(git rev-parse --short HEAD)"
+          pm2 describe hamoonbot | grep -E 'status|uptime|restarts' | head -n 6 || true
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+          (async()=>{
+            const conn = await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            const [[p]] = await conn.execute(`SELECT * FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 1`, ['Srv-FIN-0cd415']);
+            if (!p) throw new Error('purchase not found');
+            const [logs] = await conn.execute(`SELECT timestamp,type,amount,description FROM wallet_logs WHERE telegram_id=? AND timestamp BETWEEN DATE_SUB(?, INTERVAL 2 HOUR) AND DATE_ADD(?, INTERVAL 6 HOUR) ORDER BY timestamp ASC`, [String(p.telegram_id), p.created_at, p.created_at]);
+            const [[u]] = await conn.execute(`SELECT wallet FROM users WHERE telegram_id=?`, [String(p.telegram_id)]);
+            console.log('PURCHASE=' + JSON.stringify({server_id:String(p.server_id),telegram_id:String(p.telegram_id),datacenter:p.datacenter,server_name:p.server_name,flavor_id:p.flavor_id,amount:Number(p.amount),duration:p.duration,status:p.status,created_at:p.created_at,last_billed_at:p.last_billed_at,auto_renew:Number(p.auto_renew),suspend_reason:p.suspend_reason,public_ip:p.public_ip,wallet:Number(u?.wallet||0)}));
+            console.log('PURCHASE_WINDOW_LOGS=' + JSON.stringify(logs.map(l=>({timestamp:l.timestamp,type:l.type,amount:Number(l.amount),description:String(l.description||'').slice(0,160)}))));
+            const dc=dcs[p.datacenter];
+            try { const srv=await cloud.getServer(dc, null, p.server_id); console.log('PROVIDER=' + JSON.stringify({id:String(srv?.id||p.server_id),name:srv?.name||null,status:srv?.status||srv?.state||null,ip:srv?.public_net?.ipv4?.ip||srv?.public_ip||srv?.ip||null})); } catch(e) { console.log('PROVIDER_ERROR=' + JSON.stringify({status:e?.response?.status||e?.status||null,message:String(e?.message||e).slice(0,120)})); }
+            await conn.end();
+          })().catch(e=>{console.error('VERIFY_FATAL='+String(e?.message||e));process.exitCode=1;});
+          NODE
+          REMOTE
