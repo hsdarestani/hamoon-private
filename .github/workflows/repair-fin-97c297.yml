@@ -1,0 +1,143 @@
+name: Safe recover Srv-FIN-97c297
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-fin-97c297.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_PORT" && test -n "$SSH_KEY" && test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect and safely power on only
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+
+          const TARGET_NAME = 'Srv-FIN-97c297';
+          const TARGET_IP = '65.109.192.5';
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || '127.0.0.1',
+              user: process.env.DB_USER,
+              password: process.env.DB_PASSWORD,
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            let p;
+            try {
+              [[p]] = await conn.execute(
+                `SELECT server_id, telegram_id, datacenter, server_name, status, suspend_reason,
+                        public_ip, duration, amount, last_billed_at, auto_renew, deleted_at
+                   FROM purchases
+                  WHERE server_name = ? OR public_ip = ?
+                  ORDER BY (server_name = ?) DESC, created_at DESC
+                  LIMIT 1`,
+                [TARGET_NAME, TARGET_IP, TARGET_NAME]
+              );
+            } finally {
+              await conn.end();
+            }
+            if (!p) throw new Error('TARGET_PURCHASE_NOT_FOUND');
+            if (p.deleted_at) throw new Error('TARGET_PURCHASE_IS_DELETED');
+            const dc = dcs[p.datacenter];
+            if (!dc) throw new Error('DATACENTER_CONFIG_NOT_FOUND:' + p.datacenter);
+
+            console.log('DB_STATE=' + JSON.stringify({
+              server_id: String(p.server_id),
+              telegram_id: String(p.telegram_id),
+              datacenter: p.datacenter,
+              server_name: p.server_name,
+              status: p.status,
+              suspend_reason: p.suspend_reason,
+              public_ip: p.public_ip,
+              duration: p.duration,
+              amount: Number(p.amount),
+              last_billed_at: p.last_billed_at,
+              auto_renew: Number(p.auto_renew)
+            }));
+
+            let before = await cloud.getServer(dc, null, p.server_id);
+            console.log('PROVIDER_BEFORE=' + JSON.stringify({
+              id: String(before?.id || p.server_id),
+              name: before?.name || null,
+              status: before?.status || before?.state || null,
+              ip: before?.public_ip || before?.addresses?.public?.find?.(x => Number(x.version) === 4)?.addr || null
+            }));
+
+            const status = String(before?.status || before?.state || '').toLowerCase();
+            if (status !== 'running') {
+              console.log('SAFE_ACTION=poweron_only');
+              const action = await cloud.powerOnHetznerServer(dc, p.server_id);
+              if (action?.id) await cloud.waitHetznerAction(dc, action.id, 120000);
+              for (let i = 0; i < 18; i++) {
+                await sleep(5000);
+                const current = await cloud.getServer(dc, null, p.server_id);
+                const currentStatus = String(current?.status || current?.state || '').toLowerCase();
+                console.log('POWERON_POLL=' + JSON.stringify({attempt:i+1,status:currentStatus}));
+                before = current;
+                if (currentStatus === 'running') break;
+              }
+            } else {
+              console.log('SAFE_ACTION=none_already_running');
+            }
+
+            const after = await cloud.getServer(dc, null, p.server_id);
+            const afterStatus = String(after?.status || after?.state || '').toLowerCase();
+            const afterIp = after?.public_ip || after?.addresses?.public?.find?.(x => Number(x.version) === 4)?.addr || p.public_ip || TARGET_IP;
+            console.log('PROVIDER_AFTER=' + JSON.stringify({
+              id: String(after?.id || p.server_id),
+              name: after?.name || null,
+              status: afterStatus,
+              ip: afterIp || null
+            }));
+            if (afterStatus !== 'running') throw new Error('SERVER_NOT_RUNNING_AFTER_SAFE_POWERON');
+            console.log('RESULT=provider_running');
+          })().catch(e => {
+            console.error('RECOVER_FATAL=' + String(e?.message || e));
+            process.exitCode = 1;
+          });
+          NODE
+
+          # Connectivity checks only; no reboot/rebuild/reinstall/delete.
+          echo '=== TCP CHECKS ==='
+          for port in 22 80 443; do
+            if timeout 5 bash -c "</dev/tcp/65.109.192.5/$port" 2>/dev/null; then
+              echo "TCP_${port}=open"
+            else
+              echo "TCP_${port}=closed_or_filtered"
+            fi
+          done
+          REMOTE
