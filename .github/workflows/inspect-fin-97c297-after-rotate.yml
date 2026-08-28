@@ -1,0 +1,62 @@
+name: Inspect Srv-FIN-97c297 after rotate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-fin-97c297-after-rotate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect provider state only
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const dcs=require('./datacenters');
+          const hz=require('./Hetzner/hetzner-api');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            const [[p]]=await c.execute(`SELECT server_id,telegram_id,datacenter,server_name,public_ip,status,suspend_reason FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 1`,['Srv-FIN-97c297']);
+            await c.end();
+            if(!p) throw new Error('TARGET_NOT_FOUND');
+            const dc=dcs[p.datacenter];
+            const s=(await hz.hetznerRequest(dc,'GET',`/servers/${p.server_id}`)).server;
+            const ips=(await hz.hetznerRequest(dc,'GET','/primary_ips?per_page=200')).primary_ips||[];
+            const relevant=ips.filter(x=>['65.109.188.189','65.109.211.154',String(p.public_ip||'')].includes(String(x.ip))||String(x.assignee_id||'')===String(p.server_id));
+            console.log('DB='+JSON.stringify({server_id:String(p.server_id),public_ip:p.public_ip,status:p.status,suspend_reason:p.suspend_reason}));
+            console.log('SERVER='+JSON.stringify({status:s?.status||null,locked:!!s?.locked,ipv4:s?.public_net?.ipv4?{id:String(s.public_net.ipv4.id||''),ip:s.public_net.ipv4.ip,blocked:!!s.public_net.ipv4.blocked}:null,ipv6:s?.public_net?.ipv6?.ip||null}));
+            console.log('PRIMARY_IPS='+JSON.stringify(relevant.map(x=>({id:String(x.id),ip:x.ip,assignee_id:x.assignee_id==null?null:String(x.assignee_id),assignee_type:x.assignee_type||null,blocked:!!x.blocked,name:x.name||null}))));
+          })().catch(e=>{console.error('INSPECT_FATAL='+String(e?.message||e));process.exitCode=1;});
+          NODE
+          for ip in 65.109.188.189 65.109.211.154; do
+            if timeout 4 bash -c "</dev/tcp/$ip/22" 2>/dev/null; then echo "SSH_${ip}=open"; else echo "SSH_${ip}=closed_or_filtered"; fi
+          done
+          REMOTE
