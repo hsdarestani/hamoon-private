@@ -1,0 +1,97 @@
+name: Verify Srv-FIN-97c297 from Iran
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/globalping-fin-97c297.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Test current IPv4 from Iran probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const dcs=require('./datacenters');
+          const hz=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const UA='HamoonCloud-IP-Quality/1.0';
+          async function json(url, options={}) {
+            const r=await fetch(url,{...options,headers:{'User-Agent':UA,'Accept':'application/json','Content-Type':'application/json',...(options.headers||{})}});
+            const text=await r.text();
+            let body={}; try{body=JSON.parse(text);}catch{body={raw:text.slice(0,500)}}
+            if(!r.ok) throw new Error(`HTTP_${r.status}:${JSON.stringify(body).slice(0,300)}`);
+            return body;
+          }
+          (async()=>{
+            const dc=dcs['hetzner-finland'];
+            const s=(await hz.hetznerRequest(dc,'GET','/servers/161588280')).server;
+            const ip=s?.public_net?.ipv4?.ip;
+            if(!ip) throw new Error('NO_IPV4');
+            console.log('TARGET_IP='+ip);
+            const probes=await json('https://api.globalping.io/v1/probes');
+            const iran=(Array.isArray(probes)?probes:[]).filter(p=>String(p?.location?.country||'').toUpperCase()==='IR');
+            console.log('IR_PROBES='+iran.length);
+            console.log('IR_PROBE_SAMPLE='+JSON.stringify(iran.slice(0,10).map(p=>({city:p?.location?.city||null,asn:p?.location?.asn||null,network:p?.location?.network||null,tags:p?.tags||[]}))));
+            if(!iran.length) throw new Error('GLOBALPING_NO_IRAN_PROBES');
+            const created=await json('https://api.globalping.io/v1/measurements',{
+              method:'POST',
+              body:JSON.stringify({
+                target:ip,
+                type:'ping',
+                limit:Math.min(3,iran.length),
+                locations:[{country:'IR',limit:Math.min(3,iran.length)}],
+                measurementOptions:{packets:3,protocol:'TCP',port:22,ipVersion:4}
+              })
+            });
+            console.log('MEASUREMENT_ID='+created.id+' PROBES_COUNT='+created.probesCount);
+            let measurement=null;
+            for(let i=0;i<20;i++){
+              await sleep(i===0?1200:2000);
+              measurement=await json('https://api.globalping.io/v1/measurements/'+encodeURIComponent(created.id));
+              if(String(measurement?.status||'')!=='in-progress') break;
+            }
+            const results=Array.isArray(measurement?.results)?measurement.results:[];
+            const summarized=results.map(x=>({
+              country:x?.probe?.country||x?.probe?.location?.country||null,
+              city:x?.probe?.city||x?.probe?.location?.city||null,
+              asn:x?.probe?.asn||x?.probe?.location?.asn||null,
+              network:x?.probe?.network||x?.probe?.location?.network||null,
+              status:x?.result?.status||null,
+              stats:x?.result?.stats||null,
+              raw:String(x?.result?.rawOutput||'').slice(0,240)
+            }));
+            console.log('GLOBALPING_STATUS='+String(measurement?.status||''));
+            console.log('GLOBALPING_RESULTS='+JSON.stringify(summarized));
+            const success=summarized.filter(x=>x.status==='finished' && Number(x?.stats?.rcv||0)>0 && Number(x?.stats?.loss??100)<100).length;
+            console.log('IR_TCP22_SUCCESS='+success+'/'+summarized.length);
+          })().catch(e=>{console.error('GLOBALPING_FATAL='+String(e?.message||e));process.exitCode=1;});
+          NODE
+          REMOTE
