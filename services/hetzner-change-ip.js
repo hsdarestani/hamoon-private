@@ -115,7 +115,7 @@ async function deletePrimaryIpWithRetry(dc, primaryIpId, attempts = 4) {
 }
 
 async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, serverId, location, oldIp }) {
-  const maxAttempts = Math.max(1, Math.min(12, Number(process.env.HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS || 8)));
+  const maxAttempts = Math.max(1, Math.min(20, Number(process.env.HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS || 8)));
   const used = await usedIps(db, { datacenter, serverId });
   if (oldIp) {
     used.add(oldIp);
@@ -177,7 +177,7 @@ async function waitForNewIp(dc, serverId, expectedIp, timeoutMs = Number(process
   throw error;
 }
 
-async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId }) {
+async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp }) {
   try {
     const raw = await hetznerApi.getHetznerServer(dc, serverId).catch(() => null);
     if (String(raw?.status || '').toLowerCase() === 'running') {
@@ -190,6 +190,7 @@ async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId }) {
       await waitAction(dc, await cloud.assignPrimaryIp(dc, null, oldPrimaryId, serverId));
     }
     await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
+    if (oldIp) await waitForNewIp(dc, serverId, oldIp);
     if (newPrimaryId) await deletePrimaryIpWithRetry(dc, newPrimaryId).catch(() => {});
     return true;
   } catch (rollbackError) {
@@ -201,7 +202,7 @@ async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId }) {
   }
 }
 
-async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter }) {
+async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter, verifyCandidate = null }) {
   const lockKey = `${datacenter}:${serverId}`;
   if (locks.has(lockKey)) throw Object.assign(new Error('OPERATION_IN_PROGRESS'), { code: 'OPERATION_IN_PROGRESS' });
   locks.add(lockKey);
@@ -209,6 +210,7 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter 
   let oldPrimaryId = null;
   let newPrimary = null;
   let oldIp = null;
+  let rollbackDone = false;
   try {
     const purchase = await db.getPurchaseForOwner(telegramId, serverId, datacenter);
     if (!purchase) throw Object.assign(new Error('NOT_FOUND'), { code: 'NOT_FOUND' });
@@ -233,26 +235,80 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter 
     await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
 
     const ready = await waitForNewIp(dc, serverId, newPrimary.ip);
-    await db.updatePublicIp(telegramId, serverId, datacenter, ready.ip);
+    let verification = null;
+    if (typeof verifyCandidate === 'function') {
+      try {
+        verification = await verifyCandidate({
+          ip: ready.ip,
+          server: ready.server,
+          oldIp,
+          serverId: String(serverId),
+          datacenter: String(datacenter)
+        });
+      } catch (verifyError) {
+        verification = {
+          ok: false,
+          definitive: false,
+          reason: `verifier_error:${verifyError?.code || verifyError?.message || 'unknown'}`
+        };
+      }
+
+      if (!verification?.ok) {
+        await rememberIp(db, {
+          telegramId, datacenter, serverId, ip: ready.ip,
+          event: verification?.definitive ? 'candidate_verification_rejected' : 'candidate_verification_inconclusive'
+        }).catch(() => {});
+
+        rollbackDone = await rollbackSwap(dc, {
+          serverId,
+          oldPrimaryId,
+          newPrimaryId: newPrimary.id,
+          oldIp
+        });
+        if (rollbackDone) {
+          await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
+        }
+
+        const error = new Error(rollbackDone ? 'CANDIDATE_REJECTED' : 'CANDIDATE_REJECTED_ROLLBACK_FAILED');
+        error.code = rollbackDone ? 'CANDIDATE_REJECTED' : 'CANDIDATE_REJECTED_ROLLBACK_FAILED';
+        error.candidateIp = ready.ip;
+        error.oldIp = oldIp;
+        error.verification = verification;
+        error.rollbackDone = rollbackDone;
+        throw error;
+      }
+    }
 
     try {
       await deletePrimaryIpWithRetry(dc, oldPrimaryId);
     } catch (cleanupError) {
-      const rolledBack = await rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId: newPrimary.id });
-      if (rolledBack) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
+      rollbackDone = await rollbackSwap(dc, {
+        serverId,
+        oldPrimaryId,
+        newPrimaryId: newPrimary.id,
+        oldIp
+      });
+      if (rollbackDone) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
       const error = new Error('OLD_PRIMARY_IP_CLEANUP_FAILED');
       error.code = 'OLD_PRIMARY_IP_CLEANUP_FAILED';
       error.cause = cleanupError;
+      error.rollbackDone = rollbackDone;
       throw error;
     }
 
+    await db.updatePublicIp(telegramId, serverId, datacenter, ready.ip);
     await rememberIp(db, { telegramId, datacenter, serverId, ip: ready.ip, event: 'change_completed' });
     console.log('[HETZNER_CHANGE_IP_SUCCESS]', { server_id: String(serverId), old_ip: oldIp, new_ip: ready.ip });
-    return { oldIp, newIp: ready.ip };
+    return { oldIp, newIp: ready.ip, verification };
   } catch (error) {
-    if (newPrimary?.id && oldPrimaryId && error?.code !== 'OLD_PRIMARY_IP_CLEANUP_FAILED') {
-      const rolledBack = await rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId: newPrimary.id });
-      if (rolledBack && oldIp) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
+    if (!rollbackDone && !error?.rollbackDone && newPrimary?.id && oldPrimaryId && error?.code !== 'OLD_PRIMARY_IP_CLEANUP_FAILED') {
+      rollbackDone = await rollbackSwap(dc, {
+        serverId,
+        oldPrimaryId,
+        newPrimaryId: newPrimary.id,
+        oldIp
+      });
+      if (rollbackDone && oldIp) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
     } else if (newPrimary?.id && !oldPrimaryId) {
       await deletePrimaryIpWithRetry(dc, newPrimary.id).catch(() => {});
     }
@@ -270,6 +326,8 @@ function userMessageForError(error) {
   if (code === 'OPERATION_IN_PROGRESS') return 'یک عملیات دیگر روی این سرور در حال انجام است. چند لحظه بعد دوباره تلاش کنید.';
   if (code === 'INVALID_SERVER_STATE') return 'در وضعیت فعلی سرور امکان تغییر IP وجود ندارد.';
   if (code === 'PRIMARY_IPV4_NOT_FOUND') return 'اطلاعات IPv4 اصلی سرور از Hetzner دریافت نشد. لطفاً با پشتیبانی تماس بگیرید.';
+  if (code === 'CANDIDATE_REJECTED') return 'IP جدید معیارهای سلامت را پاس نکرد و ربات به‌صورت خودکار IP قبلی را برگرداند.';
+  if (code === 'CANDIDATE_REJECTED_ROLLBACK_FAILED') return 'IP جدید تأیید نشد و بازگردانی خودکار کامل نشد. لطفاً با پشتیبانی تماس بگیرید.';
   if (code === 'OLD_PRIMARY_IP_CLEANUP_FAILED') return 'تغییر IP کامل نشد و برای جلوگیری از هزینه یا قطعی، عملیات برگشت داده شد. لطفاً دوباره تلاش کنید.';
   if (code === 'NOT_FOUND') return 'این سرور برای حساب شما پیدا نشد.';
   return 'تغییر IP انجام نشد. IP قبلی تا حد امکان حفظ شده است؛ لطفاً کمی بعد دوباره تلاش کنید.';
@@ -281,6 +339,8 @@ module.exports = {
   rememberIp,
   usedIps,
   reserveUniquePrimaryIpv4,
+  waitForNewIp,
+  rollbackSwap,
   changeHetznerPublicIp,
   userMessageForError,
 };
