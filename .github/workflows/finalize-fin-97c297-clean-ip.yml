@@ -1,0 +1,110 @@
+name: Finalize clean IPv4 Srv-FIN-97c297
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/finalize-fin-97c297-clean-ip.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_PORT" && test -n "$SSH_KEY" && test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync DB and retire only unassigned old IPv4
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const dcs=require('./datacenters');
+          const hz=require('./Hetzner/hetzner-api');
+          const cloud=require('./cloud-api');
+          const db=require('./db');
+          const {rememberIp}=require('./services/hetzner-change-ip');
+
+          const TARGET='Srv-FIN-97c297';
+          const EXPECTED_SERVER='161588280';
+          const NEW_IP='65.109.211.154';
+          const NEW_PRIMARY='146990479';
+          const OLD_IP='65.109.188.189';
+          const OLD_PRIMARY='146989333';
+
+          (async()=>{
+            const conn=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            let p;
+            try {
+              [[p]]=await conn.execute(`SELECT server_id,telegram_id,datacenter,server_name,public_ip,status,deleted_at FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 1`,[TARGET]);
+            } finally { await conn.end(); }
+            if(!p||p.deleted_at) throw new Error('TARGET_NOT_ACTIVE');
+            if(String(p.server_id)!==EXPECTED_SERVER) throw new Error('SERVER_ID_MISMATCH');
+            const dc=dcs[p.datacenter];
+            if(!dc) throw new Error('DATACENTER_NOT_FOUND');
+
+            const server=(await hz.hetznerRequest(dc,'GET',`/servers/${p.server_id}`)).server;
+            const providerIp=server?.public_net?.ipv4?.ip||null;
+            const providerPrimary=server?.public_net?.ipv4?.id==null?null:String(server.public_net.ipv4.id);
+            console.log('BEFORE='+JSON.stringify({db_ip:p.public_ip,db_status:p.status,provider_status:server?.status||null,provider_ip:providerIp,provider_primary:providerPrimary}));
+            if(String(server?.status||'').toLowerCase()!=='running') throw new Error('PROVIDER_NOT_RUNNING');
+            if(providerIp!==NEW_IP||providerPrimary!==NEW_PRIMARY) throw new Error('CURRENT_PROVIDER_IPV4_CHANGED');
+
+            const newPrimary=(await hz.hetznerRequest(dc,'GET',`/primary_ips/${NEW_PRIMARY}`)).primary_ip;
+            if(String(newPrimary?.ip||'')!==NEW_IP||String(newPrimary?.assignee_id||'')!==EXPECTED_SERVER) throw new Error('NEW_PRIMARY_ASSIGNMENT_INVALID');
+            if(newPrimary?.blocked) throw new Error('NEW_PRIMARY_BLOCKED');
+
+            await db.updatePublicIp(String(p.telegram_id),String(p.server_id),String(p.datacenter),NEW_IP);
+            await rememberIp(db,{telegramId:String(p.telegram_id),datacenter:String(p.datacenter),serverId:String(p.server_id),ip:NEW_IP,event:'clean_ip_verified_globalping_4of5'}).catch(()=>{});
+            console.log('DB_SYNCED='+NEW_IP);
+
+            try {
+              const oldPrimary=(await hz.hetznerRequest(dc,'GET',`/primary_ips/${OLD_PRIMARY}`)).primary_ip;
+              console.log('OLD_PRIMARY='+JSON.stringify({id:String(oldPrimary?.id||OLD_PRIMARY),ip:oldPrimary?.ip||null,assignee_id:oldPrimary?.assignee_id==null?null:String(oldPrimary.assignee_id),blocked:!!oldPrimary?.blocked}));
+              if(String(oldPrimary?.ip||'')!==OLD_IP) throw new Error('OLD_PRIMARY_IP_MISMATCH');
+              if(oldPrimary?.assignee_id!=null) throw new Error('OLD_PRIMARY_STILL_ASSIGNED');
+              await cloud.deletePrimaryIp(dc,null,OLD_PRIMARY);
+              console.log('OLD_PRIMARY_DELETED='+OLD_IP);
+            } catch(e) {
+              const status=Number(e?.status||e?.response?.status||0);
+              if(status===404) console.log('OLD_PRIMARY_ALREADY_GONE='+OLD_IP);
+              else throw e;
+            }
+
+            const verify=(await hz.hetznerRequest(dc,'GET',`/servers/${p.server_id}`)).server;
+            const verifyIp=verify?.public_net?.ipv4?.ip||null;
+            if(String(verify?.status||'').toLowerCase()!=='running'||verifyIp!==NEW_IP) throw new Error('FINAL_PROVIDER_VERIFY_FAILED');
+            console.log('FINAL_PROVIDER='+JSON.stringify({status:verify?.status||null,ip:verifyIp,primary_id:String(verify?.public_net?.ipv4?.id||'')}));
+          })().catch(e=>{console.error('FINALIZE_FATAL='+String(e?.message||e));process.exitCode=1;}).finally(async()=>{try{await db.pool.end();}catch{}});
+          NODE
+
+          if timeout 5 bash -c '</dev/tcp/65.109.211.154/22' 2>/dev/null; then
+            echo 'SSH_FINAL=open'
+          else
+            echo 'SSH_FINAL=closed_or_filtered'
+            exit 1
+          fi
+          REMOTE
