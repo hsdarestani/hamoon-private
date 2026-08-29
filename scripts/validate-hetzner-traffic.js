@@ -24,6 +24,10 @@ assert('metric direction sums matching network series only', traffic.sumHetznerM
   'network.0.bandwidth.out': { values: [[0, 20], [60, 20]] }
 }, 'in', 60) === 1200);
 
+const month = traffic.currentHetznerTrafficPeriod(new Date('2026-08-29T12:00:00Z'));
+assert('Hetzner traffic month starts on first UTC day', month.start === '2026-08-01T00:00:00.000Z');
+assert('Hetzner traffic month resets on next first UTC day', month.reset === '2026-09-01T00:00:00.000Z');
+
 const core = fs.readFileSync('index-core.js', 'utf8');
 try {
   const patched = applyPatches(core);
@@ -32,7 +36,9 @@ try {
   assert('Hetzner traffic callback restored', patched.includes("case 'HETZNER_TRAFFIC':"));
   assert('Hetzner traffic button restored', patched.includes("text: '📊 مصرف ترافیک'"));
   assert('traffic handler restored', patched.includes('async function handleHetznerTrafficInfo('));
-  assert('current/24h/7d/30d controls restored', ['📊 دوره جاری', '🕐 ۲۴ ساعت', '📅 ۷ روز', '🗓 ۳۰ روز'].every(x => patched.includes(x)));
+  assert('current/24h/7d/30d controls restored', ['📊 ماه جاری Hetzner', '🕐 ۲۴ ساعت', '📅 ۷ روز', '🗓 ۳۰ روز'].every(x => patched.includes(x)));
+  assert('calendar traffic period is explained', patched.includes('شروع دوره ترافیک') && patched.includes('ریست بعدی'));
+  assert('purchase cycle separation is explained', patched.includes('مستقل از تاریخ خرید یا تمدید سرور است'));
   assert('console remains active', patched.includes("case 'HCONSOLE':"));
   assert('rename remains active', patched.includes("case 'RENAME_SERVER':"));
   assert('provider visibility remains active', patched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
