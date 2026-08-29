@@ -31,7 +31,12 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_IP_QUALITY_IR_NODES: '6',
     HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
-    HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67'
+    HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
+    // A rejected candidate is always re-verified transactionally before commit.
+    // Do not let old rejection history become a multi-day local blacklist when
+    // Hetzner legitimately recycles its finite Primary IPv4 pool. The general
+    // recent-IP cooldown below still prevents immediate same-request bouncing.
+    HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0'
   };
   for (const [key, value] of Object.entries(forced)) process.env[key] = value;
 
@@ -40,7 +45,6 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3',
     HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
-    HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: String(7 * 24 * 60 * 60 * 1000),
     HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
     HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000',
     HETZNER_PENDING_RECOVERY_READY_TIMEOUT_MS: '90000'
