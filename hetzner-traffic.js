@@ -41,6 +41,18 @@ function selectedTrafficRange(range) {
   return VALID_RANGES.has(value) ? value : 'current';
 }
 
+function currentHetznerTrafficPeriod(now = new Date()) {
+  const value = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(value.getTime())) throw new Error('INVALID_TRAFFIC_PERIOD_DATE');
+  const start = new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), 1, 0, 0, 0));
+  const reset = new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + 1, 1, 0, 0, 0));
+  return {
+    basis: 'calendar_month',
+    start: start.toISOString(),
+    reset: reset.toISOString()
+  };
+}
+
 function buildMetricsPath(serverId, range, now = new Date()) {
   const selected = selectedTrafficRange(range);
   if (selected === 'current') return null;
@@ -64,6 +76,8 @@ function buildMetricsPath(serverId, range, now = new Date()) {
 
 async function getServerTraffic(dcConfig, serverId, range = 'current') {
   const selectedRange = selectedTrafficRange(range);
+  const generatedAt = new Date();
+  const currentPeriod = currentHetznerTrafficPeriod(generatedAt);
   const serverData = await hetznerRequest(
     dcConfig,
     'GET',
@@ -89,16 +103,22 @@ async function getServerTraffic(dcConfig, serverId, range = 'current') {
     period_incoming_traffic: null,
     period_outgoing_traffic: null,
     period_available: selectedRange === 'current',
-    generated_at: new Date().toISOString()
+    traffic_period_basis: currentPeriod.basis,
+    traffic_period_start: currentPeriod.start,
+    traffic_period_reset: currentPeriod.reset,
+    generated_at: generatedAt.toISOString()
   };
 
   if (selectedRange === 'current') {
+    // Hetzner's server counters are the provider-authoritative counters for the
+    // current calendar-month traffic allowance. They are intentionally not tied
+    // to the customer's HamoonCloud purchase/renewal date.
     result.period_incoming_traffic = result.incoming_traffic;
     result.period_outgoing_traffic = result.outgoing_traffic;
     return result;
   }
 
-  const metrics = buildMetricsPath(serverId, selectedRange);
+  const metrics = buildMetricsPath(serverId, selectedRange, generatedAt);
   try {
     const metricData = await hetznerRequest(dcConfig, 'GET', metrics.path);
     const timeSeries = metricData?.metrics?.time_series || {};
@@ -122,6 +142,7 @@ module.exports = {
   integrateHetznerBandwidthSeries,
   sumHetznerMetricDirection,
   selectedTrafficRange,
+  currentHetznerTrafficPeriod,
   buildMetricsPath,
   getServerTraffic
 };
