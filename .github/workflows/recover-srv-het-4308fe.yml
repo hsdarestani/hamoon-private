@@ -1,0 +1,183 @@
+name: Recover Srv-HET-4308fe IPv4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-srv-het-4308fe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Recover same VM without rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          const db = require('./db');
+          const cloud = require('./cloud-api');
+          const hetznerApi = require('./Hetzner/hetzner-api');
+          const runtime = require('./runtime-bootstrap');
+          const strict = require('./services/check-host-strict-fetch');
+          const clean = require('./services/hetzner-clean-ip-change');
+          const base = require('./services/hetzner-change-ip');
+          const datacenters = require('./datacenters');
+
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function waitAction(dc, action) {
+            const id = action?.id ?? action?.action?.id ?? null;
+            if (!id) return null;
+            return cloud.waitHetznerAction(dc, id, 180000);
+          }
+          async function ensureOff(dc, serverId) {
+            const raw = await hetznerApi.getHetznerServer(dc, serverId);
+            const status = String(raw?.status || '').toLowerCase();
+            if (status === 'off' || status === 'stopped') return raw;
+            await waitAction(dc, await cloud.powerOffHetznerServer(dc, serverId));
+            return hetznerApi.getHetznerServer(dc, serverId);
+          }
+          async function ensureOn(dc, serverId) {
+            const raw = await hetznerApi.getHetznerServer(dc, serverId);
+            if (String(raw?.status || '').toLowerCase() !== 'running') {
+              await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
+            }
+          }
+
+          (async () => {
+            runtime.applyRuntimeSafetyDefaults();
+            strict.installStrictCheckHostFetch();
+
+            const [rows] = await db.pool.query(
+              "SELECT * FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 1",
+              ['Srv-HET-4308fe']
+            );
+            const p = rows?.[0];
+            if (!p) throw new Error('PURCHASE_NOT_FOUND');
+            if (String(p.server_id) !== '161862983') throw new Error('UNEXPECTED_SERVER_ID');
+            const dc = datacenters[p.datacenter] || datacenters.hetzner;
+            if (!dc) throw new Error('DATACENTER_CONFIG_NOT_FOUND');
+
+            let raw = await hetznerApi.getHetznerServer(dc, p.server_id);
+            const existingIp = raw?.public_net?.ipv4?.ip || null;
+            const existingPrimaryId = raw?.public_net?.ipv4?.id || null;
+            console.log('BEFORE', JSON.stringify({ server_id: p.server_id, status: raw?.status, ipv4: existingIp, primary_ipv4_id: existingPrimaryId }));
+
+            if (existingIp && existingPrimaryId) {
+              const verify = await clean.verifyCleanCandidate(existingIp);
+              console.log('EXISTING_VERIFY', JSON.stringify({ ok: verify.ok, definitive: verify.definitive, reason: verify.reason }));
+              if (verify.ok) {
+                await db.updatePublicIp(p.telegram_id, p.server_id, p.datacenter, existingIp);
+                await db.updateScopedStatus(p.telegram_id, p.server_id, p.datacenter, 'active');
+                const label = raw?.image?.description || raw?.image?.name || p.os_label;
+                if (label) await db.updatePurchaseOsLabel(p.server_id, label).catch(() => {});
+                console.log('RECOVERY_OK', JSON.stringify({ ip: existingIp, reused_existing: true }));
+                return;
+              }
+            }
+
+            const location = String(raw?.datacenter?.location?.name || raw?.location?.name || dc.HETZNER_LOCATION || '').trim();
+            if (!location) throw new Error('LOCATION_NOT_FOUND');
+            const maxAttempts = 20;
+            let lastCandidate = null;
+            let lastVerification = null;
+
+            await ensureOff(dc, p.server_id);
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              let candidate = null;
+              try {
+                candidate = await cloud.createPrimaryIpv4(dc, null, location);
+                if (!candidate?.id || !candidate?.ip) throw new Error('INVALID_PRIMARY_IPV4_CANDIDATE');
+                lastCandidate = candidate;
+                await base.rememberIp(db, {
+                  telegramId: p.telegram_id,
+                  datacenter: p.datacenter,
+                  serverId: p.server_id,
+                  ip: candidate.ip,
+                  event: 'emergency_recovery_candidate'
+                }).catch(() => {});
+
+                await waitAction(dc, await cloud.assignPrimaryIp(dc, null, candidate.id, p.server_id));
+                await ensureOn(dc, p.server_id);
+                await base.waitForNewIp(dc, p.server_id, candidate.ip, 120000);
+
+                const verification = await clean.verifyCleanCandidate(candidate.ip);
+                lastVerification = verification;
+                console.log('CANDIDATE', JSON.stringify({ attempt, ip: candidate.ip, ok: verification.ok, definitive: verification.definitive, reason: verification.reason }));
+
+                if (verification.ok) {
+                  raw = await hetznerApi.getHetznerServer(dc, p.server_id);
+                  await db.updatePublicIp(p.telegram_id, p.server_id, p.datacenter, candidate.ip);
+                  await db.updateScopedStatus(p.telegram_id, p.server_id, p.datacenter, 'active');
+                  await db.updateIpQualityResult?.(p.telegram_id, p.server_id, p.datacenter, `recovered:${verification.reason || 'ok'}`, false).catch(() => {});
+                  const label = raw?.image?.description || raw?.image?.name || 'Ubuntu 24.04';
+                  await db.updatePurchaseOsLabel(p.server_id, label).catch(() => {});
+                  await base.rememberIp(db, {
+                    telegramId: p.telegram_id,
+                    datacenter: p.datacenter,
+                    serverId: p.server_id,
+                    ip: candidate.ip,
+                    event: 'emergency_recovery_verified'
+                  }).catch(() => {});
+                  console.log('RECOVERY_OK', JSON.stringify({ server_id: p.server_id, ip: candidate.ip, attempt, status: raw?.status, os: label }));
+                  return;
+                }
+
+                await ensureOff(dc, p.server_id);
+                await waitAction(dc, await cloud.unassignPrimaryIp(dc, null, candidate.id)).catch(() => {});
+                await cloud.deletePrimaryIp(dc, null, candidate.id).catch(() => {});
+                lastCandidate = null;
+                await sleep(1000);
+              } catch (e) {
+                console.log('CANDIDATE_ERROR', JSON.stringify({ attempt, ip: candidate?.ip || null, message: e?.message || String(e) }));
+                try {
+                  await ensureOff(dc, p.server_id);
+                  if (candidate?.id) await waitAction(dc, await cloud.unassignPrimaryIp(dc, null, candidate.id)).catch(() => {});
+                  if (candidate?.id) await cloud.deletePrimaryIp(dc, null, candidate.id).catch(() => {});
+                } catch (_) {}
+                lastCandidate = null;
+                await sleep(1000);
+              }
+            }
+
+            // Do not leave the VM powered off even when no candidate passes.
+            await ensureOn(dc, p.server_id).catch(() => {});
+            await db.updateScopedStatus(p.telegram_id, p.server_id, p.datacenter, 'manual_review').catch(() => {});
+            throw Object.assign(new Error('NO_VERIFIED_IPV4_AFTER_RECOVERY_ATTEMPTS'), {
+              lastCandidate: lastCandidate?.ip || null,
+              lastReason: lastVerification?.reason || null
+            });
+          })().then(async () => {
+            if (db.pool?.end) await db.pool.end();
+          }).catch(async e => {
+            console.error('RECOVERY_FAILED', { message: e?.message || String(e), lastCandidate: e?.lastCandidate || null, lastReason: e?.lastReason || null });
+            try { if (db.pool?.end) await db.pool.end(); } catch (_) {}
+            process.exit(1);
+          });
+          NODE
+          REMOTE
