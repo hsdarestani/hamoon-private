@@ -13,6 +13,7 @@ const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
 const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
+const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
 function applyRuntimeSafetyDefaults() {
@@ -42,7 +43,14 @@ function applyRuntimeSafetyDefaults() {
   const defaults = {
     HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
-    HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3'
+    HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3',
+    // Do not permanently blacklist the finite Hetzner Primary-IP pool. Current
+    // and very recent IPs are avoided briefly; rejected Iran candidates stay on
+    // a longer cooldown so the bot does not immediately recycle a known-bad IP.
+    HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
+    HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: String(7 * 24 * 60 * 60 * 1000),
+    HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
+    HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000'
   };
   for (const [key, value] of Object.entries(defaults)) {
     if (process.env[key] == null || process.env[key] === '') process.env[key] = value;
@@ -82,6 +90,10 @@ function run() {
   // Each selected node passes only when stable ICMP AND TCP/22 are reachable from
   // that same node. Repeated incomplete Check-Host rounds rotate instead of waiting forever.
   installStrictCheckHostFetch();
+  // Provisioning used to delete the previous Primary IPv4 before the replacement
+  // passed SSH + Iran-quality checks. Load a patched lifecycle before any reconciler
+  // imports it, so rejected candidates are rolled back and the old IP survives.
+  installSafeLifecycleModule();
   installHetznerReconcilePolicy();
   installCleanIpChangeModule();
   const corePath = path.join(__dirname, 'index-core.js');
@@ -94,4 +106,10 @@ function run() {
   return child.exports;
 }
 
-module.exports = { applyPatches, applyRuntimeSafetyDefaults, installCleanIpChangeModule, run };
+module.exports = {
+  applyPatches,
+  applyRuntimeSafetyDefaults,
+  installCleanIpChangeModule,
+  installSafeLifecycleModule,
+  run
+};
