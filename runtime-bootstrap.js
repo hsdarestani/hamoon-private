@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const { applyProviderVisibilityPatches } = require('./provider-visibility-bootstrap');
+const { applyHetznerPendingDeliveryRecoveryPatches } = require('./hetzner-pending-delivery-recovery-bootstrap');
 const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
 const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
@@ -17,23 +18,17 @@ const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-saf
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
 function applyRuntimeSafetyDefaults() {
-  // Afracloud/Afranet is fully retired. Remove it from the runtime datacenter map
-  // so users never see it and management flows never call its API.
   const datacenters = require('./datacenters');
   if (datacenters && Object.prototype.hasOwnProperty.call(datacenters, 'afracloud')) {
     delete datacenters.afracloud;
   }
 
-  // These are safety constraints, not tuning hints. Force them even when an old
-  // production .env still contains previous, weaker values.
   const forced = {
     HETZNER_IP_QUALITY_REQUIRED: 'true',
     HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(10 * 365 * 24 * 60 * 60 * 1000),
     HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES: '2',
     HETZNER_MAX_IP_QUALITY_ROTATIONS: '20',
     HETZNER_IP_QUALITY_IR_NODES: '6',
-    // A node only counts when stable ICMP AND TCP/22 both pass. Four independent
-    // Iran nodes is strict enough without making flaky Check-Host nodes block delivery.
     HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67'
@@ -44,13 +39,11 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3',
-    // Do not permanently blacklist the finite Hetzner Primary-IP pool. Current
-    // and very recent IPs are avoided briefly; rejected Iran candidates stay on
-    // a longer cooldown so the bot does not immediately recycle a known-bad IP.
     HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
     HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: String(7 * 24 * 60 * 60 * 1000),
     HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
-    HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000'
+    HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000',
+    HETZNER_PENDING_RECOVERY_READY_TIMEOUT_MS: '90000'
   };
   for (const [key, value] of Object.entries(defaults)) {
     if (process.env[key] == null || process.env[key] === '') process.env[key] = value;
@@ -58,8 +51,6 @@ function applyRuntimeSafetyDefaults() {
 }
 
 function installCleanIpChangeModule() {
-  // Keep the existing bootstrap/callback code untouched, but transparently replace
-  // the manual change-IP service with the Iran-quality-aware wrapper at runtime.
   const legacyPath = require.resolve('./services/hetzner-change-ip');
   const cleanModule = require('./services/hetzner-clean-ip-change');
   if (require.cache[legacyPath]) require.cache[legacyPath].exports = cleanModule;
@@ -74,7 +65,9 @@ function applyPatches(coreSource) {
             applyHetznerChangeIpPatches(
               applyHetznerTrafficPatches(
                 applyFeaturePatches(
-                  applyProviderVisibilityPatches(coreSource)
+                  applyHetznerPendingDeliveryRecoveryPatches(
+                    applyProviderVisibilityPatches(coreSource)
+                  )
                 )
               )
             )
@@ -87,12 +80,7 @@ function applyPatches(coreSource) {
 
 function run() {
   applyRuntimeSafetyDefaults();
-  // Each selected node passes only when stable ICMP AND TCP/22 are reachable from
-  // that same node. Repeated incomplete Check-Host rounds rotate instead of waiting forever.
   installStrictCheckHostFetch();
-  // Provisioning used to delete the previous Primary IPv4 before the replacement
-  // passed SSH + Iran-quality checks. Load a patched lifecycle before any reconciler
-  // imports it, so rejected candidates are rolled back and the old IP survives.
   installSafeLifecycleModule();
   installHetznerReconcilePolicy();
   installCleanIpChangeModule();
