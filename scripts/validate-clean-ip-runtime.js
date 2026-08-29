@@ -2,6 +2,9 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
 const runtime = require('../runtime-bootstrap');
 const datacenters = require('../datacenters');
 const baseChange = require('../services/hetzner-change-ip');
@@ -9,6 +12,7 @@ const lifecycle = require('../services/hetzner-lifecycle');
 const cleanChange = require('../services/hetzner-clean-ip-change');
 const strictCheckHost = require('../services/check-host-strict-fetch');
 const reconcilePolicy = require('../services/hetzner-reconcile-policy');
+const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
 
 (async () => {
   assert(datacenters.afracloud, 'fixture should start with Afracloud configured');
@@ -20,9 +24,9 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES, '2');
   assert.strictEqual(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS, '20');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);
+  assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS), 30 * 60 * 1000);
+  assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS), 7 * 24 * 60 * 60 * 1000);
 
-  // Regression: the previous parser considered a node healthy if only one out of
-  // four ICMP attempts returned OK. Strict mode must reject that case.
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['TIMEOUT'], ['TIMEOUT'], ['TIMEOUT']]]), false);
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['OK'], ['OK'], ['TIMEOUT']]]), true);
   assert.strictEqual(strictCheckHost.tcpNodeState([{ time: 0.12, address: '1.2.3.4' }]), true);
@@ -37,7 +41,31 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
     quality: { checked: false, definitive: false, reason: 'probe_error:timeout' }
   }), false);
 
-  // Candidate verification must require SSH before Iran quality.
+  // IP history must not be a permanent blacklist.
+  const now = Date.now();
+  const mockDb = {
+    pool: {
+      async query(sql) {
+        const text = String(sql);
+        if (text.includes('CREATE TABLE IF NOT EXISTS server_ip_history')) return [[], []];
+        if (text.includes('FROM server_ip_history')) return [[
+          { ip_address: '2.2.2.2', last_seen_at: new Date(now - 2 * 60 * 60 * 1000), last_event: 'current_before_change' },
+          { ip_address: '3.3.3.3', last_seen_at: new Date(now - 10 * 60 * 1000), last_event: 'clean_ip_verified' },
+          { ip_address: '4.4.4.4', last_seen_at: new Date(now - 2 * 24 * 60 * 60 * 1000), last_event: 'clean_ip_rejected_rolled_back' },
+          { ip_address: '5.5.5.5', last_seen_at: new Date(now - 8 * 24 * 60 * 60 * 1000), last_event: 'candidate_verification_rejected' }
+        ], []];
+        if (text.includes('FROM purchases')) return [[{ ip_address: '1.1.1.1' }], []];
+        throw new Error(`unexpected query: ${text}`);
+      }
+    }
+  };
+  const blocked = await baseChange.usedIps(mockDb, { datacenter: 'hetzner', serverId: 's', now });
+  assert(blocked.has('1.1.1.1'), 'current IP must always be blocked');
+  assert(blocked.has('3.3.3.3'), 'recent healthy IP must be briefly blocked');
+  assert(blocked.has('4.4.4.4'), 'recent rejected IP must stay on long cooldown');
+  assert(!blocked.has('2.2.2.2'), 'older healthy IP must become reusable');
+  assert(!blocked.has('5.5.5.5'), 'expired rejected IP must not exhaust pool forever');
+
   let qualityCalls = 0;
   const noSsh = await cleanChange.verifyCleanCandidate('2.2.2.2', {
     sshProbe: async () => ({ ok: false, reason: 'timeout' }),
@@ -49,7 +77,7 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
   assert.strictEqual(noSsh.ok, false);
   assert.strictEqual(noSsh.definitive, true);
   assert.strictEqual(noSsh.reason, 'ssh_unreachable');
-  assert.strictEqual(qualityCalls, 0, 'Iran quality must not run for an SSH-dead candidate');
+  assert.strictEqual(qualityCalls, 0, 'Iran quality must not run for SSH-dead candidate');
 
   const healthy = await cleanChange.verifyCleanCandidate('3.3.3.3', {
     sshProbe: async () => ({ ok: true, reason: 'connected' }),
@@ -63,12 +91,11 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
   const originalChange = baseChange.changeHetznerPublicIp;
   const originalRemember = baseChange.rememberIp;
   const originalSummary = lifecycle.qualitySummary;
-
   let changes = 0;
   let verifierSeen = 0;
   baseChange.changeHetznerPublicIp = async args => {
     changes += 1;
-    assert.strictEqual(typeof args.verifyCandidate, 'function', 'clean wrapper must verify before base commits/deletes old IP');
+    assert.strictEqual(typeof args.verifyCandidate, 'function');
     verifierSeen += 1;
     if (changes === 1) {
       const verification = await args.verifyCandidate({ ip: '2.2.2.2' });
@@ -96,7 +123,7 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
         ? { ok: false, definitive: true, checked: true, reason: 'failed_threshold', iran: { success: 0, selected: 6 }, global: { success: 6, selected: 6 } }
         : { ok: true, definitive: true, checked: true, reason: 'ok', iran: { success: 6, selected: 6 }, global: { success: 6, selected: 6 } }
     });
-    assert.strictEqual(changes, 2, 'a definitively bad candidate must rollback, then rotate again');
+    assert.strictEqual(changes, 2);
     assert.strictEqual(verifierSeen, 2);
     assert.strictEqual(result.oldIp, '1.1.1.1');
     assert.strictEqual(result.newIp, '3.3.3.3');
@@ -108,10 +135,6 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
     lifecycle.qualitySummary = originalSummary;
   }
 
-  // Static regression guard: base must verify before deleting the old Primary IP
-  // and only persist the new public IP after the old resource is successfully retired.
-  const fs = require('fs');
-  const path = require('path');
   const baseSource = fs.readFileSync(path.join(__dirname, '../services/hetzner-change-ip.js'), 'utf8');
   const verifyIndex = baseSource.indexOf("if (typeof verifyCandidate === 'function')");
   const deleteIndex = baseSource.indexOf('await deletePrimaryIpWithRetry(dc, oldPrimaryId);');
@@ -120,6 +143,17 @@ const reconcilePolicy = require('../services/hetzner-reconcile-policy');
   assert(updateNewIndex > deleteIndex, 'DB must not publish candidate IP until commit succeeds');
   assert(baseSource.includes('CANDIDATE_REJECTED_ROLLBACK_FAILED'));
   assert(baseSource.includes('await waitForNewIp(dc, serverId, oldIp)'));
+  assert(baseSource.includes('HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS'));
+
+  // Provisioning must also use transactional candidate verification, not its old
+  // delete-old-first rotation path.
+  const lifecyclePath = path.join(__dirname, '../services/hetzner-lifecycle.js');
+  const patchedLifecycleSource = safeLifecycle.patchLifecycleSource(fs.readFileSync(lifecyclePath, 'utf8'));
+  assert(patchedLifecycleSource.includes('verifyProvisioningCandidate'));
+  assert(patchedLifecycleSource.includes('verifyCandidate: async ({ ip }) => verifyProvisioningCandidate(ip)'));
+  assert(patchedLifecycleSource.includes('[HETZNER_PROVISIONING_IP_REJECTED_ROLLED_BACK]'));
+  assert(!patchedLifecycleSource.includes('newIp = await reserveUniquePrimaryIpv4(db'));
+  new vm.Script(patchedLifecycleSource, { filename: 'hetzner-lifecycle.patched.js' });
 
   console.log('validate-clean-ip-runtime: ok');
 })().catch(error => {
