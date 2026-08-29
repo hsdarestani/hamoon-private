@@ -53,7 +53,7 @@ jobs:
           const pick = (row) => {
             if (!row) return null;
             const keys = [
-              'id','telegram_id','server_id','server_name','datacenter','status','public_ip',
+              'telegram_id','server_id','server_name','datacenter','status','public_ip',
               'os','os_label','flavor_id','amount','duration','created_at','last_billed_at',
               'auto_renew','ip_quality_attempts','ip_quality_result','lifecycle_error_code',
               'lifecycle_updated_at','delivered_at','suspend_reason','deleted_at'
@@ -83,7 +83,7 @@ jobs:
 
           (async () => {
             const [targetRows] = await db.pool.query(
-              "SELECT * FROM purchases WHERE server_name = ? ORDER BY id DESC LIMIT 5",
+              "SELECT * FROM purchases WHERE server_name = ? ORDER BY created_at DESC LIMIT 5",
               ['Srv-HET-4308fe']
             );
             console.log('TARGET_PURCHASES', JSON.stringify((targetRows || []).map(pick), null, 2));
@@ -138,7 +138,7 @@ jobs:
               if (ids.length) {
                 const placeholders = ids.map(() => '?').join(',');
                 const [rows] = await db.pool.query(
-                  `SELECT * FROM purchases WHERE server_id IN (${placeholders}) ORDER BY id DESC`, ids
+                  `SELECT * FROM purchases WHERE server_id IN (${placeholders}) ORDER BY created_at DESC`, ids
                 );
                 console.log('RECENT_REJECT_PURCHASES', JSON.stringify((rows || []).map(pick), null, 2));
               }
