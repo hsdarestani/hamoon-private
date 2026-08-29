@@ -1,0 +1,115 @@
+name: Diagnose Traffic FIN 30d7a4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-traffic-fin-30d7a4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Diagnose production traffic
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== APP ==='
+          git rev-parse --short HEAD
+          pm2 describe hamoonbot | grep -E 'status|uptime|restarts' | head -n 10 || true
+          node <<'NODE'
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const { hetznerRequest } = require('./Hetzner/hetzner-api');
+          const trafficMod = require('./hetzner-traffic');
+
+          function bytes(n) {
+            n = Math.max(0, Number(n || 0));
+            const units = ['B','KB','MB','GB','TB','PB'];
+            let i = 0;
+            while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+            return `${n.toFixed(i >= 4 ? 3 : 2)} ${units[i]}`;
+          }
+          function monthStart(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0)); }
+          function nextMonthStart(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0)); }
+          async function metrics(dc, serverId, start, end, step=1800) {
+            const params = new URLSearchParams({type:'network', start:start.toISOString(), end:end.toISOString(), step:String(step)});
+            const data = await hetznerRequest(dc, 'GET', `/servers/${encodeURIComponent(serverId)}/metrics?${params}`);
+            const ts = data?.metrics?.time_series || {};
+            return {
+              incoming: trafficMod.sumHetznerMetricDirection(ts, 'in', step),
+              outgoing: trafficMod.sumHetznerMetricDirection(ts, 'out', step)
+            };
+          }
+
+          (async () => {
+            const [rows] = await db.pool.query(
+              "SELECT telegram_id, server_id, server_name, datacenter, status, public_ip, duration, amount, created_at, last_billed_at, last_billed_traffic_gb, auto_renew FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 3",
+              ['Srv-FIN-30d7a4']
+            );
+            console.log('PURCHASES', JSON.stringify(rows || [], null, 2));
+            const p = rows?.[0];
+            if (!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc = datacenters[p.datacenter] || datacenters['hetzner-finland'] || datacenters.hetzner;
+            if (!dc) throw new Error('DATACENTER_CONFIG_NOT_FOUND');
+
+            const raw = await hetznerRequest(dc, 'GET', `/servers/${encodeURIComponent(p.server_id)}`);
+            const s = raw?.server;
+            console.log('HETZNER_SERVER', JSON.stringify({
+              id:s?.id, name:s?.name, status:s?.status, created:s?.created,
+              ingoing_traffic:s?.ingoing_traffic, outgoing_traffic:s?.outgoing_traffic,
+              included_traffic:s?.included_traffic,
+              ingoing_fmt:bytes(s?.ingoing_traffic), outgoing_fmt:bytes(s?.outgoing_traffic), included_fmt:bytes(s?.included_traffic)
+            }, null, 2));
+
+            for (const range of ['24h','7d','30d']) {
+              const t = await trafficMod.getServerTraffic(dc, p.server_id, range);
+              console.log(`RANGE_${range}`, JSON.stringify({
+                incoming:t.period_incoming_traffic, outgoing:t.period_outgoing_traffic,
+                incoming_fmt:bytes(t.period_incoming_traffic), outgoing_fmt:bytes(t.period_outgoing_traffic),
+                available:t.period_available, error:t.metric_error || null
+              }, null, 2));
+            }
+
+            const now = new Date();
+            const curStart = monthStart(now);
+            const prevStart = new Date(Date.UTC(curStart.getUTCFullYear(), curStart.getUTCMonth()-1, 1));
+            const prevEnd = curStart;
+            const cur = await metrics(dc, p.server_id, curStart, now, 1800);
+            const prev = await metrics(dc, p.server_id, prevStart, prevEnd, 1800).catch(e => ({error:e.message}));
+            console.log('MONTH_TO_DATE', JSON.stringify({start:curStart.toISOString(), end:now.toISOString(), ...cur, incoming_fmt:bytes(cur.incoming), outgoing_fmt:bytes(cur.outgoing)}, null, 2));
+            console.log('PREVIOUS_CALENDAR_MONTH', JSON.stringify(prev?.error ? prev : {start:prevStart.toISOString(), end:prevEnd.toISOString(), ...prev, incoming_fmt:bytes(prev.incoming), outgoing_fmt:bytes(prev.outgoing)}, null, 2));
+            console.log('NEXT_MONTH_RESET_UTC', nextMonthStart(now).toISOString());
+
+            if (db.pool?.end) await db.pool.end();
+          })().catch(async e => {
+            console.error('DIAGNOSTIC_FAILED', e?.stack || e);
+            try { if (db.pool?.end) await db.pool.end(); } catch (_) {}
+            process.exit(1);
+          });
+          NODE
+          REMOTE
