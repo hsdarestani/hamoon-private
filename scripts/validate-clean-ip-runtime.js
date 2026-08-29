@@ -25,7 +25,7 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
   assert.strictEqual(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS, '20');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);
   assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS), 30 * 60 * 1000);
-  assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS), 7 * 24 * 60 * 60 * 1000);
+  assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS), 0);
 
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['TIMEOUT'], ['TIMEOUT'], ['TIMEOUT']]]), false);
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['OK'], ['OK'], ['TIMEOUT']]]), true);
@@ -41,7 +41,9 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
     quality: { checked: false, definitive: false, reason: 'probe_error:timeout' }
   }), false);
 
-  // IP history must not be a permanent blacklist.
+  // IP history must not be a permanent blacklist. Rejected candidates older than
+  // the short general recent-IP window are eligible to be re-tested; the clean
+  // wrapper still requires SSH + Iran quality before any candidate is committed.
   const now = Date.now();
   const mockDb = {
     pool: {
@@ -51,7 +53,7 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
         if (text.includes('FROM server_ip_history')) return [[
           { ip_address: '2.2.2.2', last_seen_at: new Date(now - 2 * 60 * 60 * 1000), last_event: 'current_before_change' },
           { ip_address: '3.3.3.3', last_seen_at: new Date(now - 10 * 60 * 1000), last_event: 'clean_ip_verified' },
-          { ip_address: '4.4.4.4', last_seen_at: new Date(now - 2 * 24 * 60 * 60 * 1000), last_event: 'clean_ip_rejected_rolled_back' },
+          { ip_address: '4.4.4.4', last_seen_at: new Date(now - 2 * 60 * 60 * 1000), last_event: 'clean_ip_rejected_rolled_back' },
           { ip_address: '5.5.5.5', last_seen_at: new Date(now - 8 * 24 * 60 * 60 * 1000), last_event: 'candidate_verification_rejected' }
         ], []];
         if (text.includes('FROM purchases')) return [[{ ip_address: '1.1.1.1' }], []];
@@ -61,10 +63,10 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
   };
   const blocked = await baseChange.usedIps(mockDb, { datacenter: 'hetzner', serverId: 's', now });
   assert(blocked.has('1.1.1.1'), 'current IP must always be blocked');
-  assert(blocked.has('3.3.3.3'), 'recent healthy IP must be briefly blocked');
-  assert(blocked.has('4.4.4.4'), 'recent rejected IP must stay on long cooldown');
+  assert(blocked.has('3.3.3.3'), 'recent IP must be briefly blocked');
   assert(!blocked.has('2.2.2.2'), 'older healthy IP must become reusable');
-  assert(!blocked.has('5.5.5.5'), 'expired rejected IP must not exhaust pool forever');
+  assert(!blocked.has('4.4.4.4'), 'older rejected IP must be eligible for safe re-test');
+  assert(!blocked.has('5.5.5.5'), 'old rejected IP must not exhaust pool forever');
 
   let qualityCalls = 0;
   const noSsh = await cleanChange.verifyCleanCandidate('2.2.2.2', {
@@ -145,8 +147,6 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
   assert(baseSource.includes('await waitForNewIp(dc, serverId, oldIp)'));
   assert(baseSource.includes('HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS'));
 
-  // Provisioning must also use transactional candidate verification, not its old
-  // delete-old-first rotation path.
   const lifecyclePath = path.join(__dirname, '../services/hetzner-lifecycle.js');
   const patchedLifecycleSource = safeLifecycle.patchLifecycleSource(fs.readFileSync(lifecyclePath, 'utf8'));
   assert(patchedLifecycleSource.includes('verifyProvisioningCandidate'));
