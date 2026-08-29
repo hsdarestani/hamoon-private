@@ -13,6 +13,7 @@ on:
       - 'hetzner-purchase-images.js'
       - 'hetzner-purchase-architecture-bootstrap.js'
       - 'hetzner-management-scope-bootstrap.js'
+      - 'hetzner-pending-delivery-recovery-bootstrap.js'
       - 'services/check-host-strict-fetch.js'
       - 'services/hetzner-reconcile-policy.js'
       - 'services/hetzner-clean-ip-change.js'
@@ -53,6 +54,7 @@ jobs:
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
+          node --check hetzner-pending-delivery-recovery-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
@@ -99,6 +101,7 @@ jobs:
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
+          node --check hetzner-pending-delivery-recovery-bootstrap.js
           node --check runtime-bootstrap.js
           node --check provider-visibility.js
           node --check provider-visibility-bootstrap.js
@@ -119,7 +122,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|IP_QUALITY|HETZNER_PROVISIONING_IP|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 80 || true
+          pm2 logs hamoonbot --lines 180 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 100 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
