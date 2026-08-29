@@ -1,0 +1,78 @@
+name: Deploy Hetzner Traffic Period
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hetzner-traffic.js'
+      - 'hetzner-traffic-bootstrap.js'
+      - 'scripts/validate-hetzner-traffic-period.js'
+      - '.github/workflows/deploy-hetzner-traffic-period.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check hetzner-traffic.js
+          node --check hetzner-traffic-bootstrap.js
+          node --check runtime-bootstrap.js
+          node scripts/validate-hetzner-traffic-period.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== BEFORE ==='
+          git rev-parse --short HEAD
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          echo '=== VALIDATE ==='
+          node --check hetzner-traffic.js
+          node --check hetzner-traffic-bootstrap.js
+          node --check runtime-bootstrap.js
+          node scripts/validate-hetzner-traffic-period.js
+          echo '=== RESTART ==='
+          pm2 restart hamoonbot --update-env
+          sleep 4
+          pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
+          echo '=== RECENT TRAFFIC ERRORS ==='
+          pm2 logs hamoonbot --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|HETZNER_TRAFFIC_ERROR|hetzner-traffic' | tail -n 80 || true
+          echo '=== AFTER ==='
+          git rev-parse --short HEAD
+          REMOTE
