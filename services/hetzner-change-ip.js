@@ -4,8 +4,23 @@ const net = require('net');
 const cloud = require('../cloud-api');
 const hetznerApi = require('../Hetzner/hetzner-api');
 
-const VALID_STATUSES = new Set(['active', 'running', 'suspended', 'stopped', 'shutoff']);
+const VALID_STATUSES = new Set([
+  'active', 'running', 'suspended', 'stopped', 'shutoff',
+  // Internal delivery recovery uses the same transactional swap primitive. The
+  // user-facing UI still decides whether a manual Change-IP button is shown.
+  'provisioning', 'pending_ip', 'pending_ssh', 'pending_ip_quality', 'manual_review'
+]);
 const locks = new Set();
+const REJECTED_HISTORY_EVENTS = new Set([
+  'duplicate_candidate_rejected',
+  'candidate_verification_rejected',
+  'candidate_verification_inconclusive',
+  'clean_ip_rejected',
+  'clean_ip_unverified',
+  'clean_ip_rejected_rolled_back',
+  'clean_ip_unverified_rolled_back',
+  'provisioning_quality_rejected'
+]);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -34,6 +49,11 @@ function serverLocation(server, dc = {}) {
     dc?.location ||
     ''
   ).trim().toLowerCase();
+}
+
+function positiveMs(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 async function ensureHistoryTable(db) {
@@ -74,11 +94,37 @@ async function rememberIp(db, { telegramId, datacenter, serverId, ip, event }) {
   return true;
 }
 
-async function usedIps(db, { datacenter, serverId }) {
+/**
+ * Return IPs that should be avoided for the next allocation attempt.
+ *
+ * Previous behaviour blacklisted every IP ever seen by a server forever. Hetzner
+ * legitimately recycles Primary IPv4 addresses from a finite pool, so after a few
+ * rotations a server could become permanently unable to change IP and would emit
+ * NO_UNUSED_PRIMARY_IPV4_AVAILABLE for days.
+ *
+ * We now block:
+ *   - the currently assigned/persisted IP unconditionally;
+ *   - any IP seen very recently (default 30 minutes), to avoid immediate bouncing;
+ *   - known rejected/bad candidates for a longer cooldown (default 7 days).
+ * Older healthy historical IPs may be reused, which keeps the pool usable without
+ * immediately recycling a just-rejected address.
+ */
+async function usedIps(db, { datacenter, serverId, now = Date.now() }) {
   await ensureHistoryTable(db);
   const used = new Set();
+  const recentCooldownMs = positiveMs(
+    process.env.HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS,
+    30 * 60 * 1000
+  );
+  const rejectedCooldownMs = positiveMs(
+    process.env.HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS,
+    7 * 24 * 60 * 60 * 1000
+  );
+
   const [historyRows] = await db.pool.query(
-    'SELECT ip_address FROM server_ip_history WHERE datacenter = ? AND server_id = ?',
+    `SELECT ip_address, last_seen_at, last_event
+       FROM server_ip_history
+      WHERE datacenter = ? AND server_id = ?`,
     [String(datacenter), String(serverId)]
   );
   const [purchaseRows] = await db.pool.query(
@@ -87,10 +133,24 @@ async function usedIps(db, { datacenter, serverId }) {
        AND public_ip IS NOT NULL AND TRIM(public_ip) <> ''`,
     [String(datacenter), String(serverId)]
   );
-  for (const row of [...(historyRows || []), ...(purchaseRows || [])]) {
+
+  for (const row of purchaseRows || []) {
     const ip = normalizeIpv4(row?.ip_address);
     if (ip) used.add(ip);
   }
+
+  const nowMs = Number(now instanceof Date ? now.getTime() : now) || Date.now();
+  for (const row of historyRows || []) {
+    const ip = normalizeIpv4(row?.ip_address);
+    if (!ip || used.has(ip)) continue;
+    const seenMs = new Date(row?.last_seen_at || 0).getTime();
+    const ageMs = Number.isFinite(seenMs) && seenMs > 0 ? Math.max(0, nowMs - seenMs) : Infinity;
+    const event = String(row?.last_event || '');
+    const recent = ageMs <= recentCooldownMs;
+    const rejectedRecently = REJECTED_HISTORY_EVENTS.has(event) && ageMs <= rejectedCooldownMs;
+    if (recent || rejectedRecently) used.add(ip);
+  }
+
   return used;
 }
 
@@ -122,15 +182,17 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
     await rememberIp(db, { telegramId, datacenter, serverId, ip: oldIp, event: 'current_before_change' });
   }
 
+  let duplicateCandidates = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let candidate;
     try {
       candidate = await cloud.createPrimaryIpv4(dc, null, location);
     } catch (cause) {
-      if (attempt > 1) {
+      if (duplicateCandidates > 0) {
         const error = new Error('NO_UNUSED_PRIMARY_IPV4_AVAILABLE');
         error.code = 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
         error.cause = cause;
+        error.duplicateCandidates = duplicateCandidates;
         throw error;
       }
       throw cause;
@@ -149,14 +211,21 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
       return { ...candidate, id: candidateId, ip: candidateIp };
     }
 
+    duplicateCandidates += 1;
     used.add(candidateIp);
     await rememberIp(db, { telegramId, datacenter, serverId, ip: candidateIp, event: 'duplicate_candidate_rejected' });
-    console.warn('[HETZNER_CHANGE_IP_CANDIDATE_REJECTED]', { server_id: String(serverId), attempt, ip: candidateIp, reason: 'previously_used' });
+    console.warn('[HETZNER_CHANGE_IP_CANDIDATE_REJECTED]', {
+      server_id: String(serverId),
+      attempt,
+      ip: candidateIp,
+      reason: 'cooldown_or_current_ip'
+    });
     await deletePrimaryIpWithRetry(dc, candidateId);
   }
 
   const error = new Error('NO_UNUSED_PRIMARY_IPV4_AVAILABLE');
   error.code = 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
+  error.duplicateCandidates = duplicateCandidates;
   throw error;
 }
 
@@ -321,7 +390,7 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
 function userMessageForError(error) {
   const code = String(error?.code || error?.message || '');
   if (code === 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE') {
-    return 'در حال حاضر IP جدیدی که قبلاً روی این سرور استفاده نشده باشد موجود نیست. IP فعلی سرور بدون تغییر باقی ماند؛ لطفاً کمی بعد دوباره تلاش کنید.';
+    return 'Hetzner در این تلاش IP قابل استفاده‌ای خارج از cooldown برنگرداند. IP فعلی سرور بدون تغییر حفظ شد؛ لطفاً چند دقیقه بعد دوباره تلاش کنید.';
   }
   if (code === 'OPERATION_IN_PROGRESS') return 'یک عملیات دیگر روی این سرور در حال انجام است. چند لحظه بعد دوباره تلاش کنید.';
   if (code === 'INVALID_SERVER_STATE') return 'در وضعیت فعلی سرور امکان تغییر IP وجود ندارد.';
