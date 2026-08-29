@@ -1,0 +1,161 @@
+name: Diagnose IP Change And Pending Quality
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-ip-change-and-pending-quality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Diagnose production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== APP / PM2 ==='
+          git rev-parse --short HEAD
+          pm2 describe hamoonbot | grep -E 'status|uptime|restarts' | head -n 10 || true
+
+          echo '=== SAFE DB + PROVIDER DIAGNOSTIC ==='
+          node <<'NODE'
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+
+          const pick = (row) => {
+            if (!row) return null;
+            const keys = [
+              'id','telegram_id','server_id','server_name','datacenter','status','public_ip',
+              'os','os_label','flavor_id','amount','duration','created_at','last_billed_at',
+              'auto_renew','ip_quality_attempts','ip_quality_result','lifecycle_error_code',
+              'lifecycle_updated_at','delivered_at','suspend_reason','deleted_at'
+            ];
+            return Object.fromEntries(keys.filter(k => Object.prototype.hasOwnProperty.call(row,k)).map(k => [k,row[k]]));
+          };
+
+          const providerSummary = (srv) => srv ? {
+            id: srv.id,
+            name: srv.name,
+            status: srv.status,
+            public_ip: srv?.public_net?.ipv4?.ip || srv?.public_ip || null,
+            primary_ipv4_id: srv?.public_net?.ipv4?.id || srv?.primary_ipv4_id || null,
+            ipv6: srv?.public_net?.ipv6?.ip || null,
+            location: srv?.datacenter?.location?.name || srv?.location?.name || srv?.location || null,
+            datacenter: srv?.datacenter?.name || null,
+            server_type: srv?.server_type?.name || srv?.server_type || null,
+            image: srv?.image ? {
+              id: srv.image.id,
+              name: srv.image.name,
+              description: srv.image.description,
+              os_flavor: srv.image.os_flavor,
+              os_version: srv.image.os_version,
+              architecture: srv.image.architecture
+            } : null
+          } : null;
+
+          (async () => {
+            const [targetRows] = await db.pool.query(
+              "SELECT * FROM purchases WHERE server_name = ? ORDER BY id DESC LIMIT 5",
+              ['Srv-HET-4308fe']
+            );
+            console.log('TARGET_PURCHASES', JSON.stringify((targetRows || []).map(pick), null, 2));
+
+            for (const p of targetRows || []) {
+              const dc = datacenters[p.datacenter] || datacenters.hetzner;
+              if (!dc) {
+                console.log('TARGET_PROVIDER', JSON.stringify({server_id:p.server_id,error:'DATACENTER_CONFIG_NOT_FOUND'}));
+                continue;
+              }
+              try {
+                const srv = await cloud.getServer(dc, null, p.server_id);
+                console.log('TARGET_PROVIDER', JSON.stringify(providerSummary(srv), null, 2));
+              } catch (e) {
+                console.log('TARGET_PROVIDER', JSON.stringify({server_id:p.server_id,error:String(e?.message || e),status:e?.status || e?.statusCode || null}));
+              }
+              try {
+                const [hist] = await db.pool.query(
+                  "SELECT ip_address, first_seen_at, last_seen_at, seen_count, last_event FROM server_ip_history WHERE datacenter=? AND server_id=? ORDER BY last_seen_at DESC LIMIT 80",
+                  [String(p.datacenter), String(p.server_id)]
+                );
+                console.log('TARGET_IP_HISTORY', JSON.stringify(hist || [], null, 2));
+              } catch (e) {
+                console.log('TARGET_IP_HISTORY_ERROR', String(e?.message || e));
+              }
+            }
+
+            const [pending] = await db.pool.query(
+              "SELECT * FROM purchases WHERE status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') ORDER BY created_at DESC LIMIT 50"
+            );
+            console.log('PENDING_PURCHASES', JSON.stringify((pending || []).map(pick), null, 2));
+
+            try {
+              const [recentRejects] = await db.pool.query(`
+                SELECT telegram_id, datacenter, server_id,
+                       COUNT(*) AS rejected_ip_rows,
+                       MAX(last_seen_at) AS last_seen_at
+                  FROM server_ip_history
+                 WHERE last_event IN (
+                   'duplicate_candidate_rejected',
+                   'clean_ip_rejected_rolled_back',
+                   'candidate_verification_rejected',
+                   'provisioning_quality_rejected'
+                 )
+                   AND last_seen_at >= (NOW() - INTERVAL 7 DAY)
+                 GROUP BY telegram_id, datacenter, server_id
+                 ORDER BY last_seen_at DESC
+                 LIMIT 30
+              `);
+              console.log('RECENT_REJECT_GROUPS', JSON.stringify(recentRejects || [], null, 2));
+              const ids = [...new Set((recentRejects || []).map(r => String(r.server_id)).filter(Boolean))];
+              if (ids.length) {
+                const placeholders = ids.map(() => '?').join(',');
+                const [rows] = await db.pool.query(
+                  `SELECT * FROM purchases WHERE server_id IN (${placeholders}) ORDER BY id DESC`, ids
+                );
+                console.log('RECENT_REJECT_PURCHASES', JSON.stringify((rows || []).map(pick), null, 2));
+              }
+            } catch (e) {
+              console.log('RECENT_REJECTS_ERROR', String(e?.message || e));
+            }
+
+            if (db.pool?.end) await db.pool.end();
+          })().catch(async (e) => {
+            console.error('DIAGNOSTIC_ERROR', e?.stack || e);
+            try { if (db.pool?.end) await db.pool.end(); } catch (_) {}
+            process.exit(1);
+          });
+          NODE
+
+          echo '=== RELEVANT BOT LOGS ==='
+          pm2 logs hamoonbot --lines 3500 --nostream 2>/dev/null \
+            | grep -E 'Srv-HET-4308fe|4308fe|NO_UNUSED_PRIMARY_IPV4_AVAILABLE|HETZNER_CHANGE_IP_CANDIDATE_REJECTED|HETZNER_CHANGE_IP_CLEAN_REJECTED|pending_ip_quality|ip_rotation_failed|inconclusive_rotation_failed' \
+            | tail -n 350 || true
+          REMOTE
