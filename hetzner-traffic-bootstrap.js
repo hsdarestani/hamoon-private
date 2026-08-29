@@ -40,8 +40,20 @@ function applyHetznerTrafficPatches(input) {
   return \`${'${normalized.toFixed(digits)}'} ${'${units[unitIndex]}'}\`;
 }
 
+function formatHetznerTrafficDateFa(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat('fa-IR-u-ca-gregory', {
+      timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric'
+    }).format(date);
+  } catch (_) {
+    return date.toISOString().slice(0, 10);
+  }
+}
+
 function hetznerTrafficRangeLabel(range) {
-  return ({ current: 'دوره جاری Hetzner', '24h': '۲۴ ساعت گذشته', '7d': '۷ روز گذشته', '30d': '۳۰ روز گذشته' })[range] || 'دوره جاری Hetzner';
+  return ({ current: 'ماه تقویمی جاری Hetzner', '24h': '۲۴ ساعت گذشته', '7d': '۷ روز گذشته', '30d': '۳۰ روز گذشته' })[range] || 'ماه تقویمی جاری Hetzner';
 }
 
 async function handleHetznerTrafficInfo(chatId, userId, serverId, dcConfig, range = 'current') {
@@ -64,7 +76,13 @@ async function handleHetznerTrafficInfo(chatId, userId, serverId, dcConfig, rang
 
     let text = '<b>📊 مصرف ترافیک سرور</b>\\n\\n' +
       '🖥 <b>' + htmlEscape(traffic.server_name || serverId) + '</b>\\n' +
-      '🗓 بازه: ' + htmlEscape(hetznerTrafficRangeLabel(selectedRange)) + '\\n\\n';
+      '🗓 بازه: ' + htmlEscape(hetznerTrafficRangeLabel(selectedRange)) + '\\n';
+
+    if (selectedRange === 'current' && traffic.traffic_period_start && traffic.traffic_period_reset) {
+      text += '▶️ شروع دوره ترافیک: <b>' + htmlEscape(formatHetznerTrafficDateFa(traffic.traffic_period_start)) + '</b>\\n' +
+        '🔄 ریست بعدی: <b>' + htmlEscape(formatHetznerTrafficDateFa(traffic.traffic_period_reset)) + '</b>\\n';
+    }
+    text += '\\n';
 
     if (traffic.period_available) {
       text += '⬇️ ورودی: <b>' + htmlEscape(formatTrafficBytesFa(incoming)) + '</b>\\n' +
@@ -74,16 +92,16 @@ async function handleHetznerTrafficInfo(chatId, userId, serverId, dcConfig, rang
       text += '⚠️ متریک جزئی این بازه موقتاً از Hetzner دریافت نشد.\\n\\n';
     }
 
-    text += '<b>سهمیه دوره جاری</b>\\n' +
+    text += '<b>سهمیه ماه تقویمی Hetzner</b>\\n' +
       '🎁 سقف ترافیک: ' + htmlEscape(formatTrafficBytesFa(included)) + '\\n' +
       '📤 مصرف مشمول سهمیه: ' + htmlEscape(formatTrafficBytesFa(quotaUsed)) + '\\n' +
       '📉 باقی‌مانده: ' + htmlEscape(formatTrafficBytesFa(remaining)) + '\\n' +
       '📈 درصد مصرف: ' + percent.toFixed(2) + '%\\n\\n' +
-      '<i>در Hetzner، ترافیک خروجی معیار مصرف سهمیه است و ورودی برای اطلاع نمایش داده می‌شود.</i>';
+      '<i>ترافیک Hetzner مستقل از تاریخ خرید یا تمدید سرور است و در ابتدای هر ماه میلادی ریست می‌شود. فقط ترافیک خروجی از سهمیه کم می‌شود.</i>';
 
     const trafficButton = (selected, label) => ({ text: label, callback_data: makeShortCb(userId, { action: 'HETZNER_TRAFFIC', dcKey: dcConfig.key, serverId, range: selected }) });
     return sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
-      [trafficButton('current', '📊 دوره جاری'), trafficButton('24h', '🕐 ۲۴ ساعت')],
+      [trafficButton('current', '📊 ماه جاری Hetzner'), trafficButton('24h', '🕐 ۲۴ ساعت')],
       [trafficButton('7d', '📅 ۷ روز'), trafficButton('30d', '🗓 ۳۰ روز')],
       [trafficButton(selectedRange, '🔄 بروزرسانی')],
       [{ text: '🔙 بازگشت', callback_data: makeShortCb(userId, { action: 'M', dcKey: dcConfig.key, serverId }) }]
