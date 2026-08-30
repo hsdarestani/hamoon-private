@@ -1,0 +1,110 @@
+name: Check Hetzner Target 161295473
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-hetzner-target-161295473.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Read target state
+        shell: bash
+        run: |
+          set +e
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/target.log" 2>&1
+          set +e
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || { echo 'TARGET_QUERY=app_path_failed'; exit 0; }
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const db = require('./db');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+          (async()=>{
+            const c=await mysql.createConnection({
+              host:process.env.DB_HOST||'localhost',
+              user:process.env.DB_USER||'root',
+              password:process.env.DB_PASSWORD||'',
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            const [rows]=await c.query(`
+              SELECT p.server_id,p.datacenter,p.status,
+                     IF(p.delivered_at IS NULL,'no','yes') delivered,
+                     p.ip_quality_attempts,
+                     EXISTS(SELECT 1 FROM server_secrets s WHERE s.server_id=p.server_id AND s.secret_type='root_password') has_password_secret
+              FROM purchases p
+              WHERE p.server_id=?
+              LIMIT 1
+            `,['161295473']);
+            const row=rows[0]||null;
+            console.log('TARGET_DB_STATE='+(row?JSON.stringify(row):'not_found'));
+            if (row && Number(row.has_password_secret||0)===1) {
+              try {
+                const pw=await db.getServerSecret('161295473','root_password');
+                console.log('TARGET_SECRET_DECRYPT='+(pw?'pass':'empty'));
+              } catch(e) {
+                console.log('TARGET_SECRET_DECRYPT=fail:'+String(e.code||e.message||'unknown').replace(/\s+/g,'_').slice(0,80));
+              }
+            } else {
+              console.log('TARGET_SECRET_DECRYPT=no_secret_row');
+            }
+            if (row && dcs[row.datacenter]) {
+              try {
+                const srv=await cloud.getServer(dcs[row.datacenter],null,'161295473');
+                console.log('TARGET_PROVIDER_STATE='+String(srv?.status||srv?.state||'unknown'));
+              } catch(e) {
+                console.log('TARGET_PROVIDER_STATE=lookup_failed:'+String(e.status||e.code||e.message||'unknown').replace(/\s+/g,'_').slice(0,80));
+              }
+            } else {
+              console.log('TARGET_PROVIDER_STATE=not_checked');
+            }
+            await c.end();
+            await db.pool.end().catch(()=>{});
+          })().catch(async e=>{
+            console.log('TARGET_QUERY=failed:'+String(e.message||e).replace(/\s+/g,'_').slice(0,80));
+            try{await db.pool.end()}catch(_){}
+          });
+          NODE
+          REMOTE
+          echo "SSH_EXIT=$?" >> "$RUNNER_TEMP/target.log"
+          exit 0
+      - name: Commit safe target report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(TARGET_DB_STATE|TARGET_SECRET_DECRYPT|TARGET_PROVIDER_STATE|TARGET_QUERY|SSH_EXIT)=' "$RUNNER_TEMP/target.log" || true
+          } > ops/target-161295473.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/target-161295473.txt
+          git commit -m 'ops(hetzner): record target 161295473 state'
+          git push origin HEAD:main
