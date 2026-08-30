@@ -199,7 +199,13 @@ module.exports = {
   listServers:           (dc, ...a) => pick(dc).listServers(dc, ...a),
   deleteServer:          (dc, ...a) => pick(dc).deleteServer(dc, ...a),
   rebuildServer:         (dc, ...a) => pick(dc).rebuildServer ? pick(dc).rebuildServer(dc, ...a) : Promise.reject(new Error('rebuild not supported')),
-  resetServerPassword:   (dc, ...a) => pick(dc).resetServerPassword ? pick(dc).resetServerPassword(dc, ...a) : Promise.reject(new Error('reset password not supported')),
+  resetServerPassword:   (dc, ...a) => {
+    const provider = pick(dc);
+    const call = () => provider.resetServerPassword
+      ? provider.resetServerPassword(dc, ...a)
+      : Promise.reject(new Error('reset password not supported'));
+    return callWithHetznerLockedRetry(dc, 'reset_password', call);
+  },
   suspendServer:         (dc, ...a) => {
     const provider = pick(dc);
     const call = () => provider.suspendServer ? provider.suspendServer(dc, ...a) : Promise.reject(new Error('suspend not supported'));

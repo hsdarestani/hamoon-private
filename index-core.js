@@ -2426,6 +2426,55 @@ runcmd:
 
     if (!srv?.id) throw new Error('شناسه سرور از Provider دریافت نشد.');
 
+    // HETZNER_PASSWORD_PRESTORE_V1
+    // The reconciler runs every minute. Make the credential durable before recordPurchase()
+    // so it can never observe a provisioning row without its password.
+    if (isHetzner) {
+      if (!rootPassword) {
+        try {
+          if (srv?.action?.id) {
+            await openstackApi.waitHetznerAction(
+              effectiveDc,
+              srv.action.id,
+              Number(process.env.HETZNER_PASSWORD_RECOVERY_ACTION_TIMEOUT_MS || 120000)
+            );
+          }
+          rootPassword = await openstackApi.resetServerPassword(effectiveDc, null, srv.id);
+          if (rootPassword) {
+            logServerEvent({ type: 'hetzner_initial_password_recovered', user_id: userId, server_id: srv.id, datacenter: effectiveDc.key });
+          }
+        } catch (passwordRecoveryError) {
+          logServerEvent({
+            type: 'hetzner_initial_password_recovery_failed',
+            user_id: userId,
+            server_id: srv.id,
+            datacenter: effectiveDc.key,
+            message: passwordRecoveryError.code || passwordRecoveryError.message
+          });
+        }
+      }
+
+      if (rootPassword) {
+        try {
+          await upsertServerSecret({
+            telegramId: userId,
+            serverId: srv.id,
+            datacenter: effectiveDc.key,
+            secretType: 'root_password',
+            secretValue: rootPassword
+          });
+        } catch (secretErr) {
+          logServerEvent({
+            type: 'hetzner_password_prestore_failed',
+            user_id: userId,
+            server_id: srv.id,
+            datacenter: effectiveDc.key,
+            message: secretErr.code || secretErr.message
+          });
+        }
+      }
+    }
+
     if ((isAfra || isTebyan) && generatedRootPassword) {
       try {
         await upsertServerSecret({ telegramId: userId, serverId: srv.id, datacenter: effectiveDc.key, secretType: 'root_password', secretValue: generatedRootPassword });

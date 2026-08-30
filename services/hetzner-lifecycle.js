@@ -355,7 +355,25 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
     const isDelivery = deliveryStatuses.has(String(purchase.status || '').toLowerCase());
     try {
       if (isDelivery && dc.HETZNER_PASSWORD_ONLY) {
-        const stored = await db.getServerSecret?.(purchase.server_id, 'root_password').catch(() => null);
+        let stored = null;
+        try {
+          stored = await db.getServerSecret?.(purchase.server_id, 'root_password');
+        } catch (secretError) {
+          const secretCode = String(secretError?.code || secretError?.message || 'secret_decrypt_failed');
+          const reason = secretCode === 'SERVER_SECRET_KEY_MISSING'
+            ? 'secret_key_missing'
+            : 'secret_decrypt_failed';
+          await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
+          results.push({
+            server_id: purchase.server_id,
+            telegram_id: purchase.telegram_id,
+            datacenter: purchase.datacenter,
+            status: 'manual_review',
+            reason,
+            secret_error: secretCode.slice(0, 80)
+          });
+          continue;
+        }
         if (!stored) {
           await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
           results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'manual_review', reason: 'password_missing' });
