@@ -1,0 +1,66 @@
+name: Probe Target 161295473 Quality Long
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-target-161295473-quality-long.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - shell: bash
+        run: |
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/probe.log" 2>&1 || true
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || exit 0
+          node - <<'NODE'
+          require('dotenv').config();
+          const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
+          installStrictCheckHostFetch();
+          const lifecycle = require('./services/hetzner-lifecycle');
+          const cloud = require('./cloud-api');
+          const dcs = require('./datacenters');
+          (async()=>{
+            const srv=await cloud.getServer(dcs.hetzner,null,'161295473');
+            const ip=lifecycle.publicIpv4(srv);
+            if(!ip){ console.log('LONG_QUALITY_PROBE=no_ip'); return; }
+            const q=await lifecycle.checkIpQuality(ip,{polls:20,pollDelayMs:2500});
+            console.log('LONG_QUALITY_PROBE='+lifecycle.qualitySummary(q));
+            console.log('LONG_QUALITY_META='+JSON.stringify({ok:!!q?.ok,checked:!!q?.checked,definitive:!!q?.definitive,reason:q?.reason||null,iran:q?.iran||null,global:q?.global||null}));
+          })().catch(e=>console.log('LONG_QUALITY_PROBE=failed:'+String(e.message||e).replace(/\s+/g,'_').slice(0,100)));
+          NODE
+          REMOTE
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(LONG_QUALITY_PROBE|LONG_QUALITY_META)=' "$RUNNER_TEMP/probe.log" || true
+          } > ops/target-161295473-quality-long.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/target-161295473-quality-long.txt
+          git commit -m 'ops(hetzner): record long target quality probe'
+          git push origin HEAD:main
