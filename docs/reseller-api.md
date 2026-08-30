@@ -115,7 +115,7 @@ Supported input fields:
 | `datacenter` | no | Current reseller production scope is Hetzner |
 | `ssh_key` | no | Public SSH key, max 4096 characters |
 
-Successful creation returns HTTP `202`. Provisioning is asynchronous. Example shape:
+Successful creation returns HTTP `202`. Provisioning is asynchronous. Example shape (the `price` value is illustrative only):
 
 ```json
 {
@@ -130,7 +130,7 @@ Successful creation returns HTTP `202`. Provisioning is asynchronous. Example sh
     "image": "ubuntu-24.04",
     "location": "nbg1",
     "duration": "monthly",
-    "price": 0
+    "price": 350000
   }
 }
 ```
