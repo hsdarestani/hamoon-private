@@ -1,0 +1,68 @@
+name: Diagnose Target 161295473 IP Rotation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-target-161295473-ip-rotation.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - shell: bash
+        run: |
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/ipdiag.log" 2>&1 || true
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || exit 0
+          echo '=== DB ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [r]=await c.query(`SELECT server_id,status,ip_quality_attempts,COALESCE(ip_quality_summary,'') ip_quality_summary,IF(public_ip IS NULL OR public_ip='','empty','present') public_ip_state FROM purchases WHERE server_id=? LIMIT 1`,['161295473']);
+            console.log('TARGET_IP_DIAG='+(r[0]?JSON.stringify(r[0]):'not_found'));
+            await c.end();
+          })().catch(e=>console.log('TARGET_IP_DIAG=failed:'+String(e.message||e).replace(/\s+/g,'_').slice(0,100)));
+          NODE
+          echo '=== TARGET LOGS ==='
+          pm2 logs hamoonbot --lines 1200 --nostream 2>/dev/null \
+            | grep -E '161295473|HETZNER_PROVISIONING_IP_|HETZNER_CHANGE_IP|CANDIDATE_REJECTED|IP_CHANGE_ROLLBACK|NO_CLEAN_IPV4|inconclusive_rotation_failed|repeated_inconclusive_rotated' \
+            | tail -n 160 \
+            | sed -E 's/([0-9]{1,3}\.){3}[0-9]{1,3}/<ipv4>/g' || true
+          REMOTE
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep '^TARGET_IP_DIAG=' "$RUNNER_TEMP/ipdiag.log" || true
+            echo '--- safe_logs ---'
+            sed -n '/=== TARGET LOGS ===/,$p' "$RUNNER_TEMP/ipdiag.log" | tail -n 160
+          } > ops/target-161295473-ip-rotation-diagnostic.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/target-161295473-ip-rotation-diagnostic.txt
+          git commit -m 'ops(hetzner): record target IP rotation diagnostic'
+          git push origin HEAD:main
