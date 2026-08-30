@@ -1,0 +1,181 @@
+verified_at=2026-08-30T08:31:44Z
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 6,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 8,
+0|hamoonbo |   candidate_ip: '<ipv4>',
+0|hamoonbo |   restored_ip: '<ipv4>',
+0|hamoonbo |   definitive: true,
+0|hamoonbo |   reason: 'ssh_unreachable',
+0|hamoonbo |   quality: 'iran=0/0;global=0/0;reason=ssh_unreachable'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 2,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 3,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 4,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 5,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 6,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_ROLLBACK_FAILED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   message: 'Hetzner API POST /primary_ips/147183499/actions/unassign failed HTTP 422'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_ROLLBACK_FAILED] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   message: 'Hetzner API POST /primary_ips/147183499/actions/unassign failed HTTP 422'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP] {
+0|hamoonbo |   user_id: '6897168189',
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   datacenter: 'hetzner',
+0|hamoonbo |   code: 'IP_CHANGE_ROLLBACK_FAILED',
+0|hamoonbo |   message: 'IP_CHANGE_ROLLBACK_FAILED'
+0|hamoonbo | }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | ⚠️ [🇫🇮 فنلاند - Hetzner] listSnapshots error: listSnapshots not supported
+0|hamoonbo | ⚠️ [🇫🇮 فنلاند - Hetzner] listSnapshots error: listSnapshots not supported
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163976927' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163976927' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [HETZNER_PROVISIONING_IP_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '163976927',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   candidate_ip: '<ipv4>',
+0|hamoonbo |   restored_ip: '<ipv4>',
+0|hamoonbo |   definitive: false,
+0|hamoonbo |   reason: 'insufficient_results'
+0|hamoonbo | }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163976927' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '163976927',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163976927' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [HETZNER_PROVISIONING_IP_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '163976927',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   candidate_ip: '<ipv4>',
+0|hamoonbo |   restored_ip: '<ipv4>',
+0|hamoonbo |   definitive: false,
+0|hamoonbo |   reason: 'insufficient_results'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '163976927',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CANDIDATE_REJECTED] {
+0|hamoonbo |   server_id: '163976927',
+0|hamoonbo |   attempt: 2,
+0|hamoonbo |   ip: '<ipv4>',
+0|hamoonbo |   reason: 'cooldown_or_current_ip'
+0|hamoonbo | }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163976927' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '163887844' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163887829' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '161295473' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner-finland', server_id: '155927177' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163967263' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163963745' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163962972' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163962805' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163768845' }
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '162349291' }
+0|hamoonbo | [HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '163768845',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   candidate_ip: '<ipv4>',
+0|hamoonbo |   restored_ip: '<ipv4>',
+0|hamoonbo |   definitive: true,
+0|hamoonbo |   reason: 'ssh_unreachable',
+0|hamoonbo |   quality: 'iran=0/0;global=0/0;reason=ssh_unreachable'
+0|hamoonbo | }
+0|hamoonbo | [HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '163768845',
+--
+0|hamoonbo | [MANAGE] provider list missed owned server; using purchase fallback { datacenter: 'hetzner', server_id: '163484922' }
+0|hamoonbo | (node:401444) Warning: Accessing non-existent property 'Symbol(hamoon.hetznerReconcilePolicyInstalled)' of module exports inside circular dependency
+0|hamoonbo | (Use `node --trace-warnings ...` to show where the warning was created)
+0|hamoonbo | (node:401690) Warning: Accessing non-existent property 'Symbol(hamoon.hetznerReconcilePolicyInstalled)' of module exports inside circular dependency
+0|hamoonbo | (Use `node --trace-warnings ...` to show where the warning was created)
+0|hamoonbo | (node:401920) Warning: Accessing non-existent property 'Symbol(hamoon.hetznerReconcilePolicyInstalled)' of module exports inside circular dependency
+0|hamoonbo | (Use `node --trace-warnings ...` to show where the warning was created)
+0|hamoonbo | [HETZNER_PROVISIONING_IP_REJECTED_ROLLED_BACK] {
+0|hamoonbo |   server_id: '161295473',
+0|hamoonbo |   attempt: 1,
+0|hamoonbo |   candidate_ip: '<ipv4>',
+0|hamoonbo |   restored_ip: '<ipv4>',
+0|hamoonbo |   definitive: false,
+0|hamoonbo |   reason: 'insufficient_results'
+0|hamoonbo | }
+
