@@ -1,0 +1,105 @@
+name: Fix Hetzner IP Rotation Reliability
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/apply-hetzner-ip-rotation-fix.py'
+      - '.github/workflows/fix-hetzner-ip-rotation-reliability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Apply and validate source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-hetzner-ip-rotation-fix.py
+          node --check services/hetzner-change-ip.js
+          node --check services/hetzner-clean-ip-change.js
+          node --check services/hetzner-lifecycle-safe-bootstrap.js
+          node - <<'NODE'
+          const fs=require('fs');
+          const {patchLifecycleSource}=require('./services/hetzner-lifecycle-safe-bootstrap');
+          patchLifecycleSource(fs.readFileSync('services/hetzner-lifecycle.js','utf8'));
+          console.log('SAFE_LIFECYCLE_PATCH_COMPAT=yes');
+          NODE
+          grep -q "typeof args.verifyCandidate === 'function'" services/hetzner-clean-ip-change.js
+          grep -q 'HETZNER_CHANGE_IP_SSH_SETTLE_MS' services/hetzner-clean-ip-change.js
+          grep -q 'Only unassign the candidate if it is still the attached Primary IPv4' services/hetzner-change-ip.js
+      - name: Commit source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add services/hetzner-change-ip.js services/hetzner-clean-ip-change.js
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+          else
+            git commit -m 'fix(hetzner): stabilize IP verification and rollback'
+            git push origin HEAD:main
+          fi
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Deploy production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' | tee "$RUNNER_TEMP/ip-rotation-deploy.log"
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          node --check services/hetzner-change-ip.js
+          node --check services/hetzner-clean-ip-change.js
+          node - <<'NODE'
+          const fs=require('fs');
+          const {patchLifecycleSource}=require('./services/hetzner-lifecycle-safe-bootstrap');
+          patchLifecycleSource(fs.readFileSync('services/hetzner-lifecycle.js','utf8'));
+          console.log('SAFE_LIFECYCLE_PATCH_COMPAT=yes');
+          NODE
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = 'online'
+          echo "LIVE_COMMIT=$(git rev-parse HEAD)"
+          REMOTE
+      - name: Commit deployment verification
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(PM2_STATUS|LIVE_COMMIT|SAFE_LIFECYCLE_PATCH_COMPAT)=' "$RUNNER_TEMP/ip-rotation-deploy.log" || true
+          } > ops/last-hetzner-ip-rotation-fix.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/last-hetzner-ip-rotation-fix.txt
+          git commit -m 'ops(hetzner): record IP rotation fix deployment'
+          git push origin HEAD:main
