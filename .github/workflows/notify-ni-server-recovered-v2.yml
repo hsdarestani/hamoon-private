@@ -1,0 +1,104 @@
+name: Notify Recovered Hetzner User V2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/notify-ni-server-recovered-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Send Telegram message using production bot library
+        shell: bash
+        run: |
+          set +e
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/notify-v2.log" 2>&1
+          set +e
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || { echo 'TELEGRAM_NOTIFY_SENT=no'; echo 'TELEGRAM_NOTIFY_ERROR=app_path_failed'; exit 1; }
+          node - <<'NODE'
+          require('dotenv').config();
+          const TelegramBot = require('node-telegram-bot-api');
+          const token = process.env.TELEGRAM_BOT_TOKEN;
+          const chatId = '6897168189';
+          const text = [
+            '✅ مشکل فنی سرور شما رفع شد.',
+            '',
+            'سرور از حالت بررسی دستی خارج شده، روشن است و دسترسی SSH آن سالم است.',
+            'بررسی نهایی کیفیت IP به‌صورت خودکار ادامه دارد و لازم نیست کاری انجام دهید یا سرور را حذف/Rebuild کنید.',
+            '',
+            'به محض تأیید نهایی IP، اطلاعات دسترسی طبق روال نمایش داده می‌شود. 🙏'
+          ].join('\n');
+
+          function safeError(error) {
+            const code = error?.response?.body?.error_code || error?.code || 'unknown';
+            const description = error?.response?.body?.description || error?.message || 'unknown';
+            return `${code}:${String(description).replace(/[^a-zA-Z0-9_ .:-]/g, '').slice(0,160)}`;
+          }
+
+          (async () => {
+            if (!token) {
+              console.log('TELEGRAM_NOTIFY_SENT=no');
+              console.log('TELEGRAM_NOTIFY_ERROR=token_missing');
+              process.exit(1);
+            }
+            const bot = new TelegramBot(token, { polling: false });
+            try {
+              const me = await bot.getMe();
+              const msg = await bot.sendMessage(chatId, text);
+              console.log('TELEGRAM_NOTIFY_SENT=yes');
+              console.log('TELEGRAM_NOTIFY_BOT=' + String(me?.username || 'unknown'));
+              console.log('TELEGRAM_NOTIFY_MESSAGE_ID=' + String(msg?.message_id || 'unknown'));
+              process.exit(0);
+            } catch (error) {
+              console.log('TELEGRAM_NOTIFY_SENT=no');
+              console.log('TELEGRAM_NOTIFY_ERROR=' + safeError(error));
+              process.exit(1);
+            }
+          })();
+          NODE
+          REMOTE
+          SSH_EXIT=$?
+          echo "SSH_EXIT=$SSH_EXIT" >> "$RUNNER_TEMP/notify-v2.log"
+          exit 0
+
+      - name: Record safe notification result
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(TELEGRAM_NOTIFY_SENT|TELEGRAM_NOTIFY_BOT|TELEGRAM_NOTIFY_MESSAGE_ID|TELEGRAM_NOTIFY_ERROR|SSH_EXIT)=' "$RUNNER_TEMP/notify-v2.log" || true
+          } > ops/last-user-recovery-notification-v2.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/last-user-recovery-notification-v2.txt
+          git commit -m 'ops: record recovered user notification v2'
+          git push origin HEAD:main
