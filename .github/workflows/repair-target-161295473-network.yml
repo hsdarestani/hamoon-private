@@ -1,0 +1,94 @@
+name: Repair Target 161295473 Network
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/repair-hetzner-undelivered-network.js'
+      - '.github/workflows/repair-target-161295473-network.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - shell: bash
+        run: |
+          set -euo pipefail
+          node --check scripts/repair-hetzner-undelivered-network.js
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Repair production target safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' | tee "$RUNNER_TEMP/network-repair.log"
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          node --check scripts/repair-hetzner-undelivered-network.js
+
+          BOT_WAS_ONLINE=no
+          if pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.exit(p?.pm2_env?.status==='online'?0:1)}catch(e){process.exit(1)}})"; then
+            BOT_WAS_ONLINE=yes
+          fi
+          echo "BOT_WAS_ONLINE=$BOT_WAS_ONLINE"
+
+          pm2 stop hamoonbot >/dev/null 2>&1 || true
+          cleanup() {
+            pm2 start hamoonbot --update-env >/dev/null 2>&1 || pm2 restart hamoonbot --update-env >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          node scripts/repair-hetzner-undelivered-network.js 161295473
+
+          cleanup
+          trap - EXIT
+          sleep 5
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = 'online'
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [r]=await c.query(`SELECT server_id,status,IF(delivered_at IS NULL,'no','yes') delivered,ip_quality_attempts,IF(public_ip IS NULL OR public_ip='','empty','present') public_ip_state,EXISTS(SELECT 1 FROM server_secrets s WHERE s.server_id=purchases.server_id AND s.secret_type='root_password') has_password_secret FROM purchases WHERE server_id=? LIMIT 1`,['161295473']);
+            console.log('TARGET_AFTER_NETWORK_REPAIR='+(r[0]?JSON.stringify(r[0]):'not_found'));
+            await c.end();
+          })().catch(e=>console.log('TARGET_AFTER_NETWORK_REPAIR=failed:'+String(e.message||e).replace(/\s+/g,'_').slice(0,100)));
+          NODE
+          REMOTE
+      - name: Commit safe repair report
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(BOT_WAS_ONLINE|HETZNER_UNDELIVERED_NETWORK_REPAIR|PM2_STATUS|TARGET_AFTER_NETWORK_REPAIR)=' "$RUNNER_TEMP/network-repair.log" 2>/dev/null || true
+          } > ops/target-161295473-network-repair.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/target-161295473-network-repair.txt
+          git commit -m 'ops(hetzner): record target network repair'
+          git push origin HEAD:main
