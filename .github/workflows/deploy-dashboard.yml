@@ -1,4 +1,4 @@
-# Production dashboard deployment with validation and authenticated read-only smoke checks.
+# Production dashboard + reseller API deployment with validation and read-only smoke checks.
 name: Deploy Admin Dashboard
 
 on:
@@ -7,11 +7,20 @@ on:
     paths:
       - 'public/dashboard/**'
       - 'dashboard-api.js'
+      - 'customer-api.js'
+      - 'services/hetzner-lifecycle.js'
       - 'server.js'
       - 'db.js'
+      - 'package.json'
       - 'scripts/validate-dashboard.js'
       - 'scripts/validate-dashboard-v2.js'
       - 'scripts/smoke-dashboard-live.js'
+      - 'scripts/smoke-reseller-api-live.js'
+      - 'docs/reseller-api.md'
+      - '.env'
+      - '.env.save'
+      - '.env.example'
+      - '.gitignore'
       - '.github/workflows/deploy-dashboard.yml'
   workflow_dispatch:
 
@@ -34,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate dashboard source
+      - name: Validate dashboard and reseller API source
         shell: bash
         run: |
           set -euo pipefail
@@ -42,9 +51,12 @@ jobs:
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
           node --check dashboard-api.js
+          node --check customer-api.js
+          node --check services/hetzner-lifecycle.js
           node --check db.js
           node --check server.js
           node --check scripts/smoke-dashboard-live.js
+          node --check scripts/smoke-reseller-api-live.js
           node scripts/validate-dashboard.js
           node scripts/validate-dashboard-v2.js
 
@@ -62,7 +74,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy dashboard production
+      - name: Deploy production
         shell: bash
         run: |
           set -euo pipefail
@@ -72,26 +84,43 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
 
+          ENV_BACKUP="$(mktemp)"
+          if [ -f .env ]; then
+            cp .env "$ENV_BACKUP"
+          fi
+          cleanup() { rm -f "$ENV_BACKUP"; }
+          trap cleanup EXIT
+
           echo '=== BEFORE ==='
           git rev-parse --short HEAD
 
           echo '=== UPDATE SOURCE ==='
+          # The repository historically tracked .env. Reset it before pull, then restore
+          # the server-local copy after update so removing secrets from Git does not break runtime.
+          git checkout -- .env .env.save 2>/dev/null || true
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
+          if [ -s "$ENV_BACKUP" ]; then
+            cp "$ENV_BACKUP" .env
+            chmod 600 .env || true
+          fi
 
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
           node --check dashboard-api.js
+          node --check customer-api.js
+          node --check services/hetzner-lifecycle.js
           node --check db.js
           node --check server.js
           node --check scripts/smoke-dashboard-live.js
+          node --check scripts/smoke-reseller-api-live.js
           node scripts/validate-dashboard.js
           node scripts/validate-dashboard-v2.js
 
-          echo '=== RESTART DASHBOARD ==='
+          echo '=== RESTART DASHBOARD/API ==='
           pm2 restart dashboard-server --update-env
           sleep 4
           pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
@@ -100,11 +129,27 @@ jobs:
           curl -fsS --max-time 8 http://127.0.0.1:3000/health
           echo
 
-          echo '=== LIVE READ-ONLY SMOKE ==='
+          echo '=== LIVE DASHBOARD READ-ONLY SMOKE ==='
           DASHBOARD_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-dashboard-live.js
 
-          echo '=== RECENT DASHBOARD ERRORS ==='
-          pm2 logs dashboard-server --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|DASHBOARD_API_ERROR|dashboard.*failed' | tail -n 60 || true
+          echo '=== LIVE RESELLER API READ-ONLY SMOKE ==='
+          RESELLER_API_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-reseller-api-live.js
+
+          echo '=== NETWORK DIAGNOSTICS ==='
+          ss -lntp 2>/dev/null | grep -E '(:80|:443|:3000)' || true
+          if command -v nginx >/dev/null 2>&1; then
+            echo '--- nginx summary ---'
+            (sudo -n nginx -T 2>/dev/null || nginx -T 2>/dev/null || true) | grep -E '^[[:space:]]*(listen|server_name|proxy_pass)' | head -n 80 || true
+          else
+            echo 'nginx: not installed'
+          fi
+          if command -v ufw >/dev/null 2>&1; then
+            echo '--- ufw summary ---'
+            sudo -n ufw status verbose 2>/dev/null || ufw status verbose 2>/dev/null || true
+          fi
+
+          echo '=== RECENT DASHBOARD/API ERRORS ==='
+          pm2 logs dashboard-server --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|DASHBOARD_API_ERROR|CUSTOMER_API_ERROR|dashboard.*failed' | tail -n 80 || true
 
           echo '=== AFTER ==='
           git rev-parse --short HEAD
