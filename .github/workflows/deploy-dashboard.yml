@@ -16,6 +16,7 @@ on:
       - 'scripts/validate-dashboard-v2.js'
       - 'scripts/smoke-dashboard-live.js'
       - 'scripts/smoke-reseller-api-live.js'
+      - 'scripts/smoke-reseller-api-authenticated.js'
       - 'docs/reseller-api.md'
       - '.env'
       - '.env.save'
@@ -57,6 +58,7 @@ jobs:
           node --check server.js
           node --check scripts/smoke-dashboard-live.js
           node --check scripts/smoke-reseller-api-live.js
+          node --check scripts/smoke-reseller-api-authenticated.js
           node scripts/validate-dashboard.js
           node scripts/validate-dashboard-v2.js
 
@@ -95,8 +97,6 @@ jobs:
           git rev-parse --short HEAD
 
           echo '=== UPDATE SOURCE ==='
-          # The repository historically tracked .env. Reset it before pull, then restore
-          # the server-local copy after update so removing secrets from Git does not break runtime.
           git checkout -- .env .env.save 2>/dev/null || true
           git fetch origin main
           git checkout main
@@ -117,6 +117,7 @@ jobs:
           node --check server.js
           node --check scripts/smoke-dashboard-live.js
           node --check scripts/smoke-reseller-api-live.js
+          node --check scripts/smoke-reseller-api-authenticated.js
           node scripts/validate-dashboard.js
           node scripts/validate-dashboard-v2.js
 
@@ -132,8 +133,18 @@ jobs:
           echo '=== LIVE DASHBOARD READ-ONLY SMOKE ==='
           DASHBOARD_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-dashboard-live.js
 
-          echo '=== LIVE RESELLER API READ-ONLY SMOKE ==='
+          echo '=== LIVE RESELLER API ROUTE SMOKE ==='
           RESELLER_API_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-reseller-api-live.js
+
+          echo '=== LIVE RESELLER API AUTHENTICATED SMOKE ==='
+          RESELLER_API_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-reseller-api-authenticated.js
+
+          echo '=== PUBLIC RESELLER API DIAGNOSTIC ==='
+          for url in 'https://pay.hamooncloud.ir/api/v1/me' 'http://91.107.241.4/api/v1/me'; do
+            code="$(curl -ksS --max-time 10 -o /tmp/hamoon-public-api-response -w '%{http_code}' "$url" || true)"
+            echo "$url -> HTTP ${code:-000}"
+          done
+          rm -f /tmp/hamoon-public-api-response
 
           echo '=== NETWORK DIAGNOSTICS ==='
           ss -lntp 2>/dev/null | grep -E '(:80|:443|:3000)' || true
