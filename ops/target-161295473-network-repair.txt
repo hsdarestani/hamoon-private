@@ -1,0 +1,5 @@
+verified_at=2026-08-30T08:37:46Z
+BOT_WAS_ONLINE=yes
+HETZNER_UNDELIVERED_NETWORK_REPAIR=[{"server_id":"161295473","result":"reboot_recovered","ssh":true,"ip_changed":false}]
+PM2_STATUS=online
+TARGET_AFTER_NETWORK_REPAIR={"server_id":"161295473","status":"pending_ip_quality","delivered":"no","ip_quality_attempts":2,"public_ip_state":"present","has_password_secret":1}
