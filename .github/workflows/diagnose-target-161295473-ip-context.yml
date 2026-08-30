@@ -1,0 +1,54 @@
+name: Diagnose Target 161295473 IP Context
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-target-161295473-ip-context.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - shell: bash
+        run: |
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/context.log" 2>&1 || true
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || exit 0
+          pm2 logs hamoonbot --lines 2200 --nostream 2>/dev/null \
+            | grep -B 8 -A 18 "server_id: '161295473'" \
+            | tail -n 180 \
+            | sed -E 's/([0-9]{1,3}\.){3}[0-9]{1,3}/<ipv4>/g' || true
+          REMOTE
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            cat "$RUNNER_TEMP/context.log"
+          } > ops/target-161295473-ip-context.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/target-161295473-ip-context.txt
+          git commit -m 'ops(hetzner): record target IP rejection context'
+          git push origin HEAD:main
