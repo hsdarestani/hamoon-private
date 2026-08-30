@@ -247,20 +247,55 @@ async function waitForNewIp(dc, serverId, expectedIp, timeoutMs = Number(process
 }
 
 async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp }) {
+  const oldId = oldPrimaryId == null ? null : String(oldPrimaryId);
+  const newId = newPrimaryId == null ? null : String(newPrimaryId);
+  const refresh = () => hetznerApi.getHetznerServer(dc, serverId).catch(() => null);
+
   try {
-    const raw = await hetznerApi.getHetznerServer(dc, serverId).catch(() => null);
+    let raw = await refresh();
     if (String(raw?.status || '').toLowerCase() === 'running') {
       await waitAction(dc, await cloud.powerOffHetznerServer(dc, serverId));
     }
-    if (newPrimaryId) {
-      await waitAction(dc, await cloud.unassignPrimaryIp(dc, null, newPrimaryId)).catch(() => {});
+
+    raw = await refresh();
+    let attachedId = primaryIpv4Id(raw);
+
+    // Only unassign the candidate if it is still the attached Primary IPv4.
+    if (newId && attachedId === newId) {
+      try {
+        const action = await cloud.unassignPrimaryIp(dc, null, newId);
+        await waitAction(dc, action);
+      } catch (error) {
+        // 422 can mean the assignment already changed. Re-read provider state and only
+        // fail rollback if the rejected candidate is still attached.
+        raw = await refresh();
+        attachedId = primaryIpv4Id(raw);
+        if (attachedId === newId) throw error;
+      }
     }
-    if (oldPrimaryId) {
-      await waitAction(dc, await cloud.assignPrimaryIp(dc, null, oldPrimaryId, serverId));
+
+    raw = await refresh();
+    attachedId = primaryIpv4Id(raw);
+
+    // Reattach the original IP only when it is not already restored.
+    if (oldId && attachedId !== oldId) {
+      try {
+        const action = await cloud.assignPrimaryIp(dc, null, oldId, serverId);
+        await waitAction(dc, action);
+      } catch (error) {
+        raw = await refresh();
+        attachedId = primaryIpv4Id(raw);
+        if (attachedId !== oldId) throw error;
+      }
     }
-    await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
+
+    raw = await refresh();
+    if (String(raw?.status || '').toLowerCase() !== 'running') {
+      await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
+    }
+
     if (oldIp) await waitForNewIp(dc, serverId, oldIp);
-    if (newPrimaryId) await deletePrimaryIpWithRetry(dc, newPrimaryId).catch(() => {});
+    if (newId) await deletePrimaryIpWithRetry(dc, newId).catch(() => {});
     return true;
   } catch (rollbackError) {
     console.error('[HETZNER_CHANGE_IP_ROLLBACK_FAILED]', {

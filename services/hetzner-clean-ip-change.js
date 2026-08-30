@@ -32,14 +32,21 @@ function tcpProbeOnce(ip, port, timeoutMs) {
 }
 
 async function probeSshReachability(ip, options = {}) {
-  const attempts = clampInt(options.attempts ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_ATTEMPTS, 3, 1, 6);
-  const timeoutMs = clampInt(options.timeoutMs ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_TIMEOUT_MS, 5000, 1000, 15000);
+  const attempts = clampInt(options.attempts ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_ATTEMPTS, 6, 1, 12);
+  const timeoutMs = clampInt(options.timeoutMs ?? process.env.HETZNER_CHANGE_IP_SSH_PROBE_TIMEOUT_MS, 8000, 1000, 15000);
+  const settleMs = clampInt(options.settleMs ?? process.env.HETZNER_CHANGE_IP_SSH_SETTLE_MS, 6000, 0, 30000);
+  const retryDelayMs = clampInt(options.retryDelayMs ?? process.env.HETZNER_CHANGE_IP_SSH_RETRY_DELAY_MS, 5000, 500, 15000);
   const port = clampInt(options.port ?? process.env.HETZNER_CHANGE_IP_SSH_PORT, 22, 1, 65535);
   let last = null;
+
+  // Hetzner can report the server running with the new Primary IPv4 before the guest
+  // network stack/sshd has fully settled after the power cycle. Give it a short grace period.
+  if (settleMs > 0) await sleep(settleMs);
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     last = await tcpProbeOnce(ip, port, timeoutMs);
     if (last.ok) return { ...last, attempts: attempt, port };
-    if (attempt < attempts) await sleep(1500);
+    if (attempt < attempts) await sleep(retryDelayMs);
   }
   return { ...(last || { ok: false, reason: 'unknown' }), attempts, port };
 }
@@ -89,7 +96,9 @@ async function changeHetznerPublicIp(args) {
     try {
       const result = await base.changeHetznerPublicIp({
         ...args,
-        verifyCandidate: async ({ ip }) => verifyCleanCandidate(ip, args)
+        verifyCandidate: typeof args.verifyCandidate === 'function'
+          ? args.verifyCandidate
+          : async ({ ip }) => verifyCleanCandidate(ip, args)
       });
       if (!firstOldIp) firstOldIp = result.oldIp;
       const verification = result.verification || null;
