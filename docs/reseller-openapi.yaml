@@ -1,0 +1,157 @@
+openapi: 3.1.0
+info:
+  title: HamoonCloud Reseller API
+  version: 1.0.0
+  description: Backend API for HamoonCloud reseller integrations.
+servers:
+  - url: https://pay.hamooncloud.ir/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /me:
+    get:
+      summary: Get reseller account
+      responses:
+        '200': { description: Reseller account and limits }
+        '401': { $ref: '#/components/responses/AuthError' }
+  /wallet:
+    get:
+      summary: Get wallet balance
+      responses:
+        '200': { description: Current wallet balance }
+        '401': { $ref: '#/components/responses/AuthError' }
+  /usage:
+    get:
+      summary: Get API usage summary
+      responses:
+        '200': { description: Usage summary }
+  /prices:
+    get:
+      summary: List current sellable plans and reseller prices
+      responses:
+        '200': { description: Sellable plans }
+  /servers:
+    get:
+      summary: List reseller servers
+      responses:
+        '200': { description: Server list }
+    post:
+      summary: Create a server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServerRequest'
+      responses:
+        '202': { description: Provisioning started }
+        '400': { $ref: '#/components/responses/ApiError' }
+        '402': { $ref: '#/components/responses/ApiError' }
+        '403': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+        '429': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      summary: Get one reseller server
+      responses:
+        '200': { description: Purchase record and current provider details }
+        '404': { $ref: '#/components/responses/ApiError' }
+    delete:
+      summary: Permanently delete a server
+      responses:
+        '200': { description: Server deleted }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/poweron:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Power on / resume server
+      responses:
+        '200': { description: Server active }
+        '404': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/poweroff:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Power off / suspend server
+      responses:
+        '200': { description: Server stopped }
+        '404': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/upgrade:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Upgrade server type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_server_type]
+              properties:
+                target_server_type: { type: string }
+                upgrade_disk: { type: boolean, default: false }
+      responses:
+        '200': { description: Server upgraded }
+        '400': { $ref: '#/components/responses/ApiError' }
+        '403': { $ref: '#/components/responses/ApiError' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: hm_live_...
+  parameters:
+    ServerId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    CreateServerRequest:
+      type: object
+      required: [server_type]
+      properties:
+        server_type:
+          type: string
+          description: Plan ID/type returned by GET /prices.
+        name: { type: string, maxLength: 63 }
+        image: { type: string, default: ubuntu-24.04 }
+        location: { type: string }
+        duration:
+          type: string
+          enum: [hourly, monthly]
+          default: hourly
+        datacenter:
+          type: string
+          default: hetzner
+        ssh_key:
+          type: string
+          maxLength: 4096
+    ErrorEnvelope:
+      type: object
+      properties:
+        ok: { type: boolean, const: false }
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+          required: [code, message]
+      required: [ok, error]
+  responses:
+    AuthError:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ApiError:
+      description: API error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
