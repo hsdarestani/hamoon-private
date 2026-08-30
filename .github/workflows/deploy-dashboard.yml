@@ -121,46 +121,6 @@ jobs:
           node scripts/validate-dashboard.js
           node scripts/validate-dashboard-v2.js
 
-          echo '=== ENSURE RESELLER CLIENT 8977002450 ==='
-          node <<'NODE'
-          const db = require('./db');
-          (async () => {
-            const telegramId = '8977002450';
-            const [rows] = await db.pool.execute(
-              'SELECT id, telegram_id, name, is_active, max_servers, allowed_datacenters, min_wallet_balance FROM api_clients WHERE telegram_id = ? ORDER BY id ASC',
-              [telegramId]
-            );
-            let client;
-            if (rows.length) {
-              client = rows[0];
-              await db.updateApiClient(client.id, {
-                isActive: 1,
-                maxServers: 2,
-                allowedDatacenters: 'hetzner',
-                minWalletBalance: 0
-              });
-              client = await db.getApiClientById(client.id);
-              console.log(JSON.stringify({ ok: true, created: false, client: { id: client.id, telegram_id: client.telegram_id, name: client.name, is_active: client.is_active, max_servers: client.max_servers, allowed_datacenters: client.allowed_datacenters, min_wallet_balance: client.min_wallet_balance } }));
-            } else {
-              client = await db.createApiClient({
-                telegramId,
-                name: `Reseller ${telegramId}`,
-                notes: 'Reseller API client',
-                maxServers: 2,
-                allowedDatacenters: 'hetzner',
-                minWalletBalance: 0,
-                isActive: 1
-              });
-              console.log(JSON.stringify({ ok: true, created: true, client: { id: client.id, telegram_id: client.telegram_id, name: client.name, is_active: client.is_active, max_servers: client.max_servers, allowed_datacenters: client.allowed_datacenters, min_wallet_balance: client.min_wallet_balance } }));
-            }
-            await db.pool.end();
-          })().catch(async (err) => {
-            console.error('RESELLER_CLIENT_CREATE_FAILED', err.code || err.message);
-            try { await db.pool.end(); } catch {}
-            process.exit(1);
-          });
-          NODE
-
           echo '=== RESTART DASHBOARD/API ==='
           pm2 restart dashboard-server --update-env
           sleep 4
