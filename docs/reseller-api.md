@@ -32,7 +32,7 @@ A missing/invalid key returns HTTP `401`.
 3. Call `GET /prices` to fetch currently sellable plans and reseller prices.
 4. Call `POST /servers` to create a server.
 5. Poll `GET /servers/{id}` until the provider status/IP is available.
-6. Manage the server with power on/off or delete endpoints.
+6. Manage the server with power on/off, IP change or delete endpoints.
 
 ## Endpoints
 
@@ -155,6 +155,27 @@ curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/poweron \
   -H "Authorization: Bearer $HAMOON_API_KEY"
 ```
 
+#### `POST /servers/{id}/change-ip`
+Replaces the current Hetzner Primary IPv4 with a newly allocated IPv4. The operation temporarily powers the server off, swaps the Primary IP, powers the server back on and persists the new public IP. If the swap fails after a candidate IP is allocated, the service attempts to restore the previous IP automatically.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/change-ip \
+  -H "Authorization: Bearer $HAMOON_API_KEY"
+```
+
+Successful response:
+
+```json
+{
+  "ok": true,
+  "status": "ip_changed",
+  "old_ip": "203.0.113.10",
+  "new_ip": "203.0.113.24"
+}
+```
+
+Manual API IP change is allowed only while the purchase is in `active`, `running`, `suspended`, `stopped` or `shutoff` state. Concurrent lifecycle operations return HTTP `409`.
+
 #### `DELETE /servers/{id}`
 Permanently deletes a server through the HamoonCloud lifecycle service.
 
@@ -175,7 +196,7 @@ curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/upgrade \
   -d '{"target_server_type":"cpx32","upgrade_disk":false}'
 ```
 
-Direct reboot and API-based IP change are not advertised in v1 and currently return `501 UNSUPPORTED_ACTION` rather than reporting a fake successful operation.
+Direct reboot is not advertised in v1 and currently returns `501 UNSUPPORTED_ACTION` rather than reporting a fake successful operation.
 
 ## Common errors
 
@@ -205,8 +226,13 @@ Common codes:
 | 404 | `SERVER_NOT_FOUND` | Server is not owned by this reseller account or does not exist |
 | 409 | `HETZNER_PLACEMENT_UNAVAILABLE` | Provider cannot currently place the requested server |
 | 409 | `OPERATION_IN_PROGRESS` | Another lifecycle operation is already active |
+| 409 | `SERVER_STATE_CONFLICT` | Current server state does not allow the requested operation |
+| 409 | `NO_UNUSED_PRIMARY_IPV4_AVAILABLE` | Hetzner did not return a usable IP candidate outside the reuse cooldown |
 | 429 | `RATE_LIMITED` | Request rate exceeded |
 | 501 | `UNSUPPORTED_ACTION` | Endpoint/action intentionally not available in v1 |
+| 502 | `PRIMARY_IPV4_NOT_FOUND` | Current Primary IPv4 information could not be resolved from Hetzner |
+| 502 | `OLD_PRIMARY_IP_CLEANUP_FAILED` | IP swap cleanup failed and rollback was attempted |
+| 504 | `NEW_IP_NOT_READY` | New IP did not become ready before the operation timeout |
 
 Every API response includes an `X-Request-Id` header for troubleshooting.
 
