@@ -6,6 +6,7 @@ on:
     paths:
       - 'billing-cycle-bootstrap.js'
       - 'billing-renewal-guard-bootstrap.js'
+      - 'reseller-billing-grace-bootstrap.js'
       - 'rebuild-bootstrap.js'
       - 'runtime-bootstrap.js'
       - 'provider-visibility.js'
@@ -25,6 +26,7 @@ on:
       - 'scripts/validate-hetzner-management-buttons.js'
       - 'scripts/validate-billing-cycle-change.js'
       - 'scripts/validate-billing-renewal-guard.js'
+      - 'scripts/validate-reseller-billing-grace.js'
       - 'scripts/validate-provider-visibility.js'
       - '.github/workflows/deploy-billing-cycle-fix.yml'
   workflow_dispatch:
@@ -50,6 +52,7 @@ jobs:
           set -euo pipefail
           node --check billing-cycle-bootstrap.js
           node --check billing-renewal-guard-bootstrap.js
+          node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
@@ -64,8 +67,10 @@ jobs:
           node --check services/hetzner-lifecycle-safe-bootstrap.js
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
+          node --check scripts/validate-reseller-billing-grace.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-billing-renewal-guard.js
+          node scripts/validate-reseller-billing-grace.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
           node scripts/validate-hetzner-purchase-architecture.js
@@ -97,6 +102,7 @@ jobs:
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check billing-cycle-bootstrap.js
           node --check billing-renewal-guard-bootstrap.js
+          node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
@@ -111,8 +117,10 @@ jobs:
           node --check services/hetzner-lifecycle-safe-bootstrap.js
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
+          node --check scripts/validate-reseller-billing-grace.js
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-billing-renewal-guard.js
+          node scripts/validate-reseller-billing-grace.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-hetzner-management-buttons.js
           node scripts/validate-hetzner-purchase-architecture.js
@@ -122,7 +130,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 180 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 100 || true
+          pm2 logs hamoonbot --lines 180 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 100 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
