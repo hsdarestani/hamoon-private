@@ -9,16 +9,24 @@ ssh_pwauth: true
 disable_root: false
 chpasswd:
   expire: false
-users:
-  - name: root
-    password: "${password}"
-    type: text
+  users:
+    - name: root
+      password: "${password}"
+      type: text
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hamooncloud.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+      KbdInteractiveAuthentication yes
+      UsePAM yes
 runcmd:
-  - sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config.d/*.conf || true
-  - sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config.d/*.conf || true
-  - systemctl restart ssh || systemctl restart sshd || true
+  - ssh-keygen -A
+  - systemctl enable ssh.service || systemctl enable sshd.service || true
+  - /usr/sbin/sshd -t
+  - systemctl restart ssh.service || systemctl restart sshd.service
 `;
 }
 
