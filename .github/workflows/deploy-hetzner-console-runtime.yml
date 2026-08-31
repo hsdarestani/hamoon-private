@@ -1,0 +1,171 @@
+name: Deploy Hetzner Browser Console
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hetzner-console-bootstrap.js'
+      - 'console-session.js'
+      - 'server.js'
+      - 'public/console/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/validate-hetzner-console.js'
+      - 'scripts/validate-novnc-console.js'
+      - '.env.example'
+      - '.github/workflows/deploy-hetzner-console-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-hetzner-console-production
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate console source
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm run validate:hetzner-console
+          npm run validate:novnc-console
+          node --check hetzner-console-bootstrap.js
+          node --check console-session.js
+          node --check server.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and configure secure console
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          ENV_BACKUP="$(mktemp)"
+          if [ -f .env ]; then
+            cp .env "$ENV_BACKUP"
+          fi
+          cleanup() { rm -f "$ENV_BACKUP"; }
+          trap cleanup EXIT
+
+          echo '=== UPDATE SOURCE ==='
+          git checkout -- .env .env.save 2>/dev/null || true
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          if [ -s "$ENV_BACKUP" ]; then
+            cp "$ENV_BACKUP" .env
+          elif [ ! -f .env ]; then
+            touch .env
+          fi
+          chmod 600 .env || true
+
+          echo '=== INSTALL RUNTIME DEPENDENCIES ==='
+          npm ci --omit=dev --ignore-scripts
+
+          echo '=== CONFIGURE CONSOLE ENV ==='
+          node <<'NODE'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const file = '.env';
+          let text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+
+          function getValue(key) {
+            const match = text.match(new RegExp('^' + key + '=(.*)$', 'm'));
+            if (!match) return '';
+            return String(match[1] || '').trim().replace(/^['"]|['"]$/g, '');
+          }
+
+          function setValue(key, value) {
+            const line = key + '=' + value;
+            const re = new RegExp('^' + key + '=.*$', 'm');
+            if (re.test(text)) text = text.replace(re, line);
+            else text = text.replace(/\s*$/, '\n') + line + '\n';
+          }
+
+          const currentBase = getValue('CONSOLE_PUBLIC_BASE_URL');
+          if (!/^https:\/\//i.test(currentBase)) {
+            setValue('CONSOLE_PUBLIC_BASE_URL', 'https://pay.hamooncloud.ir');
+          }
+
+          const currentDashboard = getValue('DASHBOARD_PUBLIC_URL');
+          if (!/^https:\/\//i.test(currentDashboard)) {
+            setValue('DASHBOARD_PUBLIC_URL', 'https://pay.hamooncloud.ir');
+          }
+
+          const currentSecret = getValue('CONSOLE_SESSION_SECRET');
+          if (currentSecret.length < 32) {
+            setValue('CONSOLE_SESSION_SECRET', crypto.randomBytes(48).toString('hex'));
+          }
+
+          fs.writeFileSync(file, text.replace(/^\s+/, '').replace(/\s*$/, '\n'), { mode: 0o600 });
+          console.log('CONSOLE_PUBLIC_BASE_URL=' + getValue('CONSOLE_PUBLIC_BASE_URL'));
+          console.log('DASHBOARD_PUBLIC_URL=' + getValue('DASHBOARD_PUBLIC_URL'));
+          console.log('CONSOLE_SESSION_SECRET configured=' + (getValue('CONSOLE_SESSION_SECRET').length >= 32));
+          NODE
+
+          echo '=== VALIDATE PRODUCTION SOURCE ==='
+          npm run validate:hetzner-console
+          npm run validate:novnc-console
+          node --check hetzner-console-bootstrap.js
+          node --check console-session.js
+          node --check server.js
+
+          echo '=== RESTART SERVICES ==='
+          pm2 restart dashboard-server --update-env
+          pm2 restart hamoonbot --update-env
+          sleep 5
+          pm2 describe dashboard-server | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+          pm2 describe hamoonbot | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+
+          echo '=== LOCAL HEALTH ==='
+          curl -fsS --max-time 10 http://127.0.0.1:3000/health
+          echo
+          local_console_code="$(curl -sS --max-time 10 -o /tmp/hamoon-console-local -w '%{http_code}' http://127.0.0.1:3000/console || true)"
+          echo "local /console -> HTTP ${local_console_code:-000}"
+          test "$local_console_code" = '200'
+
+          echo '=== PUBLIC CONSOLE ==='
+          public_console_code="$(curl -kLsS --max-time 15 -o /tmp/hamoon-console-public -w '%{http_code}' https://pay.hamooncloud.ir/console || true)"
+          echo "https://pay.hamooncloud.ir/console -> HTTP ${public_console_code:-000}"
+          test "$public_console_code" = '200'
+          rm -f /tmp/hamoon-console-local /tmp/hamoon-console-public
+
+          echo '=== RECENT CONSOLE ERRORS ==='
+          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'HETZNER_CONSOLE|CONSOLE_PUBLIC_BASE_URL|CONSOLE_SESSION' | tail -n 60 || true
+          pm2 logs dashboard-server --lines 120 --nostream 2>/dev/null | grep -Ei 'CONSOLE_SESSION|console' | tail -n 60 || true
+          REMOTE
