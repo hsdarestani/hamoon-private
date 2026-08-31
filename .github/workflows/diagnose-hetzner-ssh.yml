@@ -1,0 +1,55 @@
+name: Diagnose Hetzner SSH
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/diagnose-hetzner-ssh.js'
+      - '.github/workflows/diagnose-hetzner-ssh.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 65.109.181.115
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate
+        run: node --check scripts/diagnose-hetzner-ssh.js
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Diagnose production server
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          TARGET_IP_B64="$(printf '%s' "$TARGET_IP" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_IP_B64='$TARGET_IP_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          TARGET_IP="$(printf '%s' "$TARGET_IP_B64" | base64 -d)"
+          cd "$APP_PATH"
+          ENV_BACKUP="$(mktemp)"
+          if [ -f .env ]; then cp .env "$ENV_BACKUP"; fi
+          trap 'rm -f "$ENV_BACKUP"' EXIT
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
+          node scripts/diagnose-hetzner-ssh.js "$TARGET_IP"
+          REMOTE
