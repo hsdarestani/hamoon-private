@@ -5,6 +5,7 @@ const db = require('./db');
 const cloud = require('./cloud-api');
 const datacenters = require('./datacenters');
 const lifecycle = require('./services/hetzner-lifecycle');
+const { changeHetznerPublicIp, userMessageForError: changeIpUserMessage } = require('./services/hetzner-change-ip');
 const { getHetznerSellablePlans, createOrGetSshKey } = require('./Hetzner/hetzner-api');
 
 const minuteBuckets = new Map();
@@ -296,7 +297,30 @@ function createCustomerApiRouter() {
   });
 
   router.post('/servers/:id/reboot', userPurchase, (_req, res) => apiError(res, 501, 'UNSUPPORTED_ACTION', 'ریبوت مستقیم در این نسخه فعال نیست.'));
-  router.post('/servers/:id/change-ip', userPurchase, (_req, res) => apiError(res, 501, 'UNSUPPORTED_ACTION', 'تعویض IP از API ریسلری در این نسخه فعال نیست.'));
+
+  router.post('/servers/:id/change-ip', userPurchase, async (req, res, next) => {
+    try {
+      const status = String(req.purchase.status || '').toLowerCase();
+      if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) {
+        return apiError(res, 409, 'SERVER_STATE_CONFLICT', 'وضعیت فعلی سرور اجازه تغییر IP را نمی‌دهد.');
+      }
+      const dc = datacenters[req.purchase.datacenter] || datacenters.hetzner;
+      if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');
+      const result = await changeHetznerPublicIp({
+        db,
+        dc,
+        telegramId: req.apiClient.telegram_id,
+        serverId: req.params.id,
+        datacenter: req.purchase.datacenter
+      });
+      return res.json({
+        ok: true,
+        status: 'ip_changed',
+        old_ip: result.oldIp,
+        new_ip: result.newIp
+      });
+    } catch (e) { next(e); }
+  });
 
   router.post('/servers/:id/upgrade', userPurchase, async (req, res, next) => {
     try {
@@ -316,7 +340,14 @@ function createCustomerApiRouter() {
     console.error('[CUSTOMER_API_ERROR]', err.code || err.message);
     if (err.code === 'HETZNER_PLACEMENT_UNAVAILABLE') return apiError(res, 409, 'HETZNER_PLACEMENT_UNAVAILABLE', lifecycle.safeProviderMessage(err));
     if (err.code === 'NOT_FOUND') return apiError(res, 404, 'SERVER_NOT_FOUND', 'سرور پیدا نشد.');
-    if (err.code === 'OPERATION_IN_PROGRESS') return apiError(res, 409, 'OPERATION_IN_PROGRESS', 'عملیات دیگری روی این سرور در حال انجام است.');
+    if (err.code === 'OPERATION_IN_PROGRESS') return apiError(res, 409, 'OPERATION_IN_PROGRESS', changeIpUserMessage(err));
+    if (err.code === 'INVALID_SERVER_STATE') return apiError(res, 409, 'SERVER_STATE_CONFLICT', changeIpUserMessage(err));
+    if (err.code === 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE') return apiError(res, 409, 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE', changeIpUserMessage(err));
+    if (err.code === 'PRIMARY_IPV4_NOT_FOUND') return apiError(res, 502, 'PRIMARY_IPV4_NOT_FOUND', changeIpUserMessage(err));
+    if (err.code === 'NEW_IP_NOT_READY') return apiError(res, 504, 'NEW_IP_NOT_READY', changeIpUserMessage(err));
+    if (err.code === 'CANDIDATE_REJECTED') return apiError(res, 409, 'CANDIDATE_REJECTED', changeIpUserMessage(err));
+    if (err.code === 'CANDIDATE_REJECTED_ROLLBACK_FAILED') return apiError(res, 502, 'CANDIDATE_REJECTED_ROLLBACK_FAILED', changeIpUserMessage(err));
+    if (err.code === 'OLD_PRIMARY_IP_CLEANUP_FAILED') return apiError(res, 502, 'OLD_PRIMARY_IP_CLEANUP_FAILED', changeIpUserMessage(err));
     if (err.code === 'CONFLICT') return apiError(res, 409, 'SERVER_STATE_CONFLICT', 'وضعیت فعلی سرور اجازه این عملیات را نمی‌دهد.');
     return apiError(res, 500, 'INTERNAL_ERROR', 'خطای داخلی رخ داد.');
   });
