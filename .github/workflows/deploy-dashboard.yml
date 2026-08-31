@@ -51,6 +51,7 @@ jobs:
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
+          node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
           node --check services/hetzner-lifecycle.js
@@ -110,6 +111,7 @@ jobs:
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
+          node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
           node --check services/hetzner-lifecycle.js
