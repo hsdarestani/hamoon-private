@@ -15,9 +15,20 @@ function applyHetznerManagementScopePatch(source) {
   const normalized = String(status || '').trim().toLowerCase();
   if (new Set(['active', 'running', 'on']).has(normalized)) return '🟢';
   if (new Set(['off', 'shutoff', 'stopped', 'suspended', 'paused']).has(normalized)) return '🔴';
+  if (new Set(['initializing', 'starting', 'stopping', 'rebuilding', 'migrating', 'deleting', 'creating']).has(normalized)) return '🟡';
   return '⚪';
 }
+
+async function listServersForManagement(dcConfig, token) {
+  const isHetznerProvider = dcConfig?.provider === 'hetzner' || dcConfig?.apiType === 'hetzner';
+  if (!isHetznerProvider) return openstackApi.listServers(dcConfig, token);
+  const { listAllHetznerServers } = require('./services/hetzner-list-all-servers');
+  return listAllHetznerServers(dcConfig);
+}
+
 ${helperMarker}`;
+  const listServersMarker = 'return openstackApi.listServers(dcConfig, tok);';
+  const listServersReplacement = 'return listServersForManagement(dcConfig, tok);';
   const buttonTextMarker = 'text: `${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
   const buttonTextReplacement = 'text: `${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
 
@@ -36,6 +47,11 @@ ${helperMarker}`;
     err.code = 'HETZNER_MANAGEMENT_STATUS_HELPER_MARKER_MISSING';
     throw err;
   }
+  if (!source.includes(listServersMarker)) {
+    const err = new Error('HETZNER_MANAGEMENT_LIST_SERVERS_MARKER_MISSING');
+    err.code = 'HETZNER_MANAGEMENT_LIST_SERVERS_MARKER_MISSING';
+    throw err;
+  }
   if (!source.includes(buttonTextMarker)) {
     const err = new Error('HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING');
     err.code = 'HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING';
@@ -44,6 +60,7 @@ ${helperMarker}`;
 
   const patched = source
     .replace(helperMarker, helperReplacement)
+    .replace(listServersMarker, listServersReplacement)
     .replace(providerMarker, providerReplacement)
     .replace(ownershipMarker, ownershipReplacement)
     .replace(buttonTextMarker, buttonTextReplacement);
@@ -53,6 +70,9 @@ ${helperMarker}`;
   if (!patched.includes("const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';") ||
       !patched.includes('if (isAfra || isHetzner) return idMatch;') ||
       !patched.includes('function compactServerStatusIcon(status)') ||
+      !patched.includes('async function listServersForManagement(dcConfig, token)') ||
+      !patched.includes("require('./services/hetzner-list-all-servers')") ||
+      !patched.includes('return listServersForManagement(dcConfig, tok);') ||
       !patched.includes('${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}')) {
     const err = new Error('HETZNER_MANAGEMENT_SCOPE_PATCH_FAILED');
     err.code = 'HETZNER_MANAGEMENT_SCOPE_PATCH_FAILED';
