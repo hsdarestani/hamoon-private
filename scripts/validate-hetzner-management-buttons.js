@@ -10,6 +10,8 @@ const { applyPatches } = require('../runtime-bootstrap');
 const corePath = path.join(__dirname, '..', 'index-core.js');
 const source = fs.readFileSync(corePath, 'utf8');
 const composed = applyPatches(source);
+const paginatedListPath = path.join(__dirname, '..', 'services', 'hetzner-list-all-servers.js');
+const paginatedListSource = fs.readFileSync(paginatedListPath, 'utf8');
 
 const statusLabelMarker = '${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
 
@@ -27,14 +29,28 @@ const required = [
   "const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';",
   'if (isAfra || isHetzner) return idMatch;',
   'function compactServerStatusIcon(status)',
+  'async function listServersForManagement(dcConfig, token)',
+  "require('./services/hetzner-list-all-servers')",
+  'return listServersForManagement(dcConfig, tok);',
   "return '🟢';",
   "return '🔴';",
+  "return '🟡';",
   "return '⚪';",
   statusLabelMarker,
 ];
 
 for (const marker of required) {
   assert(composed.includes(marker), `missing composed management marker: ${marker}`);
+}
+
+const paginationRequired = [
+  'async function listAllHetznerServers(dcConfig, options = {})',
+  '`/servers?page=${page}&per_page=${perPage}`',
+  'data?.meta?.pagination?.next_page',
+  'rawById.set(String(server.id), server)',
+];
+for (const marker of paginationRequired) {
+  assert(paginatedListSource.includes(marker), `missing Hetzner pagination marker: ${marker}`);
 }
 
 const trafficIndex = composed.indexOf("text: '📊 مصرف ترافیک'");
@@ -49,5 +65,6 @@ assert(statusHelperIndex >= 0, 'compact status helper must exist');
 assert(statusLabelIndex > statusHelperIndex, 'management list must use live provider status icon');
 
 new vm.Script(composed, { filename: 'index-core.composed.js' });
+new vm.Script(paginatedListSource, { filename: 'hetzner-list-all-servers.js' });
 
 console.log('validate-hetzner-management-buttons: ok');
