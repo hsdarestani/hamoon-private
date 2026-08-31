@@ -5,6 +5,10 @@ const net = require('net');
 const db = require('../db');
 const datacenters = require('../datacenters');
 const hetzner = require('../Hetzner/hetzner-api');
+const { installStrictCheckHostFetch } = require('../services/check-host-strict-fetch');
+const { checkIpQuality } = require('../services/hetzner-lifecycle');
+
+installStrictCheckHostFetch();
 
 function tcp(host, port, timeoutMs = 3000) {
   return new Promise(resolve => {
@@ -26,6 +30,14 @@ async function main() {
   const server = await hetzner.getHetznerServer(dc, p.server_id);
   const firewalls = await hetzner.hetznerRequest(dc, 'GET', `/firewalls?bound_to=server:${encodeURIComponent(String(p.server_id))}&per_page=50`).catch(error => ({ error: String(error?.message || error) }));
   const actions = await hetzner.hetznerRequest(dc, 'GET', `/servers/${encodeURIComponent(String(p.server_id))}/actions?sort=id:desc&per_page=20`).catch(error => ({ error: String(error?.message || error) }));
+  const strictIranSsh = await checkIpQuality(ip, {
+    iranCount: 6,
+    iranMin: 4,
+    globalCount: 6,
+    globalRatio: 0.67,
+    polls: 8,
+    pollDelayMs: 1500
+  });
 
   console.log(JSON.stringify({
     purchase: {
@@ -49,9 +61,10 @@ async function main() {
       recent_actions: Array.isArray(actions?.actions) ? actions.actions.slice(0, 12).map(a => ({ id: a.id, command: a.command, status: a.status, started: a.started, finished: a.finished, error: a.error || null })) : actions
     },
     network: {
-      port22: await tcp(ip, 22),
-      port80: await tcp(ip, 80),
-      port443: await tcp(ip, 443)
+      port22_from_hamoon: await tcp(ip, 22),
+      port80_from_hamoon: await tcp(ip, 80),
+      port443_from_hamoon: await tcp(ip, 443),
+      strict_iran_ssh: strictIranSsh
     }
   }, null, 2));
 }
