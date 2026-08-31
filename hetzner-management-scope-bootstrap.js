@@ -18,8 +18,8 @@ function applyHetznerManagementScopePatch(source) {
   return '⚪';
 }
 ${helperMarker}`;
-  const buttonTextMarker = 'text: `${s.purchase?.server_name || s.name}';
-  const buttonTextReplacement = 'text: `${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}';
+  const buttonTextMarker = 'text: `${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
+  const buttonTextReplacement = 'text: `${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
 
   if (!source.includes(providerMarker)) {
     const err = new Error('HETZNER_MANAGEMENT_SCOPE_PROVIDER_MARKER_MISSING');
@@ -53,7 +53,7 @@ ${helperMarker}`;
   if (!patched.includes("const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';") ||
       !patched.includes('if (isAfra || isHetzner) return idMatch;') ||
       !patched.includes('function compactServerStatusIcon(status)') ||
-      !patched.includes('${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}')) {
+      !patched.includes('${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}')) {
     const err = new Error('HETZNER_MANAGEMENT_SCOPE_PATCH_FAILED');
     err.code = 'HETZNER_MANAGEMENT_SCOPE_PATCH_FAILED';
     throw err;
