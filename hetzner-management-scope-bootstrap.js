@@ -18,8 +18,8 @@ function applyHetznerManagementScopePatch(source) {
   return '⚪';
 }
 ${helperMarker}`;
-  const buttonMarker = "{ text: `${s.purchase?.server_name || s.name} (${userDCs[s.datacenter]?.name || s.datacenter})`, callback_data: token }";
-  const buttonReplacement = "{ text: `${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name} (${userDCs[s.datacenter]?.name || s.datacenter})`, callback_data: token }";
+  const buttonTextMarker = 'text: `${s.purchase?.server_name || s.name}';
+  const buttonTextReplacement = 'text: `${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}';
 
   if (!source.includes(providerMarker)) {
     const err = new Error('HETZNER_MANAGEMENT_SCOPE_PROVIDER_MARKER_MISSING');
@@ -36,7 +36,7 @@ ${helperMarker}`;
     err.code = 'HETZNER_MANAGEMENT_STATUS_HELPER_MARKER_MISSING';
     throw err;
   }
-  if (!source.includes(buttonMarker)) {
+  if (!source.includes(buttonTextMarker)) {
     const err = new Error('HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING');
     err.code = 'HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING';
     throw err;
@@ -46,7 +46,7 @@ ${helperMarker}`;
     .replace(helperMarker, helperReplacement)
     .replace(providerMarker, providerReplacement)
     .replace(ownershipMarker, ownershipReplacement)
-    .replace(buttonMarker, buttonReplacement);
+    .replace(buttonTextMarker, buttonTextReplacement);
 
   // Refuse to boot with a silently ineffective patch. This prevents a future
   // refactor from bringing back cross-location duplicates or hiding live state.
