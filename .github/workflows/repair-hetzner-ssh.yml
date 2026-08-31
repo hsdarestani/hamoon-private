@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/repair-hetzner-ssh.js'
+      - 'scripts/notify-ssh-repair.js'
       - '.github/workflows/repair-hetzner-ssh.yml'
   workflow_dispatch:
 
@@ -28,11 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate repair utility
+      - name: Validate repair utilities
         shell: bash
         run: |
           set -euo pipefail
           node --check scripts/repair-hetzner-ssh.js
+          node --check scripts/notify-ssh-repair.js
 
       - name: Prepare SSH
         shell: bash
@@ -48,7 +50,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Repair target server SSH
+      - name: Repair target server SSH and notify customer
         shell: bash
         run: |
           set -euo pipefail
@@ -74,5 +76,7 @@ jobs:
           fi
 
           node --check scripts/repair-hetzner-ssh.js
+          node --check scripts/notify-ssh-repair.js
           node scripts/repair-hetzner-ssh.js "$TARGET_IP"
+          node scripts/notify-ssh-repair.js "$TARGET_IP"
           REMOTE
