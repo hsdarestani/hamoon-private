@@ -11,6 +11,8 @@ const corePath = path.join(__dirname, '..', 'index-core.js');
 const source = fs.readFileSync(corePath, 'utf8');
 const composed = applyPatches(source);
 
+const statusLabelMarker = '${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
+
 const required = [
   "text: '📊 مصرف ترافیک'",
   "text: '🔄 تغییر IP'",
@@ -28,7 +30,7 @@ const required = [
   "return '🟢';",
   "return '🔴';",
   "return '⚪';",
-  '${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}',
+  statusLabelMarker,
 ];
 
 for (const marker of required) {
@@ -42,7 +44,7 @@ assert(trafficIndex >= 0 && changeIpIndex > trafficIndex, 'change-IP button must
 assert(consoleIndex > changeIpIndex, 'console button must coexist after change-IP');
 
 const statusHelperIndex = composed.indexOf('function compactServerStatusIcon(status)');
-const statusLabelIndex = composed.indexOf('${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}');
+const statusLabelIndex = composed.indexOf(statusLabelMarker);
 assert(statusHelperIndex >= 0, 'compact status helper must exist');
 assert(statusLabelIndex > statusHelperIndex, 'management list must use live provider status icon');
 
