@@ -80,6 +80,17 @@ paths:
       responses:
         '200': { description: Server stopped }
         '404': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/change-ip:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Replace the current Hetzner Primary IPv4
+      responses:
+        '200': { description: IP changed; response includes old_ip and new_ip }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+        '502': { $ref: '#/components/responses/ApiError' }
+        '504': { $ref: '#/components/responses/ApiError' }
   /servers/{id}/upgrade:
     parameters:
       - $ref: '#/components/parameters/ServerId'
