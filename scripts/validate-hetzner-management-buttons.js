@@ -24,6 +24,11 @@ const required = [
   "case 'RENAME_SERVER':",
   "const isHetzner = dcConfig.provider === 'hetzner' || dcConfig.apiType === 'hetzner';",
   'if (isAfra || isHetzner) return idMatch;',
+  'function compactServerStatusIcon(status)',
+  "return '🟢';",
+  "return '🔴';",
+  "return '⚪';",
+  '${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}',
 ];
 
 for (const marker of required) {
@@ -35,6 +40,11 @@ const changeIpIndex = composed.indexOf("text: '🔄 تغییر IP'");
 const consoleIndex = composed.indexOf("text: '🖥 کنسول'");
 assert(trafficIndex >= 0 && changeIpIndex > trafficIndex, 'change-IP button must coexist after traffic');
 assert(consoleIndex > changeIpIndex, 'console button must coexist after change-IP');
+
+const statusHelperIndex = composed.indexOf('function compactServerStatusIcon(status)');
+const statusLabelIndex = composed.indexOf('${compactServerStatusIcon(s.status)} ${s.purchase?.server_name || s.name}');
+assert(statusHelperIndex >= 0, 'compact status helper must exist');
+assert(statusLabelIndex > statusHelperIndex, 'management list must use live provider status icon');
 
 new vm.Script(composed, { filename: 'index-core.composed.js' });
 
