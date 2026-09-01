@@ -8,6 +8,7 @@ on:
       - 'public/dashboard/**'
       - 'dashboard-api.js'
       - 'customer-api.js'
+      - 'external-payments.js'
       - 'services/hetzner-lifecycle.js'
       - 'server.js'
       - 'db.js'
@@ -54,6 +55,7 @@ jobs:
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
+          node --check external-payments.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
           node --check server.js
@@ -88,9 +90,7 @@ jobs:
           cd "$APP_PATH"
 
           ENV_BACKUP="$(mktemp)"
-          if [ -f .env ]; then
-            cp .env "$ENV_BACKUP"
-          fi
+          if [ -f .env ]; then cp .env "$ENV_BACKUP"; fi
           cleanup() { rm -f "$ENV_BACKUP"; }
           trap cleanup EXIT
 
@@ -102,10 +102,7 @@ jobs:
           git fetch origin main
           git checkout main
           git pull --ff-only origin main
-          if [ -s "$ENV_BACKUP" ]; then
-            cp "$ENV_BACKUP" .env
-            chmod 600 .env || true
-          fi
+          if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
 
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check public/dashboard/app.js
@@ -114,6 +111,7 @@ jobs:
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
+          node --check external-payments.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
           node --check server.js
@@ -141,6 +139,12 @@ jobs:
           echo '=== LIVE RESELLER API AUTHENTICATED SMOKE ==='
           RESELLER_API_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-reseller-api-authenticated.js
 
+          echo '=== MARKET PAYMENT ROUTE SMOKE ==='
+          code="$(curl -ksS --max-time 10 -o /tmp/hamoon-market-payment-response -w '%{http_code}' 'https://pay.hamooncloud.ir/payments/vestaland-market/status?receipt=invalid' || true)"
+          echo "market payment invalid receipt -> HTTP ${code:-000}"
+          test "$code" = "400"
+          rm -f /tmp/hamoon-market-payment-response
+
           echo '=== PUBLIC RESELLER API DIAGNOSTIC ==='
           for url in 'https://pay.hamooncloud.ir/api/v1/me' 'http://91.107.241.4/api/v1/me'; do
             code="$(curl -ksS --max-time 10 -o /tmp/hamoon-public-api-response -w '%{http_code}' "$url" || true)"
@@ -151,18 +155,11 @@ jobs:
           echo '=== NETWORK DIAGNOSTICS ==='
           ss -lntp 2>/dev/null | grep -E '(:80|:443|:3000)' || true
           if command -v nginx >/dev/null 2>&1; then
-            echo '--- nginx summary ---'
             (sudo -n nginx -T 2>/dev/null || nginx -T 2>/dev/null || true) | grep -E '^[[:space:]]*(listen|server_name|proxy_pass)' | head -n 80 || true
-          else
-            echo 'nginx: not installed'
-          fi
-          if command -v ufw >/dev/null 2>&1; then
-            echo '--- ufw summary ---'
-            sudo -n ufw status verbose 2>/dev/null || ufw status verbose 2>/dev/null || true
           fi
 
           echo '=== RECENT DASHBOARD/API ERRORS ==='
-          pm2 logs dashboard-server --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|DASHBOARD_API_ERROR|CUSTOMER_API_ERROR|dashboard.*failed' | tail -n 80 || true
+          pm2 logs dashboard-server --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|DASHBOARD_API_ERROR|CUSTOMER_API_ERROR|dashboard.*failed|VESTALAND_MARKET' | tail -n 80 || true
 
           echo '=== AFTER ==='
           git rev-parse --short HEAD
