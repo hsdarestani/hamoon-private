@@ -7,6 +7,7 @@ const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
 const { createCustomerApiRouter } = require('./customer-api');
 const { consumeConsoleSession } = require('./console-session');
+const { mountExternalPayments } = require('./external-payments');
 const app = express();
 const port = Number(process.env.DASHBOARD_PORT || process.env.PORT || 3000);
 let dbStatus = 'unknown';
@@ -32,6 +33,7 @@ app.get('/health', async (_req, res) => {
 app.get('/admin', (_req, res) => res.redirect(302, '/dashboard'));
 app.use('/dashboard/api', createDashboardApiRouter());
 app.use('/api/v1', createCustomerApiRouter());
+mountExternalPayments(app, { db, axios });
 
 const dashboardDir = path.join(__dirname, 'public', 'dashboard');
 const consoleDir = path.join(__dirname, 'public', 'console');
@@ -129,8 +131,6 @@ app.get('/zibal/callback', async (req, res) => {
   const trackId = String(req.query.trackId || req.query.track_id || '').trim();
   const queryOrderId = String(req.query.orderId || req.query.order_id || '').trim();
   const callbackSuccess = String(req.query.success || '').trim();
-
-  // Keep verification aligned with the merchant currently used when creating the payment request.
   const merchant = process.env.ZIBAL_MERCHANT_ID || '68985f4ba45c72000bcfd5a2';
 
   function html(title, message) {
@@ -162,15 +162,10 @@ app.get('/zibal/callback', async (req, res) => {
 
     const verifyRes = await axios.post(
       'https://gateway.zibal.ir/v1/verify',
-      {
-        merchant,
-        trackId: Number(trackId)
-      },
+      { merchant, trackId: Number(trackId) },
       { timeout: 20000 }
     );
-
     const v = verifyRes.data || {};
-
     if (Number(v.result) !== 100) {
       console.warn('[ZIBAL_CALLBACK] verify failed:', JSON.stringify(v));
       return res.status(400).send(html('پرداخت ناموفق', 'تراکنش توسط زیبال تأیید نشد.'));
@@ -178,7 +173,6 @@ app.get('/zibal/callback', async (req, res) => {
 
     const orderId = String(v.orderId || queryOrderId || '').trim();
     const match = orderId.match(/^(\d+)-(\d+)-(\d+)$/);
-
     if (!match) {
       console.error('[ZIBAL_CALLBACK] invalid orderId:', orderId, JSON.stringify(v));
       return res.status(400).send(html('خطای پرداخت', 'اطلاعات سفارش معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.'));
@@ -193,14 +187,12 @@ app.get('/zibal/callback', async (req, res) => {
     if (!Number.isFinite(originalAmountToman) || originalAmountToman < 100) {
       return res.status(400).send(html('خطای پرداخت', 'مبلغ سفارش معتبر نیست.'));
     }
-
     if (paidRial && paidRial !== expectedPayableRial) {
       console.error('[ZIBAL_CALLBACK] amount mismatch:', { trackId, orderId, paidRial, expectedPayableRial });
       return res.status(400).send(html('خطای پرداخت', 'مبلغ پرداختی با سفارش مطابقت ندارد. لطفاً با پشتیبانی تماس بگیرید.'));
     }
 
     const conn = await db.pool.getConnection();
-
     try {
       await conn.query(`
         CREATE TABLE IF NOT EXISTS zibal_payments (
@@ -217,55 +209,28 @@ app.get('/zibal/callback', async (req, res) => {
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
-
       await conn.beginTransaction();
-
       const [insert] = await conn.execute(
         `INSERT IGNORE INTO zibal_payments
           (track_id, order_id, telegram_id, amount_toman, paid_rial, verify_result, verify_payload, credited)
          VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
-        [
-          trackId,
-          orderId,
-          telegramId,
-          originalAmountToman,
-          paidRial || expectedPayableRial,
-          Number(v.result),
-          JSON.stringify(v)
-        ]
+        [trackId, orderId, telegramId, originalAmountToman, paidRial || expectedPayableRial, Number(v.result), JSON.stringify(v)]
       );
-
       if (insert.affectedRows === 0) {
         await conn.rollback();
         return res.send(html('پرداخت قبلاً ثبت شده', 'این پرداخت قبلاً بررسی و ثبت شده است.'));
       }
-
       const [walletUpdate] = await conn.execute(
-        `UPDATE users
-         SET wallet = COALESCE(wallet,0) + ?
-         WHERE telegram_id = ?`,
+        `UPDATE users SET wallet = COALESCE(wallet,0) + ? WHERE telegram_id = ?`,
         [originalAmountToman, telegramId]
       );
-
-      if (walletUpdate.affectedRows !== 1) {
-        throw new Error(`ZIBAL_USER_NOT_FOUND:${telegramId}`);
-      }
-
+      if (walletUpdate.affectedRows !== 1) throw new Error(`ZIBAL_USER_NOT_FOUND:${telegramId}`);
       await conn.execute(
-        `INSERT INTO wallet_logs (telegram_id, amount, description, type)
-         VALUES (?, ?, ?, ?)`,
-        [
-          telegramId,
-          originalAmountToman,
-          `شارژ کیف پول از طریق زیبال - trackId: ${trackId}`,
-          'payment'
-        ]
+        `INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)`,
+        [telegramId, originalAmountToman, `شارژ کیف پول از طریق زیبال - trackId: ${trackId}`, 'payment']
       );
-
       await conn.commit();
-
       console.log('[ZIBAL_CALLBACK] credited wallet:', { telegramId, originalAmountToman, trackId, orderId });
-
       return res.send(html('پرداخت موفق', `کیف پول شما به مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان شارژ شد. می‌توانید به ربات برگردید.`));
     } catch (e) {
       try { await conn.rollback(); } catch {}
@@ -281,5 +246,4 @@ app.get('/zibal/callback', async (req, res) => {
 });
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'NOT_FOUND', message: 'مسیر پیدا نشد.' }));
-
 app.listen(port, () => console.log(`[dashboard-server] listening on ${port}; /dashboard and /console routes enabled`));
