@@ -11,6 +11,7 @@ const MERCHANT_FALLBACK = '68985f4ba45c72000bcfd5a2';
 
 function validIntent(value) { return /^[A-Za-z0-9_-]{20,128}$/.test(String(value || '')); }
 function validReceipt(value) { return /^[a-f0-9]{24,64}$/.test(String(value || '')); }
+function validMetadataHash(value) { return /^[a-f0-9]{64}$/.test(String(value || '')); }
 function allowStart(req) {
   const ip = String(req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
   const bucket = `${ip}:${Math.floor(Date.now() / 600000)}`;
@@ -51,6 +52,7 @@ async function ensureTable(db) {
       amount_rial BIGINT NOT NULL,
       order_id VARCHAR(128) NOT NULL UNIQUE,
       track_id VARCHAR(64) NULL UNIQUE,
+      metadata_hash VARCHAR(64) NULL,
       status VARCHAR(24) NOT NULL DEFAULT 'pending',
       verify_payload LONGTEXT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -61,9 +63,10 @@ async function ensureTable(db) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
   try { await db.pool.query('ALTER TABLE external_payments MODIFY plan VARCHAR(32) NOT NULL'); } catch (_) {}
+  try { await db.pool.query('ALTER TABLE external_payments ADD COLUMN metadata_hash VARCHAR(64) NULL AFTER track_id'); } catch (_) {}
 }
 
-async function createGatewayPayment({ db, axios, appName, intent, plan, amountToman, label, orderPrefix, callbackPath }) {
+async function createGatewayPayment({ db, axios, appName, intent, plan, amountToman, label, orderPrefix, callbackPath, metadataHash='' }) {
   const receipt = crypto.randomBytes(18).toString('hex');
   const amountRial = Number(amountToman) * 10;
   const orderId = `${orderPrefix}-${receipt}`;
@@ -71,9 +74,9 @@ async function createGatewayPayment({ db, axios, appName, intent, plan, amountTo
   const callbackUrl = `https://pay.hamooncloud.ir${callbackPath}?receipt=${encodeURIComponent(receipt)}`;
   await ensureTable(db);
   await db.pool.execute(
-    `INSERT INTO external_payments(receipt,app,external_ref,plan,amount_toman,amount_rial,order_id,status)
-     VALUES(?,?,?,?,?,?,?,'pending')`,
-    [receipt, appName, intent, plan, amountToman, amountRial, orderId]
+    `INSERT INTO external_payments(receipt,app,external_ref,plan,amount_toman,amount_rial,order_id,metadata_hash,status)
+     VALUES(?,?,?,?,?,?,?,?,'pending')`,
+    [receipt, appName, intent, plan, amountToman, amountRial, orderId, metadataHash || null]
   );
   try {
     const gateway = await axios.post('https://gateway.zibal.ir/v1/request', {
@@ -141,12 +144,21 @@ async function paymentStatus(req, res, db, appName) {
   try {
     await ensureTable(db);
     const [rows] = await db.pool.execute(
-      `SELECT receipt,external_ref,plan,amount_toman,status,paid_at FROM external_payments WHERE receipt=? AND app=? LIMIT 1`,
+      `SELECT receipt,external_ref,plan,amount_toman,metadata_hash,status,paid_at FROM external_payments WHERE receipt=? AND app=? LIMIT 1`,
       [receipt, appName]
     );
     if (!rows[0]) return res.status(404).json({ ok:false,error:'NOT_FOUND' });
     const row = rows[0];
-    return res.json({ ok:true,receipt:row.receipt,intent:row.external_ref,plan:row.plan,amount_toman:Number(row.amount_toman),status:row.status,paid_at:row.paid_at||null });
+    return res.json({
+      ok:true,
+      receipt:row.receipt,
+      intent:row.external_ref,
+      plan:row.plan,
+      amount_toman:Number(row.amount_toman),
+      metadata_hash:row.metadata_hash||null,
+      status:row.status,
+      paid_at:row.paid_at||null
+    });
   } catch (error) {
     console.error(`[${appName}_STATUS]`, error.code || error.message);
     return res.status(500).json({ ok:false,error:'STATUS_FAILED' });
@@ -177,13 +189,13 @@ function mountExternalPayments(app, { db, axios }) {
     if (!validIntent(intent)) return res.status(400).send(errorPage('لینک پرداخت معتبر نیست','از سبد خرید وستالند دوباره پرداخت رو شروع کن.'));
     try {
       const resolver=process.env.VESTALAND_MARKET_INTENT_URL||'https://vestaland.smarbiz.sbs/api/market-payment/intent';
-      const answer=await axios.get(resolver,{params:{intent},timeout:15000,headers:{Accept:'application/json','User-Agent':'HamoonVestalandMarket/1.0'}});
+      const answer=await axios.get(resolver,{params:{intent},timeout:15000,headers:{Accept:'application/json','User-Agent':'HamoonVestalandMarket/1.1'}});
       const d=answer.data||{};
-      const amountToman=Number(d.amount_toman||0), store=String(d.store||'');
-      if (!d.ok||d.status!=='pending'||d.intent!==intent||!['vesta','cutella'].includes(store)||!Number.isSafeInteger(amountToman)||amountToman<1000||amountToman>500000000) {
+      const amountToman=Number(d.amount_toman||0), store=String(d.store||''), metadataHash=String(d.payload_hash||'').toLowerCase();
+      if (!d.ok||d.status!=='pending'||d.intent!==intent||!['vesta','cutella'].includes(store)||!Number.isSafeInteger(amountToman)||amountToman<1000||amountToman>500000000||!validMetadataHash(metadataHash)) {
         return res.status(409).send(errorPage('سفارش قابل پرداخت نیست','سبد یا مبلغ تغییر کرده؛ از داخل وستالند دوباره پرداخت رو شروع کن.'));
       }
-      const p=await createGatewayPayment({db,axios,appName:'vestaland-market',intent,plan:store,amountToman,label:String(d.label||'خرید بازار وستالند').slice(0,180),orderPrefix:'vlm',callbackPath:'/payments/vestaland-market/callback'});
+      const p=await createGatewayPayment({db,axios,appName:'vestaland-market',intent,plan:store,amountToman,label:String(d.label||'خرید بازار وستالند').slice(0,180),orderPrefix:'vlm',callbackPath:'/payments/vestaland-market/callback',metadataHash});
       return res.redirect(302,`https://gateway.zibal.ir/start/${encodeURIComponent(p.trackId)}`);
     } catch (error) {
       console.error('[VESTALAND_MARKET_START]',error.gatewayData||error.response?.data||error.code||error.message);
