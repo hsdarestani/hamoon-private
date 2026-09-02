@@ -15,6 +15,7 @@ const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
 const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
 const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
+const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
@@ -41,6 +42,7 @@ function applyRuntimeSafetyDefaults() {
   const defaults = {
     HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS: '20',
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
+    HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '4',
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '3',
     HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
     HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
@@ -70,7 +72,9 @@ function applyPatches(coreSource) {
                   applyFeaturePatches(
                     applyHetznerPendingDeliveryRecoveryPatches(
                       applyProviderVisibilityPatches(
-                        applyZibalRefererPatches(coreSource)
+                        applyHetznerUpgradeSafetyPatches(
+                          applyZibalRefererPatches(coreSource)
+                        )
                       )
                     )
                   )
