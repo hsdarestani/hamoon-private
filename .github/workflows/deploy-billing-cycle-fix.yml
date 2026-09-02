@@ -9,6 +9,7 @@ on:
       - 'reseller-billing-grace-bootstrap.js'
       - 'rebuild-bootstrap.js'
       - 'runtime-bootstrap.js'
+      - 'zibal-referer-bootstrap.js'
       - 'provider-visibility.js'
       - 'provider-visibility-bootstrap.js'
       - 'hetzner-purchase-images.js'
@@ -54,6 +55,7 @@ jobs:
           node --check billing-renewal-guard-bootstrap.js
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
+          node --check zibal-referer-bootstrap.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
@@ -68,6 +70,14 @@ jobs:
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
           node --check scripts/validate-reseller-billing-grace.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          if (!composed.includes('const payUrl = `https://pay.hamooncloud.ir/payment/start/${trackId}`;')) throw new Error('ZIBAL_INTERMEDIARY_URL_MISSING');
+          if (composed.includes('const payUrl = `https://gateway.zibal.ir/start/${trackId}`;')) throw new Error('ZIBAL_DIRECT_URL_STILL_ACTIVE');
+          console.log('validate-zibal-referer-runtime: ok');
+          NODE
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-billing-renewal-guard.js
           node scripts/validate-reseller-billing-grace.js
@@ -104,6 +114,7 @@ jobs:
           node --check billing-renewal-guard-bootstrap.js
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
+          node --check zibal-referer-bootstrap.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
@@ -118,6 +129,14 @@ jobs:
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
           node --check scripts/validate-reseller-billing-grace.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          if (!composed.includes('const payUrl = `https://pay.hamooncloud.ir/payment/start/${trackId}`;')) throw new Error('ZIBAL_INTERMEDIARY_URL_MISSING');
+          if (composed.includes('const payUrl = `https://gateway.zibal.ir/start/${trackId}`;')) throw new Error('ZIBAL_DIRECT_URL_STILL_ACTIVE');
+          console.log('validate-zibal-referer-runtime: ok');
+          NODE
           node scripts/validate-billing-cycle-change.js
           node scripts/validate-billing-renewal-guard.js
           node scripts/validate-reseller-billing-grace.js
@@ -130,7 +149,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 180 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 100 || true
+          pm2 logs hamoonbot --lines 180 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 100 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
