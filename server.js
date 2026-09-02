@@ -125,6 +125,50 @@ app.get('/dashboard/login', (_req, res) => res.sendFile(path.join(dashboardDir, 
 app.use('/dashboard', express.static(dashboardDir, { index: false, extensions: ['html'] }));
 app.get(/^\/dashboard\/(?!api).*/, requireDashboardPage, (_req, res) => res.sendFile(path.join(dashboardDir, 'index.html')));
 
+// Shaparak/Zibal intermediary page.
+// The browser first loads this document on the registered HamoonCloud domain and
+// then performs a document-originated navigation to Zibal. A plain server-side
+// 302 is intentionally avoided because it can preserve an empty upstream Referer.
+app.get('/payment/start/:trackId', (req, res) => {
+  const trackId = String(req.params.trackId || '').trim();
+  if (!/^\d{1,32}$/.test(trackId)) {
+    return res.status(400).type('html').send('<!doctype html><meta charset="utf-8"><title>پرداخت نامعتبر</title><p>شناسه پرداخت معتبر نیست.</p>');
+  }
+
+  const gatewayUrl = `https://gateway.zibal.ir/start/${encodeURIComponent(trackId)}`;
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Referrer-Policy', 'origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action https://gateway.zibal.ir");
+  return res.status(200).type('html').send(`<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="origin">
+  <title>انتقال به درگاه پرداخت</title>
+  <style>
+    body{font-family:tahoma,Arial,sans-serif;background:#0f172a;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    .card{max-width:520px;background:#111827;border:1px solid #334155;border-radius:18px;padding:28px;line-height:2;text-align:center}
+    a{color:#93c5fd}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <p>در حال انتقال امن به درگاه پرداخت...</p>
+    <p><a id="continue-payment" href="${gatewayUrl}" rel="noreferrer-unsafe-url">اگر منتقل نشدید اینجا بزنید</a></p>
+  </div>
+  <script>
+    window.setTimeout(function () {
+      window.location.assign(${JSON.stringify(gatewayUrl)});
+    }, 150);
+  </script>
+</body>
+</html>`);
+});
+
 // Zibal payment callback for wallet top-up.
 // Payment links are created in index-core.js with orderId: telegramId-orderCounter-originalAmount.
 app.get('/zibal/callback', async (req, res) => {
