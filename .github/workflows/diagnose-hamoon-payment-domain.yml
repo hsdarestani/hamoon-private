@@ -1,0 +1,62 @@
+name: Diagnose Hamoon Payment Domain
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-hamoon-payment-domain.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+    steps:
+      - name: Public DNS and HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== DNS ==='
+          getent ahostsv4 hamooncloud.ir || true
+          getent ahostsv4 pay.hamooncloud.ir || true
+          echo '=== HTTPS HEAD ==='
+          curl -ksS -I --max-time 10 https://hamooncloud.ir/payment/start/123 | head -n 20 || true
+          curl -ksS -I --max-time 10 https://pay.hamooncloud.ir/payment/start/123 | head -n 20 || true
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Server routing and certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '=== SERVER DNS ==='
+          getent ahostsv4 hamooncloud.ir || true
+          getent ahostsv4 pay.hamooncloud.ir || true
+          echo '=== NGINX SERVER NAMES ==='
+          (sudo -n nginx -T 2>/dev/null || nginx -T 2>/dev/null || true) | grep -E '^[[:space:]]*(listen|server_name|ssl_certificate|proxy_pass)' | head -n 120 || true
+          echo '=== CERTBOT ==='
+          (sudo -n certbot certificates 2>/dev/null || certbot certificates 2>/dev/null || true) | sed -n '1,120p'
+          echo '=== LOCAL HOST ROUTE TEST ==='
+          curl -ksS -D - --resolve hamooncloud.ir:443:127.0.0.1 https://hamooncloud.ir/payment/start/123 -o /tmp/hamoon-main-body | head -n 20 || true
+          head -c 160 /tmp/hamoon-main-body 2>/dev/null || true
+          echo
+          curl -ksS -D - --resolve pay.hamooncloud.ir:443:127.0.0.1 https://pay.hamooncloud.ir/payment/start/123 -o /tmp/hamoon-pay-body | head -n 20 || true
+          head -c 160 /tmp/hamoon-pay-body 2>/dev/null || true
+          echo
+          REMOTE
