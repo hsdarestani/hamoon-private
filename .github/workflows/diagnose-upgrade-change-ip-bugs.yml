@@ -1,0 +1,64 @@
+name: Diagnose Upgrade and Change IP Bugs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-upgrade-change-ip-bugs.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect production failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== HEAD ==='
+          git rev-parse --short HEAD
+          echo '=== UPGRADE SOURCE MATCHES ==='
+          grep -RniE 'handleHetznerUpgrade|upgradeServer|change_server_type|server_type|ارتقا' --exclude-dir=node_modules --exclude='*.log' . | head -n 220 || true
+          echo '=== CHANGE IP SOURCE MATCHES ==='
+          grep -RniE 'changeHetznerPublicIp|clean-ip|CHANGE_IP|IP قبلی|نتیجه قطعی نداد|provider.*missing|server.*not found' --exclude-dir=node_modules --exclude='*.log' . | head -n 260 || true
+          echo '=== RECENT BOT FAILURE LOGS ==='
+          pm2 logs hamoonbot --lines 5000 --nostream 2>/dev/null | grep -Ei 'upgrade|change.?ip|clean.?ip|server.?type|not found|404|quality|inconclusive|rollback|power|off|shutdown|resume|suspend' | tail -n 500 || true
+          echo '=== RECENT SERVER EVENTS ==='
+          if [ -f server_events.log ]; then
+            tail -n 8000 server_events.log | grep -Ei 'upgrade|change.?ip|clean.?ip|quality|rotation|not found|provider_missing' | tail -n 500 || true
+          fi
+          echo '=== RECENT HETZNER PURCHASES ==='
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          (async () => {
+            const conn = await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [rows] = await conn.execute(`SELECT telegram_id,server_id,server_name,flavor_id,status,public_ip,lifecycle_error_code,lifecycle_updated_at,updated_at FROM purchases WHERE datacenter LIKE 'hetzner%' ORDER BY updated_at DESC LIMIT 80`);
+            for (const r of rows) console.log(JSON.stringify(r));
+            await conn.end();
+          })().catch(e => { console.error('DB_DIAG_ERROR', e.code || e.message); process.exitCode=1; });
+          NODE
+          REMOTE
