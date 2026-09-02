@@ -1,0 +1,91 @@
+name: Validate Upgrade and Change IP Fixes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hetzner-upgrade-safety-bootstrap.js'
+      - 'services/hetzner-clean-ip-change.js'
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-upgrade-change-ip-fixes.js'
+      - '.github/workflows/validate-upgrade-change-ip-fixes.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-upgrade-change-ip-production
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check hetzner-upgrade-safety-bootstrap.js
+          node --check services/hetzner-clean-ip-change.js
+          node --check runtime-bootstrap.js
+          node --check scripts/validate-upgrade-change-ip-fixes.js
+          node scripts/validate-upgrade-change-ip-fixes.js
+          node scripts/validate-clean-ip-runtime.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          node --check hetzner-upgrade-safety-bootstrap.js
+          node --check services/hetzner-clean-ip-change.js
+          node --check runtime-bootstrap.js
+          node --check scripts/validate-upgrade-change-ip-fixes.js
+          node scripts/validate-upgrade-change-ip-fixes.js
+          node scripts/validate-clean-ip-runtime.js
+          pm2 restart hamoonbot --update-env
+          sleep 5
+          STATUS="$(pm2 jlist | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const a=JSON.parse(s||"[]").find(x=>x.name==="hamoonbot");process.stdout.write(a?.pm2_env?.status||"missing")})')"
+          UNSTABLE="$(pm2 jlist | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const a=JSON.parse(s||"[]").find(x=>x.name==="hamoonbot");process.stdout.write(String(a?.pm2_env?.unstable_restarts||0))})')"
+          echo "HAMOONBOT_STATUS=$STATUS"
+          echo "HAMOONBOT_UNSTABLE_RESTARTS=$UNSTABLE"
+          test "$STATUS" = "online"
+          test "$UNSTABLE" = "0"
+          echo '=== FIX MARKERS ==='
+          grep -q 'HETZNER_UPGRADE_RECOVERED_POWER' hetzner-upgrade-safety-bootstrap.js
+          grep -q 'HETZNER_CHANGE_IP_INCONCLUSIVE_RETRY' services/hetzner-clean-ip-change.js
+          echo 'upgrade_recovery=present'
+          echo 'change_ip_inconclusive_retry=present'
+          echo '=== AFTER ==='
+          git rev-parse --short HEAD
+          REMOTE
