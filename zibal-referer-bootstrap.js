@@ -2,7 +2,7 @@
 
 function applyZibalRefererPatches(source) {
   const direct = 'const payUrl = `https://gateway.zibal.ir/start/${trackId}`;';
-  const intermediary = 'const payUrl = `https://hamooncloud.ir/payment/start/${trackId}`;';
+  const intermediary = 'const payUrl = `https://pay.hamooncloud.ir/payment/start/${trackId}`;';
 
   const count = String(source).split(direct).length - 1;
   if (count !== 1) {
