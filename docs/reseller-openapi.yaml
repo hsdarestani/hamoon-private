@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: HamoonCloud Reseller API
-  version: 1.0.0
+  version: 1.1.0
   description: Backend API for HamoonCloud reseller integrations.
 servers:
   - url: https://pay.hamooncloud.ir/api/v1
@@ -22,7 +22,7 @@ paths:
         '401': { $ref: '#/components/responses/AuthError' }
   /usage:
     get:
-      summary: Get API usage summary
+      summary: Get API/account usage summary
       responses:
         '200': { description: Usage summary }
   /prices:
@@ -64,6 +64,84 @@ paths:
         '200': { description: Server deleted }
         '404': { $ref: '#/components/responses/ApiError' }
         '409': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/name:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    patch:
+      summary: Set or clear HamoonCloud server display name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+      responses:
+        '200': { description: Display name updated or cleared }
+        '400': { $ref: '#/components/responses/ApiError' }
+        '404': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/reset-password:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Reset server root password
+      responses:
+        '200': { description: Password reset; root_password is returned once }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+        '502': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/snapshots:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      summary: List snapshots created from this server
+      responses:
+        '200': { description: Snapshot list }
+        '404': { $ref: '#/components/responses/ApiError' }
+    post:
+      summary: Create a snapshot
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string, maxLength: 255 }
+      responses:
+        '202': { description: Snapshot creation started }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/rebuild:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    post:
+      summary: Rebuild server with an allowed image
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string }
+      responses:
+        '202': { description: Rebuild started }
+        '400': { $ref: '#/components/responses/ApiError' }
+        '403': { $ref: '#/components/responses/ApiError' }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/traffic:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      summary: Get current Hetzner traffic counters in bytes
+      responses:
+        '200': { description: Incoming, outgoing, used, included, remaining and overage traffic counters }
+        '404': { $ref: '#/components/responses/ApiError' }
   /servers/{id}/poweron:
     parameters:
       - $ref: '#/components/parameters/ServerId'
@@ -95,7 +173,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/ServerId'
     post:
-      summary: Upgrade server type
+      summary: Upgrade / resize server type
       requestBody:
         required: true
         content:
