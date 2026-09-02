@@ -29,7 +29,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect production failures
+      - name: Inspect exact incidents
         shell: bash
         run: |
           set -euo pipefail
@@ -38,27 +38,30 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
-          echo '=== HEAD ==='
-          git rev-parse --short HEAD
-          echo '=== UPGRADE SOURCE MATCHES ==='
-          grep -RniE 'handleHetznerUpgrade|upgradeServer|change_server_type|server_type|ارتقا' --exclude-dir=node_modules --exclude='*.log' . | head -n 220 || true
-          echo '=== CHANGE IP SOURCE MATCHES ==='
-          grep -RniE 'changeHetznerPublicIp|clean-ip|CHANGE_IP|IP قبلی|نتیجه قطعی نداد|provider.*missing|server.*not found' --exclude-dir=node_modules --exclude='*.log' . | head -n 260 || true
-          echo '=== RECENT BOT FAILURE LOGS ==='
-          pm2 logs hamoonbot --lines 5000 --nostream 2>/dev/null | grep -Ei 'upgrade|change.?ip|clean.?ip|server.?type|not found|404|quality|inconclusive|rollback|power|off|shutdown|resume|suspend' | tail -n 500 || true
-          echo '=== RECENT SERVER EVENTS ==='
-          if [ -f server_events.log ]; then
-            tail -n 8000 server_events.log | grep -Ei 'upgrade|change.?ip|clean.?ip|quality|rotation|not found|provider_missing' | tail -n 500 || true
-          fi
-          echo '=== RECENT HETZNER PURCHASES ==='
+          OUT="$HOME/.pm2/logs/hamoonbot-out.log"
+          ERR="$HOME/.pm2/logs/hamoonbot-error.log"
+          echo '=== UPGRADE FAILURE CONTEXT ==='
+          for f in "$OUT" "$ERR"; do
+            [ -f "$f" ] || continue
+            grep -n -B 3 -A 12 "\[HETZNER_UPGRADE\]" "$f" | tail -n 450 || true
+          done
+          echo '=== REPORTED IP CONTEXT 5.75.195.244 ==='
+          for f in "$OUT" "$ERR" server_events.log; do
+            [ -f "$f" ] || continue
+            grep -n -B 12 -A 18 '5\.75\.195\.244' "$f" | tail -n 300 || true
+          done
+          echo '=== RECENT CHANGE IP ERRORS WITH IDs ==='
+          for f in "$OUT" "$ERR"; do
+            [ -f "$f" ] || continue
+            grep -n -B 2 -A 14 -E 'HETZNER_CHANGE_IP\]|HETZNER_CHANGE_IP_ROLLBACK_FAILED|IP_QUALITY_CHECK_UNAVAILABLE' "$f" | tail -n 500 || true
+          done
+          echo '=== PURCHASE MATCH FOR REPORTED IP ==='
           node <<'NODE'
           require('dotenv').config();
-          const mysql = require('mysql2/promise');
-          (async () => {
-            const conn = await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
-            const [rows] = await conn.execute(`SELECT telegram_id,server_id,server_name,flavor_id,status,public_ip,lifecycle_error_code,lifecycle_updated_at,updated_at FROM purchases WHERE datacenter LIKE 'hetzner%' ORDER BY updated_at DESC LIMIT 80`);
-            for (const r of rows) console.log(JSON.stringify(r));
-            await conn.end();
-          })().catch(e => { console.error('DB_DIAG_ERROR', e.code || e.message); process.exitCode=1; });
+          const mysql=require('mysql2/promise');
+          (async()=>{const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+          const [r]=await c.execute("SELECT telegram_id,server_id,server_name,datacenter,flavor_id,status,public_ip,updated_at FROM purchases WHERE public_ip=? ORDER BY updated_at DESC",['5.75.195.244']);
+          r.forEach(x=>console.log(JSON.stringify(x)));
+          await c.end();})().catch(e=>{console.error('DB',e.code||e.message);process.exitCode=1});
           NODE
           REMOTE
