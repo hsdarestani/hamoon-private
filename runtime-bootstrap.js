@@ -14,6 +14,7 @@ const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-b
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
 const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
+const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
@@ -33,10 +34,6 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
-    // A rejected candidate is always re-verified transactionally before commit.
-    // Do not let old rejection history become a multi-day local blacklist when
-    // Hetzner legitimately recycles its finite Primary IPv4 pool. The general
-    // recent-IP cooldown below still prevents immediate same-request bouncing.
     HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0'
   };
   for (const [key, value] of Object.entries(forced)) process.env[key] = value;
@@ -72,7 +69,9 @@ function applyPatches(coreSource) {
                 applyHetznerTrafficPatches(
                   applyFeaturePatches(
                     applyHetznerPendingDeliveryRecoveryPatches(
-                      applyProviderVisibilityPatches(coreSource)
+                      applyProviderVisibilityPatches(
+                        applyZibalRefererPatches(coreSource)
+                      )
                     )
                   )
                 )
