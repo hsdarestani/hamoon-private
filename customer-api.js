@@ -6,7 +6,8 @@ const cloud = require('./cloud-api');
 const datacenters = require('./datacenters');
 const lifecycle = require('./services/hetzner-lifecycle');
 const { changeHetznerPublicIp, userMessageForError: changeIpUserMessage } = require('./services/hetzner-change-ip');
-const { getHetznerSellablePlans, createOrGetSshKey } = require('./Hetzner/hetzner-api');
+const { getHetznerSellablePlans, createOrGetSshKey, hetznerRequest } = require('./Hetzner/hetzner-api');
+const { normalizeServerDisplayName, setServerDisplayName, clearServerDisplayName } = require('./server-display-names');
 
 const minuteBuckets = new Map();
 function apiError(res, status, code, message, details) {
@@ -37,6 +38,10 @@ function finitePositive(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
+function nonNegativeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
 
 function isHetznerDc(dcConfigOrKey) {
   if (!dcConfigOrKey) return false;
@@ -56,6 +61,21 @@ async function findUserHetznerPurchase(telegramId, serverId) {
 }
 function publicIpFromServer(srv) {
   return srv?.public_net?.ipv4?.ip || srv?.addresses?.public?.find?.(a => Number(a.version) === 4)?.addr || srv?.public_ip || null;
+}
+function purchaseDc(purchase) {
+  return datacenters[purchase?.datacenter] || datacenters.hetzner;
+}
+function ensureHetznerDc(res, purchase) {
+  const dc = purchaseDc(purchase);
+  if (!dc || !isHetznerDc(dc)) {
+    apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');
+    return null;
+  }
+  return dc;
+}
+function sanitizeSnapshotDescription(value, serverId) {
+  const text = String(value || `HamoonCloud snapshot ${serverId}`).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  return text.slice(0, 255) || `HamoonCloud snapshot ${serverId}`;
 }
 
 async function auth(req, res, next) {
@@ -141,7 +161,7 @@ function createCustomerApiRouter() {
 
   router.get('/servers/:id', userPurchase, async (req, res, next) => {
     try {
-      const dc = datacenters[req.purchase.datacenter] || datacenters.hetzner;
+      const dc = purchaseDc(req.purchase);
       let provider = null;
       try {
         const srv = await cloud.getServer(dc, null, req.params.id);
@@ -282,7 +302,8 @@ function createCustomerApiRouter() {
 
   router.post('/servers/:id/poweron', userPurchase, async (req, res, next) => {
     try {
-      await cloud.resumeServer(datacenters[req.purchase.datacenter], null, req.params.id);
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      await cloud.resumeServer(dc, null, req.params.id);
       await db.updateScopedStatus?.(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter, 'active');
       res.json({ ok: true, status: 'active' });
     } catch (e) { next(e); }
@@ -290,7 +311,8 @@ function createCustomerApiRouter() {
 
   router.post('/servers/:id/poweroff', userPurchase, async (req, res, next) => {
     try {
-      await cloud.suspendServer(datacenters[req.purchase.datacenter], null, req.params.id);
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      await cloud.suspendServer(dc, null, req.params.id);
       await db.updateScopedStatus?.(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter, 'stopped');
       res.json({ ok: true, status: 'stopped' });
     } catch (e) { next(e); }
@@ -298,14 +320,122 @@ function createCustomerApiRouter() {
 
   router.post('/servers/:id/reboot', userPurchase, (_req, res) => apiError(res, 501, 'UNSUPPORTED_ACTION', 'ریبوت مستقیم در این نسخه فعال نیست.'));
 
+  router.patch('/servers/:id/name', userPurchase, async (req, res, next) => {
+    try {
+      const input = requestInput(req);
+      if (!Object.prototype.hasOwnProperty.call(input, 'name')) return apiError(res, 400, 'NAME_REQUIRED', 'فیلد name الزامی است.');
+      const rawName = String(input.name ?? '').trim();
+      if (!rawName) {
+        await clearServerDisplayName(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter);
+        return res.json({ ok: true, status: 'name_cleared', name: null });
+      }
+      const name = normalizeServerDisplayName(rawName);
+      await setServerDisplayName(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter, name);
+      return res.json({ ok: true, status: 'renamed', name });
+    } catch (e) { next(e); }
+  });
+
+  router.post('/servers/:id/reset-password', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const rootPassword = await cloud.resetServerPassword(dc, null, req.params.id);
+      if (!rootPassword) return apiError(res, 502, 'ROOT_PASSWORD_UNAVAILABLE', 'Hetzner رمز جدید را در پاسخ برنگرداند.');
+      return res.json({ ok: true, status: 'password_reset', root_password: rootPassword });
+    } catch (e) { next(e); }
+  });
+
+  router.post('/servers/:id/snapshots', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const input = requestInput(req);
+      const data = await hetznerRequest(dc, 'POST', `/servers/${encodeURIComponent(req.params.id)}/actions/create_image`, {
+        type: 'snapshot',
+        description: sanitizeSnapshotDescription(input.description, req.params.id)
+      });
+      return res.status(202).json({
+        ok: true,
+        status: 'snapshot_creating',
+        snapshot: data?.image ? {
+          id: String(data.image.id),
+          name: data.image.name || null,
+          description: data.image.description || null,
+          status: data.image.status || null,
+          type: data.image.type || 'snapshot',
+          created: data.image.created || null
+        } : null,
+        action: data?.action ? { id: String(data.action.id), status: data.action.status || null } : null
+      });
+    } catch (e) { next(e); }
+  });
+
+  router.get('/servers/:id/snapshots', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const data = await hetznerRequest(dc, 'GET', `/images?type=snapshot&sort=created:desc&per_page=100`);
+      const serverId = String(req.params.id);
+      const snapshots = (data?.images || [])
+        .filter(image => String(image?.created_from?.id || '') === serverId)
+        .map(image => ({
+          id: String(image.id),
+          name: image.name || null,
+          description: image.description || null,
+          status: image.status || null,
+          type: image.type || 'snapshot',
+          created: image.created || null,
+          size: image.image_size || null
+        }));
+      return res.json({ ok: true, snapshots });
+    } catch (e) { next(e); }
+  });
+
+  router.post('/servers/:id/rebuild', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const input = requestInput(req);
+      const image = String(input.image || '').trim();
+      if (!image) return apiError(res, 400, 'IMAGE_REQUIRED', 'فیلد image الزامی است.');
+      if (!isAllowed(req.apiClient.allowed_images, image)) return apiError(res, 403, 'NOT_ALLOWED', 'این ایمیج برای این کلاینت مجاز نیست.');
+      const result = await cloud.rebuildServer(dc, null, req.params.id, image);
+      return res.status(202).json({
+        ok: true,
+        status: 'rebuilding',
+        image,
+        root_password: result?.root_password || null,
+        action: result?.action ? { id: String(result.action.id), status: result.action.status || null } : null
+      });
+    } catch (e) { next(e); }
+  });
+
+  router.get('/servers/:id/traffic', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const data = await hetznerRequest(dc, 'GET', `/servers/${encodeURIComponent(req.params.id)}`);
+      const server = data?.server || {};
+      const incoming = nonNegativeNumber(server.ingoing_traffic);
+      const outgoing = nonNegativeNumber(server.outgoing_traffic);
+      const included = nonNegativeNumber(server.included_traffic);
+      const used = incoming + outgoing;
+      return res.json({
+        ok: true,
+        traffic: {
+          ingoing_bytes: incoming,
+          outgoing_bytes: outgoing,
+          used_bytes: used,
+          included_bytes: included,
+          remaining_bytes: Math.max(0, included - used),
+          overage_bytes: Math.max(0, used - included)
+        }
+      });
+    } catch (e) { next(e); }
+  });
+
   router.post('/servers/:id/change-ip', userPurchase, async (req, res, next) => {
     try {
       const status = String(req.purchase.status || '').toLowerCase();
       if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) {
         return apiError(res, 409, 'SERVER_STATE_CONFLICT', 'وضعیت فعلی سرور اجازه تغییر IP را نمی‌دهد.');
       }
-      const dc = datacenters[req.purchase.datacenter] || datacenters.hetzner;
-      if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
       const result = await changeHetznerPublicIp({
         db,
         dc,
@@ -325,7 +455,7 @@ function createCustomerApiRouter() {
   router.post('/servers/:id/upgrade', userPurchase, async (req, res, next) => {
     try {
       const input = requestInput(req);
-      const dc = datacenters[req.purchase.datacenter] || datacenters.hetzner;
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
       const plans = await getHetznerSellablePlans(dc);
       const target = plans.find(p => String(p.id || '').toLowerCase() === String(input.target_server_type || '').toLowerCase());
       if (!target || target.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن هدف معتبر نیست.');
@@ -338,9 +468,13 @@ function createCustomerApiRouter() {
 
   router.use((err, _req, res, _next) => {
     console.error('[CUSTOMER_API_ERROR]', err.code || err.message);
+    const providerStatus = Number(err?.status || err?.response?.status || 0);
+    const providerCode = String(err?.data?.error?.code || err?.response?.data?.error?.code || '').toUpperCase();
+    const providerMessage = String(err?.data?.error?.message || err?.response?.data?.error?.message || '').trim();
+    if (err.code === 'DISPLAY_NAME_TOO_LONG') return apiError(res, 400, 'NAME_TOO_LONG', err.message);
     if (err.code === 'HETZNER_PLACEMENT_UNAVAILABLE') return apiError(res, 409, 'HETZNER_PLACEMENT_UNAVAILABLE', lifecycle.safeProviderMessage(err));
-    if (err.code === 'NOT_FOUND') return apiError(res, 404, 'SERVER_NOT_FOUND', 'سرور پیدا نشد.');
-    if (err.code === 'OPERATION_IN_PROGRESS') return apiError(res, 409, 'OPERATION_IN_PROGRESS', changeIpUserMessage(err));
+    if (err.code === 'NOT_FOUND' || providerStatus === 404) return apiError(res, 404, 'SERVER_NOT_FOUND', 'سرور یا منبع موردنظر پیدا نشد.');
+    if (err.code === 'OPERATION_IN_PROGRESS' || providerStatus === 423) return apiError(res, 409, 'OPERATION_IN_PROGRESS', changeIpUserMessage(err));
     if (err.code === 'INVALID_SERVER_STATE') return apiError(res, 409, 'SERVER_STATE_CONFLICT', changeIpUserMessage(err));
     if (err.code === 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE') return apiError(res, 409, 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE', changeIpUserMessage(err));
     if (err.code === 'PRIMARY_IPV4_NOT_FOUND') return apiError(res, 502, 'PRIMARY_IPV4_NOT_FOUND', changeIpUserMessage(err));
@@ -348,7 +482,13 @@ function createCustomerApiRouter() {
     if (err.code === 'CANDIDATE_REJECTED') return apiError(res, 409, 'CANDIDATE_REJECTED', changeIpUserMessage(err));
     if (err.code === 'CANDIDATE_REJECTED_ROLLBACK_FAILED') return apiError(res, 502, 'CANDIDATE_REJECTED_ROLLBACK_FAILED', changeIpUserMessage(err));
     if (err.code === 'OLD_PRIMARY_IP_CLEANUP_FAILED') return apiError(res, 502, 'OLD_PRIMARY_IP_CLEANUP_FAILED', changeIpUserMessage(err));
-    if (err.code === 'CONFLICT') return apiError(res, 409, 'SERVER_STATE_CONFLICT', 'وضعیت فعلی سرور اجازه این عملیات را نمی‌دهد.');
+    if (err.code === 'CONFLICT' || providerStatus === 409 || providerCode === 'CONFLICT') {
+      return apiError(res, 409, 'SERVER_STATE_CONFLICT', providerMessage || 'وضعیت فعلی سرور اجازه این عملیات را نمی‌دهد.');
+    }
+    if (providerStatus >= 400 && providerStatus < 500) {
+      return apiError(res, providerStatus, providerCode || 'PROVIDER_REQUEST_FAILED', providerMessage || 'درخواست توسط Hetzner رد شد.');
+    }
+    if (providerStatus >= 500) return apiError(res, 502, 'PROVIDER_ERROR', 'Hetzner در حال حاضر پاسخ معتبر برنگرداند.');
     return apiError(res, 500, 'INTERNAL_ERROR', 'خطای داخلی رخ داد.');
   });
   return router;
