@@ -88,9 +88,20 @@ async function verifyCleanCandidate(ip, args = {}) {
 
 async function changeHetznerPublicIp(args) {
   const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 20, 1, 30);
+  // A Check-Host round can occasionally return no conclusive Iranian probes while
+  // all global probes are healthy. Provisioning already tolerates this by rotating
+  // to another candidate; manual Change-IP must behave the same way instead of
+  // aborting after the first inconclusive candidate.
+  const maxInconclusiveCandidates = clampInt(
+    process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
+    4,
+    1,
+    10
+  );
   let firstOldIp = null;
   let lastCandidateIp = null;
   let lastVerification = null;
+  let inconclusiveCandidates = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -148,11 +159,26 @@ async function changeHetznerPublicIp(args) {
         });
 
         if (!verification?.definitive) {
+          inconclusiveCandidates += 1;
+          if (attempt < maxAttempts && inconclusiveCandidates < maxInconclusiveCandidates) {
+            console.warn('[HETZNER_CHANGE_IP_INCONCLUSIVE_RETRY]', {
+              server_id: String(args.serverId),
+              attempt,
+              inconclusive_candidates: inconclusiveCandidates,
+              max_inconclusive_candidates: maxInconclusiveCandidates,
+              candidate_ip: error.candidateIp || null,
+              restored_ip: error.oldIp || firstOldIp || null
+            });
+            await sleep(1200);
+            continue;
+          }
+
           const unavailable = new Error('IP_QUALITY_CHECK_UNAVAILABLE');
           unavailable.code = 'IP_QUALITY_CHECK_UNAVAILABLE';
           unavailable.currentIp = error.oldIp || firstOldIp || null;
           unavailable.candidateIp = error.candidateIp || null;
           unavailable.verification = verification;
+          unavailable.inconclusiveCandidates = inconclusiveCandidates;
           throw unavailable;
         }
         continue;
@@ -183,7 +209,7 @@ function userMessageForError(error) {
   const code = String(error?.code || error?.message || '');
   if (code === 'IP_QUALITY_CHECK_UNAVAILABLE') {
     const suffix = error?.currentIp ? `\nIP قبلی حفظ شد: ${error.currentIp}` : '';
-    return `سرویس بررسی دسترسی از ایران فعلاً نتیجه قطعی نداد. برای جلوگیری از قطعی، IP جدید اعمال نشد و ربات به IP قبلی برگشت.${suffix}`;
+    return `چند IP جدید بررسی شد اما سرویس بررسی دسترسی از ایران هنوز نتیجه قطعی نداد. برای جلوگیری از قطعی، هیچ IP تأییدنشده‌ای اعمال نشد و ربات به IP قبلی برگشت.${suffix}`;
   }
   if (code === 'NO_CLEAN_IPV4_AVAILABLE') {
     const suffix = error?.currentIp ? `\nIP قبلی حفظ شد: ${error.currentIp}` : '';
