@@ -10,8 +10,6 @@ All requests and responses use JSON. API keys must only be stored on the reselle
 
 ## Authentication
 
-Send the reseller key as a Bearer token:
-
 ```http
 Authorization: Bearer hm_live_xxxxxxxxxxxxxxxxx
 ```
@@ -25,68 +23,30 @@ curl https://pay.hamooncloud.ir/api/v1/me \
 
 A missing/invalid key returns HTTP `401`.
 
-## Quick start
+## Account endpoints
 
-1. Call `GET /me` to verify the API key and account limits.
-2. Call `GET /wallet` to check reseller wallet balance.
-3. Call `GET /prices` to fetch currently sellable plans and reseller prices.
-4. Call `POST /servers` to create a server.
-5. Poll `GET /servers/{id}` until the provider status/IP is available.
-6. Manage the server with power on/off, IP change or delete endpoints.
-
-## Endpoints
-
-### Account
-
-#### `GET /me`
+### `GET /me`
 Returns the authenticated reseller API client and configured limits.
 
-```bash
-curl https://pay.hamooncloud.ir/api/v1/me \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
-
-#### `GET /wallet`
+### `GET /wallet`
 Returns current reseller wallet balance.
 
-```bash
-curl https://pay.hamooncloud.ir/api/v1/wallet \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
+### `GET /usage`
+Returns API-client usage summary. This is API/account usage, not per-server network traffic.
 
-#### `GET /usage`
-Returns API-client usage summary.
+### `GET /prices`
+Returns currently sellable Hetzner plans and reseller prices. Always use this endpoint instead of hard-coding plan prices.
 
-#### `GET /prices`
-Returns currently sellable Hetzner plans and reseller prices.
+## Server endpoints
 
-```bash
-curl https://pay.hamooncloud.ir/api/v1/prices \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
-
-Always use prices returned by this endpoint instead of hard-coding them.
-
-### Servers
-
-#### `GET /servers`
+### `GET /servers`
 Returns servers owned by this reseller account.
 
-```bash
-curl https://pay.hamooncloud.ir/api/v1/servers \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
+### `GET /servers/{id}`
+Returns the reseller purchase record and current provider information when available, including status, public IPv4, server type and location.
 
-#### `GET /servers/{id}`
-Returns the reseller purchase record and, when available, current provider information such as status, public IPv4, server type and location.
-
-```bash
-curl https://pay.hamooncloud.ir/api/v1/servers/123456 \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
-
-#### `POST /servers`
-Creates a new server. JSON body is recommended. Query parameters are also accepted for backward compatibility; if both are sent, JSON body values win.
+### `POST /servers`
+Creates a new server.
 
 Example:
 
@@ -103,67 +63,125 @@ curl -X POST https://pay.hamooncloud.ir/api/v1/servers \
   }'
 ```
 
-Supported input fields:
+Supported creation fields: `server_type` (required), `name`, `image`, `location`, `duration`, `datacenter`, and `ssh_key`.
 
-| Field | Required | Notes |
-|---|---:|---|
-| `server_type` | yes | Use an ID/type returned by `GET /prices` |
-| `name` | no | Server name, sanitized to provider-safe characters |
-| `image` | no | Default: `ubuntu-24.04`; must be allowed for the reseller |
-| `location` | no | Must be an allowed location |
-| `duration` | no | `hourly` or `monthly`; default: `hourly` |
-| `datacenter` | no | Current reseller production scope is Hetzner |
-| `ssh_key` | no | Public SSH key, max 4096 characters |
+### `PATCH /servers/{id}/name`
+Changes the HamoonCloud display name for the server. The name may contain normal Unicode text and is limited to 64 characters. Send an empty name to clear the custom display name and return to the technical server name.
 
-Successful creation returns HTTP `202`. Provisioning is asynchronous. Example shape (the `price` value is illustrative only):
+```bash
+curl -X PATCH https://pay.hamooncloud.ir/api/v1/servers/123456/name \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Customer Production"}'
+```
+
+Success:
+
+```json
+{ "ok": true, "status": "renamed", "name": "Customer Production" }
+```
+
+### `POST /servers/{id}/reset-password`
+Requests a new root password from Hetzner and returns it once in the response. Store/transmit this value securely and do not log it.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/reset-password \
+  -H "Authorization: Bearer $HAMOON_API_KEY"
+```
+
+Success:
 
 ```json
 {
   "ok": true,
-  "operation": "provisioning",
-  "server": {
-    "id": "123456",
-    "name": "customer-001",
-    "status": "provisioning",
-    "public_ip": "203.0.113.10",
-    "server_type": "cpx22",
-    "image": "ubuntu-24.04",
-    "location": "nbg1",
-    "duration": "monthly",
-    "price": 350000
+  "status": "password_reset",
+  "root_password": "NEW_ROOT_PASSWORD"
+}
+```
+
+### `POST /servers/{id}/snapshots`
+Creates a Hetzner snapshot for the server. Snapshot creation is asynchronous.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/snapshots \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Before application upgrade"}'
+```
+
+Success returns HTTP `202` with the snapshot/image and provider action IDs when available.
+
+### `GET /servers/{id}/snapshots`
+Lists snapshots created from that server.
+
+```bash
+curl https://pay.hamooncloud.ir/api/v1/servers/123456/snapshots \
+  -H "Authorization: Bearer $HAMOON_API_KEY"
+```
+
+### `POST /servers/{id}/rebuild`
+Rebuilds the server using an allowed image. This operation replaces the server operating system/data on the server disk, so it must be treated as destructive.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/rebuild \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"ubuntu-24.04"}'
+```
+
+Success returns HTTP `202`. If Hetzner generates a new root password during rebuild, it is returned as `root_password`; otherwise the field is `null`.
+
+### `POST /servers/{id}/upgrade`
+Changes the Hetzner server type to another allowed plan.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/upgrade \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"target_server_type":"cpx32","upgrade_disk":false}'
+```
+
+Use `GET /prices` to obtain valid target plan IDs. `upgrade_disk=true` permanently enlarges the disk where supported and normally prevents later downsizing to a smaller disk.
+
+### `GET /servers/{id}/traffic`
+Returns current Hetzner traffic counters in bytes.
+
+```bash
+curl https://pay.hamooncloud.ir/api/v1/servers/123456/traffic \
+  -H "Authorization: Bearer $HAMOON_API_KEY"
+```
+
+Response shape:
+
+```json
+{
+  "ok": true,
+  "traffic": {
+    "ingoing_bytes": 1200000000,
+    "outgoing_bytes": 3400000000,
+    "used_bytes": 4600000000,
+    "included_bytes": 21990232555520,
+    "remaining_bytes": 21985632555520,
+    "overage_bytes": 0
   }
 }
 ```
 
-`public_ip` can still be `null` during early provisioning. Poll `GET /servers/{id}` instead of assuming the IP is immediately ready.
+### `POST /servers/{id}/poweroff`
+Powers off the server.
 
-The API checks account permissions, wallet balance/reserve, server count limit and configured spending limits before creating a server. If provider creation succeeds but the local purchase record cannot be saved, the API performs a best-effort cleanup of the provider-side server.
+### `POST /servers/{id}/poweron`
+Powers on the server.
 
-#### `POST /servers/{id}/poweroff`
-Turns off/suspends a server owned by the reseller account.
-
-```bash
-curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/poweroff \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
-
-#### `POST /servers/{id}/poweron`
-Turns on/resumes a server owned by the reseller account.
-
-```bash
-curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/poweron \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
-
-#### `POST /servers/{id}/change-ip`
-Replaces the current Hetzner Primary IPv4 with a newly allocated IPv4. The operation temporarily powers the server off, swaps the Primary IP, powers the server back on and persists the new public IP. If the swap fails after a candidate IP is allocated, the service attempts to restore the previous IP automatically.
+### `POST /servers/{id}/change-ip`
+Replaces the current Hetzner Primary IPv4 with a newly allocated IPv4. The operation can temporarily power the server off and back on.
 
 ```bash
 curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/change-ip \
   -H "Authorization: Bearer $HAMOON_API_KEY"
 ```
 
-Successful response:
+Success:
 
 ```json
 {
@@ -174,31 +192,28 @@ Successful response:
 }
 ```
 
-Manual API IP change is allowed only while the purchase is in `active`, `running`, `suspended`, `stopped` or `shutoff` state. Concurrent lifecycle operations return HTTP `409`.
-
-#### `DELETE /servers/{id}`
+### `DELETE /servers/{id}`
 Permanently deletes a server through the HamoonCloud lifecycle service.
 
-```bash
-curl -X DELETE https://pay.hamooncloud.ir/api/v1/servers/123456 \
-  -H "Authorization: Bearer $HAMOON_API_KEY"
-```
+Direct reboot is not advertised in v1 and currently returns `501 UNSUPPORTED_ACTION`.
 
-### Optional management endpoint
+## Management endpoint summary
 
-#### `POST /servers/{id}/upgrade`
-Changes the server type to another allowed plan.
+| Feature | Method | Endpoint |
+|---|---|---|
+| Rename/display name | `PATCH` | `/servers/{id}/name` |
+| Reset root password | `POST` | `/servers/{id}/reset-password` |
+| Create snapshot | `POST` | `/servers/{id}/snapshots` |
+| List snapshots | `GET` | `/servers/{id}/snapshots` |
+| Rebuild | `POST` | `/servers/{id}/rebuild` |
+| Upgrade / Resize | `POST` | `/servers/{id}/upgrade` |
+| Traffic usage | `GET` | `/servers/{id}/traffic` |
+| Power on | `POST` | `/servers/{id}/poweron` |
+| Power off | `POST` | `/servers/{id}/poweroff` |
+| Change IPv4 | `POST` | `/servers/{id}/change-ip` |
+| Delete server | `DELETE` | `/servers/{id}` |
 
-```bash
-curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/upgrade \
-  -H "Authorization: Bearer $HAMOON_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"target_server_type":"cpx32","upgrade_disk":false}'
-```
-
-Direct reboot is not advertised in v1 and currently returns `501 UNSUPPORTED_ACTION` rather than reporting a fake successful operation.
-
-## Common errors
+## Errors
 
 Errors use this shape:
 
@@ -212,50 +227,20 @@ Errors use this shape:
 }
 ```
 
-Common codes:
-
-| HTTP | Code | Meaning |
-|---:|---|---|
-| 401 | `AUTH_REQUIRED` | Bearer API key missing |
-| 401 | `INVALID_API_KEY` | Key invalid, revoked or inactive |
-| 402 | `INSUFFICIENT_WALLET` | Wallet does not cover the server price plus configured reserve |
-| 403 | `NOT_ALLOWED` | Plan/image/location not allowed for this reseller |
-| 403 | `SERVER_LIMIT_REACHED` | Maximum active server count reached |
-| 403 | `MONTHLY_SPEND_LIMIT_REACHED` | Configured monthly spending limit reached |
-| 403 | `HOURLY_SPEND_LIMIT_REACHED` | Requested hourly plan exceeds configured limit |
-| 404 | `SERVER_NOT_FOUND` | Server is not owned by this reseller account or does not exist |
-| 409 | `HETZNER_PLACEMENT_UNAVAILABLE` | Provider cannot currently place the requested server |
-| 409 | `OPERATION_IN_PROGRESS` | Another lifecycle operation is already active |
-| 409 | `SERVER_STATE_CONFLICT` | Current server state does not allow the requested operation |
-| 409 | `NO_UNUSED_PRIMARY_IPV4_AVAILABLE` | Hetzner did not return a usable IP candidate outside the reuse cooldown |
-| 429 | `RATE_LIMITED` | Request rate exceeded |
-| 501 | `UNSUPPORTED_ACTION` | Endpoint/action intentionally not available in v1 |
-| 502 | `PRIMARY_IPV4_NOT_FOUND` | Current Primary IPv4 information could not be resolved from Hetzner |
-| 502 | `OLD_PRIMARY_IP_CLEANUP_FAILED` | IP swap cleanup failed and rollback was attempted |
-| 504 | `NEW_IP_NOT_READY` | New IP did not become ready before the operation timeout |
+Common codes include `AUTH_REQUIRED`, `INVALID_API_KEY`, `NOT_ALLOWED`, `SERVER_NOT_FOUND`, `SERVER_STATE_CONFLICT`, `OPERATION_IN_PROGRESS`, `RATE_LIMITED`, `IMAGE_REQUIRED`, `NAME_REQUIRED`, `NAME_TOO_LONG`, `ROOT_PASSWORD_UNAVAILABLE`, and provider-specific errors.
 
 Every API response includes an `X-Request-Id` header for troubleshooting.
 
 ## Rate limits
 
-Current application-level limits are conservative per API key:
+- Read requests: up to 60 requests/minute per API key.
+- Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`): up to 10 requests/minute per API key.
 
-- Read requests: up to 60 requests/minute.
-- Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`): up to 10 requests/minute.
-
-Contact HamoonCloud before designing integrations that require higher sustained rates.
-
-## Security requirements for resellers
+## Security requirements
 
 - Keep the API key only in backend/server-side secrets.
-- Never ship it inside JavaScript bundles, Android/iOS apps, public repositories or customer-visible responses.
-- Use HTTPS production URL only.
-- Give each reseller its own API client and key; never share one key between unrelated resellers.
-- Revoke and rotate a key immediately if it is exposed.
-- Do not expose provider credentials or HamoonCloud internal credentials to end customers.
-
-## Recommended reseller flow
-
-Your customer pays you -> your backend checks HamoonCloud price/balance -> your backend calls `POST /servers` -> save the returned server ID -> poll `GET /servers/{id}` -> show only the customer-facing server information in your own panel/bot.
-
-The final resale price is controlled by the reseller. HamoonCloud API returns the configured reseller/base price; any markup or customer billing logic belongs to the reseller application.
+- Never expose the API key in frontend JavaScript, mobile apps or public source code.
+- Treat `root_password` as a secret and never write it to application logs.
+- Use HTTPS only.
+- Rotate an API key immediately if it is exposed.
+- Rebuild and delete are destructive operations and should require explicit confirmation in the reseller UI.
