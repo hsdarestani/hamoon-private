@@ -37,6 +37,7 @@ mountExternalPayments(app, { db, axios });
 
 const dashboardDir = path.join(__dirname, 'public', 'dashboard');
 const consoleDir = path.join(__dirname, 'public', 'console');
+const clubDir = path.join(__dirname, 'public', 'club');
 const noVncDir = path.join(__dirname, 'node_modules', '@novnc', 'novnc');
 
 app.use('/dashboard', (_req, res, next) => {
@@ -70,6 +71,14 @@ function setConsoleSecurityHeaders(res) {
     'Content-Security-Policy',
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
   );
+}
+
+function setClubHeaders(res) {
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
 }
 
 function allowConsoleExchange(req) {
@@ -119,6 +128,15 @@ app.use('/console/vendor', express.static(noVncDir, {
   maxAge: '1d'
 }));
 app.use('/console', express.static(consoleDir, { index: false, extensions: ['html'], maxAge: 0 }));
+
+app.get(['/club', '/club/', '/club/index.html'], (_req, res) => {
+  setClubHeaders(res);
+  res.sendFile(path.join(clubDir, 'index.html'));
+});
+app.use('/club', (req, res, next) => {
+  setClubHeaders(res);
+  next();
+}, express.static(clubDir, { index: false, extensions: ['html'], maxAge: '5m' }));
 
 app.get(['/dashboard', '/dashboard/', '/dashboard/index.html'], requireDashboardPage, (_req, res) => res.sendFile(path.join(dashboardDir, 'index.html')));
 app.get('/dashboard/login', (_req, res) => res.sendFile(path.join(dashboardDir, 'index.html')));
@@ -175,7 +193,7 @@ app.get('/zibal/callback', async (req, res) => {
   const trackId = String(req.query.trackId || req.query.track_id || '').trim();
   const queryOrderId = String(req.query.orderId || req.query.order_id || '').trim();
   const callbackSuccess = String(req.query.success || '').trim();
-  const merchant = process.env.ZIBAL_MERCHANT_ID || '68985f4ba45c72000bcfd5a2';
+  const merchant = process.env.ZIBAL_MERCHANT_ID || '68985f4ba45c72000bcfd5a2a';
 
   function html(title, message) {
     return `<!doctype html>
@@ -278,16 +296,22 @@ app.get('/zibal/callback', async (req, res) => {
       return res.send(html('پرداخت موفق', `کیف پول شما به مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان شارژ شد. می‌توانید به ربات برگردید.`));
     } catch (e) {
       try { await conn.rollback(); } catch {}
-      console.error('[ZIBAL_CALLBACK] db error:', e.code || e.message);
-      return res.status(500).send(html('خطای ثبت پرداخت', 'پرداخت تأیید شد اما ثبت آن با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.'));
+      console.error('[ZIBAL_CALLBACK] credit failed:', e.message || e);
+      return res.status(500).send(html('خطای ثبت پرداخت', 'پرداخت تأیید شد اما ثبت اعتبار کامل نشد. لطفاً با پشتیبانی تماس بگیرید.'));
     } finally {
       conn.release();
     }
   } catch (e) {
-    console.error('[ZIBAL_CALLBACK] fatal:', e.response?.data || e.message);
-    return res.status(500).send(html('خطای بررسی پرداخت', 'امکان بررسی پرداخت وجود ندارد. لطفاً چند دقیقه بعد با پشتیبانی تماس بگیرید.'));
+    console.error('[ZIBAL_CALLBACK] verify exception:', e.response?.data || e.message || e);
+    return res.status(500).send(html('خطای بررسی پرداخت', 'ارتباط با سرویس پرداخت با مشکل مواجه شد. لطفاً چند دقیقه بعد بررسی کنید.'));
   }
 });
 
-app.use((_req, res) => res.status(404).json({ ok: false, error: 'NOT_FOUND', message: 'مسیر پیدا نشد.' }));
-app.listen(port, () => console.log(`[dashboard-server] listening on ${port}; /dashboard and /console routes enabled`));
+app.use((err, _req, res, _next) => {
+  console.error('[DASHBOARD_SERVER]', err.stack || err.message || err);
+  res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'خطای داخلی سرویس.' });
+});
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`[DASHBOARD_SERVER] listening on 0.0.0.0:${port}`);
+});
