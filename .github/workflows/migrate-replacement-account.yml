@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  dry-run:
+  execute:
     runs-on: ubuntu-latest
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
@@ -38,7 +38,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Inspect replacement-account migration
+      - name: Execute and verify replacement-account migration
         shell: bash
         run: |
           set -euo pipefail
@@ -51,5 +51,5 @@ jobs:
           git checkout main
           git merge --ff-only origin/main
           node --check scripts/migrate-user-account.js
-          node scripts/migrate-user-account.js --dry-run 8248726822 6940016723
+          ACCOUNT_MIGRATION_CONFIRM=YES node scripts/migrate-user-account.js --execute 8248726822 6940016723
           REMOTE
