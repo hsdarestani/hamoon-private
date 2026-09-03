@@ -224,9 +224,8 @@ case '👛 کیف پول': {`,
 
   source = replaceOnce(
     source,
-    `      const newLastBilledAt = hoursSinceLastBill >= cycleHours ? now : lastBilledDate;\n      await updatePurchaseStatus(server_id, 'active', billableFromCreationGb, newLastBilledAt);`,
-    `      const newLastBilledAt = hoursSinceLastBill >= cycleHours ? now : lastBilledDate;
-      if (instanceCost > 0) {
+    "      await updatePurchaseStatus(server_id, billedStatus, billableFromCreationGb, newLastBilledAt);",
+    `      if (instanceCost > 0) {
         await loyaltyClub.recordEligibleSpend({
           telegramId: userId,
           eventKey: \`renewal:\${server_id}:\${new Date(newLastBilledAt).toISOString()}\`,
@@ -244,7 +243,7 @@ case '👛 کیف پول': {`,
           });
         });
       }
-      await updatePurchaseStatus(server_id, 'active', billableFromCreationGb, newLastBilledAt);`,
+      await updatePurchaseStatus(server_id, billedStatus, billableFromCreationGb, newLastBilledAt);`,
     'renewal earning hook'
   );
 
