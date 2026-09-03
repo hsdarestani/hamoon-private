@@ -1,0 +1,115 @@
+name: Deploy Hamoon Loyalty Club
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/loyalty-club.js'
+      - 'loyalty-club-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - '.github/workflows/deploy-loyalty-club.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-loyalty-production
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate loyalty source and runtime patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check services/loyalty-club.js
+          node --check loyalty-club-bootstrap.js
+          node --check runtime-bootstrap.js
+          node <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const output = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          const required = [
+            "require('./services/loyalty-club')",
+            "'🏆 باشگاه هامون'",
+            "case '🏆 باشگاه هامون'",
+            "case 'LOYALTY_REFRESH'"
+          ];
+          for (const marker of required) {
+            if (!output.includes(marker)) throw new Error('Missing loyalty marker: ' + marker);
+          }
+          new Function('require', 'module', 'exports', '__filename', '__dirname', output);
+          console.log('loyalty_runtime_patch_ok=true');
+          NODE
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production bot
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          ENV_BACKUP="$(mktemp)"
+          if [ -f .env ]; then cp .env "$ENV_BACKUP"; fi
+          cleanup() { rm -f "$ENV_BACKUP"; }
+          trap cleanup EXIT
+
+          git checkout -- .env .env.save 2>/dev/null || true
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
+
+          node --check services/loyalty-club.js
+          node --check loyalty-club-bootstrap.js
+          node --check runtime-bootstrap.js
+          node <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const output = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          for (const marker of ["'🏆 باشگاه هامون'", "case 'LOYALTY_REFRESH'"]) {
+            if (!output.includes(marker)) throw new Error('Production runtime patch missing: ' + marker);
+          }
+          new Function('require', 'module', 'exports', '__filename', '__dirname', output);
+          console.log('production_loyalty_patch_ok=true');
+          NODE
+
+          pm2 restart hamoonbot --update-env
+          sleep 5
+          pm2 describe hamoonbot | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+          pm2 pid hamoonbot | grep -Eq '^[1-9][0-9]*$'
+          echo 'loyalty_deploy_ok=true'
+          REMOTE
