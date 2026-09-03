@@ -17,6 +17,7 @@ const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope
 const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
 const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-bootstrap');
 const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
+const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
@@ -62,20 +63,22 @@ function installCleanIpChangeModule() {
 }
 
 function applyPatches(coreSource) {
-  return applyLoyaltyClubPatches(
-    applyResellerBillingGracePatches(
-      applyBillingRenewalGuardPatches(
-        applyHetznerManagementScopePatch(
-          applyHetznerPurchaseArchitecturePatches(
-            applyRebuildPatches(
-              applyBillingCyclePatches(
-                applyHetznerChangeIpPatches(
-                  applyHetznerTrafficPatches(
-                    applyFeaturePatches(
-                      applyHetznerPendingDeliveryRecoveryPatches(
-                        applyProviderVisibilityPatches(
-                          applyHetznerUpgradeSafetyPatches(
-                            applyZibalRefererPatches(coreSource)
+  return applyLoyaltyHistoryPatches(
+    applyLoyaltyClubPatches(
+      applyResellerBillingGracePatches(
+        applyBillingRenewalGuardPatches(
+          applyHetznerManagementScopePatch(
+            applyHetznerPurchaseArchitecturePatches(
+              applyRebuildPatches(
+                applyBillingCyclePatches(
+                  applyHetznerChangeIpPatches(
+                    applyHetznerTrafficPatches(
+                      applyFeaturePatches(
+                        applyHetznerPendingDeliveryRecoveryPatches(
+                          applyProviderVisibilityPatches(
+                            applyHetznerUpgradeSafetyPatches(
+                              applyZibalRefererPatches(coreSource)
+                            )
                           )
                         )
                       )
