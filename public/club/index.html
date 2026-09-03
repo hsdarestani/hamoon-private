@@ -5,112 +5,108 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080b12">
   <title>باشگاه هامون | HamoonCloud</title>
-  <meta name="description" content="قوانین، سطح‌ها، امتیازها و اعتبار باشگاه مشتریان HamoonCloud">
+  <meta name="description" content="سطح‌ها، کش‌بک، امتیاز و قوانین باشگاه مشتریان هامون">
   <style>
-    :root{--bg:#080b12;--panel:#111722;--panel2:#151d2b;--text:#f5f7fb;--muted:#9aa7ba;--line:#263244;--accent:#8bbcff;--good:#83e6b1;--gold:#ffd982;--radius:22px}
+    :root{--bg:#080b12;--panel:#111722;--panel2:#151d2b;--text:#f5f7fb;--muted:#9aa7ba;--line:#263244;--blue:#8bbcff;--green:#83e6b1;--gold:#ffd982}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#17243a 0,transparent 34%),var(--bg);color:var(--text);font-family:Tahoma,Arial,sans-serif;line-height:1.85}
-    .wrap{width:min(1080px,calc(100% - 32px));margin:auto;padding:56px 0 72px}.hero{padding:42px;border:1px solid var(--line);border-radius:30px;background:linear-gradient(145deg,rgba(24,34,51,.92),rgba(10,14,22,.96));box-shadow:0 30px 90px rgba(0,0,0,.25)}
-    .eyebrow{display:inline-flex;gap:8px;align-items:center;padding:6px 12px;border:1px solid #33435d;border-radius:999px;color:#bdcbe0;font-size:13px}.hero h1{font-size:clamp(32px,6vw,58px);line-height:1.2;margin:18px 0 10px}.hero p{max-width:720px;color:var(--muted);font-size:17px;margin:0}.quick{display:flex;gap:12px;flex-wrap:wrap;margin-top:26px}.pill{padding:10px 14px;border-radius:14px;background:#0d1320;border:1px solid var(--line);font-size:14px}.pill b{color:var(--good)}
-    section{margin-top:40px}h2{font-size:24px;margin:0 0 6px}.lead{color:var(--muted);margin:0 0 18px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:22px}.level .icon{font-size:30px}.level h3{margin:7px 0 0;font-size:20px}.level .range{color:var(--muted);font-size:14px}.cash{font-size:25px;font-weight:700;margin-top:14px}.cash small{font-size:12px;font-weight:400;color:var(--muted)}
-    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.step strong{display:block;font-size:16px}.step span{color:var(--muted);font-size:14px}.number{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:#1c2a40;color:#bcd8ff;margin-bottom:12px;font-weight:700}
-    .table{overflow:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel)}table{width:100%;border-collapse:collapse;min-width:540px}th,td{padding:16px 18px;text-align:right;border-bottom:1px solid var(--line)}th{font-size:13px;color:var(--muted);font-weight:500}tr:last-child td{border-bottom:0}.reward{color:var(--good);font-weight:700}
-    .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}.rules{margin:0;padding:0 18px 0 0;color:var(--muted)}.rules li{padding:5px 0}.rules b{color:var(--text)}.streaks{display:flex;gap:10px;flex-wrap:wrap;margin-top:15px}.streak{flex:1;min-width:130px;padding:15px;border:1px solid var(--line);border-radius:16px;background:#0d1320}.streak b{display:block;font-size:22px;color:var(--gold)}
-    .example{background:linear-gradient(135deg,#12223a,#101724);border:1px solid #2a4162}.example .math{font-size:18px;margin-top:10px}.faq details{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px 18px;margin:10px 0}.faq summary{cursor:pointer;font-weight:700}.faq p{color:var(--muted);margin:8px 0 2px}
-    .cta{margin-top:42px;text-align:center;padding:34px;border-radius:26px;border:1px solid var(--line);background:var(--panel2)}.cta p{color:var(--muted);margin:6px 0 0}.botpath{display:inline-block;margin-top:14px;padding:9px 13px;border-radius:12px;background:#0c121d;border:1px solid var(--line)}footer{text-align:center;color:#66758b;font-size:12px;margin-top:34px}
-    @media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.steps{grid-template-columns:1fr}.two{grid-template-columns:1fr}.hero{padding:28px}}@media(max-width:520px){.wrap{width:min(100% - 20px,1080px);padding-top:20px}.grid{grid-template-columns:1fr}.hero{border-radius:22px}.card{padding:18px}.quick{display:grid}.pill{width:100%}}
+    .wrap{width:min(1050px,calc(100% - 28px));margin:auto;padding:48px 0 70px}.hero,.card,.table,.cta{border:1px solid var(--line);background:var(--panel);border-radius:24px}.hero{padding:38px;background:linear-gradient(145deg,rgba(25,36,55,.96),rgba(9,13,21,.98))}.tag{display:inline-block;border:1px solid #33435d;border-radius:999px;padding:5px 12px;color:#c7d4e7;font-size:13px}.hero h1{font-size:clamp(32px,6vw,56px);line-height:1.2;margin:16px 0 8px}.hero p,.lead,.muted{color:var(--muted)}.hero p{max-width:760px;margin:0;font-size:17px}.chips{display:flex;gap:10px;flex-wrap:wrap;margin-top:24px}.chip{background:#0c131f;border:1px solid var(--line);padding:9px 13px;border-radius:13px;font-size:14px}.chip b{color:var(--green)}
+    section{margin-top:36px}h2{margin:0 0 4px;font-size:23px}.lead{margin:0 0 16px}.levels{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{padding:20px}.level .icon{font-size:28px}.level h3{margin:5px 0 0}.range{font-size:13px;color:var(--muted);min-height:48px}.rate{font-size:30px;font-weight:800;margin-top:10px}.rate span{font-size:12px;color:var(--muted);font-weight:400}.silver .rate{color:#d9e2ec}.gold .rate{color:var(--gold)}.black .rate{color:var(--green)}
+    .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.step b{display:block;margin-bottom:4px}.step .n{width:32px;height:32px;display:grid;place-items:center;border-radius:10px;background:#1c2a40;color:#c5ddff;margin-bottom:10px}.table{overflow:auto}table{width:100%;border-collapse:collapse;min-width:520px}th,td{padding:15px 17px;text-align:right;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:13px;font-weight:500}tr:last-child td{border-bottom:0}.reward{color:var(--green);font-weight:700}
+    .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.rules{margin:0;padding-right:18px;color:var(--muted)}.rules li{margin:6px 0}.rules b{color:var(--text)}.streaks{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.streak{background:#0c131f;border:1px solid var(--line);border-radius:14px;padding:13px}.streak b{display:block;color:var(--gold);font-size:20px}.example{background:linear-gradient(135deg,#12233b,#101724)}.example strong{color:var(--green)}
+    details{border:1px solid var(--line);background:var(--panel);border-radius:15px;padding:13px 16px;margin:9px 0}summary{cursor:pointer;font-weight:700}details p{margin:7px 0 0;color:var(--muted)}.cta{text-align:center;padding:28px;background:var(--panel2)}.bot{display:inline-block;margin-top:10px;background:#0c131f;border:1px solid var(--line);border-radius:12px;padding:8px 12px}footer{text-align:center;color:#66758b;font-size:12px;margin-top:30px}
+    @media(max-width:820px){.levels{grid-template-columns:1fr 1fr}.steps,.two{grid-template-columns:1fr}}@media(max-width:520px){.wrap{padding-top:18px}.hero{padding:25px}.levels{grid-template-columns:1fr}.chips{display:grid}.streaks{grid-template-columns:1fr 1fr 1fr}.range{min-height:0}}
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <header class="hero">
-      <span class="eyebrow">🏆 Hamoon Club</span>
-      <h1>باشگاه هامون</h1>
-      <p>هر خرید و تمدید موفق، شما را به سطح بعدی نزدیک‌تر می‌کند. هرچه بیشتر و پیوسته‌تر از هامون استفاده کنید، اعتبار بیشتری برای خریدهای بعدی می‌گیرید.</p>
-      <div class="quick">
-        <span class="pill"><b>۱ XP</b> به ازای هر ۱٬۰۰۰ تومان پرداخت واقعی</span>
-        <span class="pill">اعتبار جدید تا <b>۶۰ روز</b> معتبر است</span>
-        <span class="pill">تا <b>۳۰٪</b> خرید جدید با اعتبار باشگاه</span>
+<main class="wrap">
+  <header class="hero">
+    <span class="tag">🏆 Hamoon Club</span>
+    <h1>باشگاه هامون</h1>
+    <p>خرید و تمدید شما امتیاز می‌سازد، سطح‌تان را بالا می‌برد و اعتبار واقعی برای خریدهای بعدی به شما می‌دهد. هرچه بیشتر و پیوسته‌تر از هامون استفاده کنید، پاداش بیشتری می‌گیرید.</p>
+    <div class="chips">
+      <span class="chip"><b>۱ XP</b> به ازای هر ۱٬۰۰۰ تومان پرداخت واقعی</span>
+      <span class="chip">اعتبار جدید تا <b>۶۰ روز</b> معتبر است</span>
+      <span class="chip">تا <b>۳۰٪</b> هر خرید با اعتبار باشگاه</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>سطح‌ها و کش‌بک</h2>
+    <p class="lead">سطح شما بر اساس خرید و تمدید واجد امتیاز در ۹۰ روز اخیر تعیین می‌شود. نرخ کش‌بک سطح فعلی روی پرداخت واقعی خریدهای واجد شرایط اعمال می‌شود.</p>
+    <div class="levels">
+      <article class="card level"><div class="icon">🥉</div><h3>Bronze</h3><div class="range">کمتر از ۱.۵ میلیون تومان در ۹۰ روز</div><div class="rate">۰٪ <span>کش‌بک</span></div></article>
+      <article class="card level silver"><div class="icon">🥈</div><h3>Silver</h3><div class="range">از ۱.۵ تا کمتر از ۵ میلیون تومان</div><div class="rate">۲٪ <span>کش‌بک</span></div></article>
+      <article class="card level gold"><div class="icon">🥇</div><h3>Gold</h3><div class="range">از ۵ تا کمتر از ۱۵ میلیون تومان</div><div class="rate">۴٪ <span>کش‌بک</span></div></article>
+      <article class="card level black"><div class="icon">🖤</div><h3>Black</h3><div class="range">۱۵ میلیون تومان و بیشتر در ۹۰ روز</div><div class="rate">۶٪ <span>کش‌بک</span></div></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>چطور کار می‌کند؟</h2>
+    <p class="lead">همه‌چیز خودکار است و لازم نیست گزینه جداگانه‌ای فعال کنید.</p>
+    <div class="steps">
+      <article class="card step"><div class="n">۱</div><b>خرید یا تمدید می‌کنید</b><span class="muted">مبلغی که واقعاً از کیف پول پرداخت می‌شود، برای XP و پاداش محاسبه می‌شود.</span></article>
+      <article class="card step"><div class="n">۲</div><b>XP و سطح شما جلو می‌رود</b><span class="muted">XP سابقه فعالیت را نشان می‌دهد و سطح با مجموع فعالیت ۹۰ روز اخیر تعیین می‌شود.</span></article>
+      <article class="card step"><div class="n">۳</div><b>اعتبار می‌گیرید</b><span class="muted">کش‌بک و جایزه‌های مرحله‌ای به اعتبار باشگاه اضافه و در خریدهای بعدی استفاده می‌شوند.</span></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>جایزه‌های مرحله‌ای</h2>
+    <p class="lead">علاوه بر کش‌بک، با رسیدن به مرزهای خرید ۹۰ روزه جایزه جداگانه می‌گیرید.</p>
+    <div class="table"><table><thead><tr><th>خرید واجد امتیاز در ۹۰ روز</th><th>جایزه</th></tr></thead><tbody>
+      <tr><td>۲٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۳۰٬۰۰۰ تومان اعتبار</td></tr>
+      <tr><td>۵٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۱۰۰٬۰۰۰ تومان اعتبار</td></tr>
+      <tr><td>۱۰٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۲۵۰٬۰۰۰ تومان اعتبار</td></tr>
+      <tr><td>۲۰٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۶۰۰٬۰۰۰ تومان اعتبار</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>🔥 تداوم خرید</h2>
+      <p class="lead">خرید یا تمدید در ماه‌های متوالی ضریب XP شما را بیشتر می‌کند.</p>
+      <div class="streaks">
+        <div class="streak"><span>۲ ماه</span><b>+۱۰٪ XP</b></div>
+        <div class="streak"><span>۳ ماه</span><b>+۲۰٪ XP</b></div>
+        <div class="streak"><span>۶ ماه</span><b>+۳۰٪ XP</b></div>
       </div>
-    </header>
+    </article>
+    <article class="card">
+      <h2>🎁 اعتبار باشگاه</h2>
+      <ul class="rules">
+        <li>اعتبار باشگاه <b>قابل برداشت نقدی نیست</b>.</li>
+        <li>در هر خرید حداکثر <b>۳۰٪ مبلغ</b> با اعتبار باشگاه قابل پرداخت است.</li>
+        <li>اعتبار قابل استفاده در مرحله خرید <b>خودکار</b> محاسبه می‌شود.</li>
+        <li>اعتبار جدید <b>۶۰ روز</b> مهلت مصرف دارد.</li>
+        <li>بخشی که با اعتبار باشگاه پرداخت شود دوباره XP یا کش‌بک تولید نمی‌کند.</li>
+      </ul>
+    </article>
+  </section>
 
-    <section>
-      <h2>سطح شما چطور تعیین می‌شود؟</h2>
-      <p class="lead">ملاک سطح، مجموع خرید و تمدید واجد امتیاز در ۹۰ روز اخیر است. بنابراین با ادامه خرید، سطح حفظ می‌شود و با فعالیت بیشتر بالا می‌رود.</p>
-      <div class="grid">
-        <article class="card level"><div class="icon">🥉</div><h3>Bronze</h3><div class="range">کمتر از ۱.۵ میلیون در ۹۰ روز</div><div class="cash">۰٪ <small>کش‌بک</small></div></article>
-        <article class="card level"><div class="icon">🥈</div><h3>Silver</h3><div class="range">۱.۵ تا ۵ میلیون در ۹۰ روز</div><div class="cash">۱٪ <small>کش‌بک</small></div></article>
-        <article class="card level"><div class="icon">🥇</div><h3>Gold</h3><div class="range">۵ تا ۱۵ میلیون در ۹۰ روز</div><div class="cash">۱.۵٪ <small>کش‌بک</small></div></article>
-        <article class="card level"><div class="icon">🖤</div><h3>Black</h3><div class="range">۱۵ میلیون به بالا در ۹۰ روز</div><div class="cash">۲٪ <small>کش‌بک</small></div></article>
-      </div>
-    </section>
+  <section>
+    <article class="card example">
+      <h2>مثال ساده</h2>
+      <p class="lead">اگر Gold باشید و ۵۰۰٬۰۰۰ تومان پرداخت واقعی داشته باشید:</p>
+      <p>⭐ <strong>۵۰۰ XP پایه</strong> + 🎁 <strong>۲۰٬۰۰۰ تومان کش‌بک</strong></p>
+      <p class="muted">اگر Streak سه‌ماهه فعال باشد، XP همان خرید ۲۰٪ بیشتر می‌شود. پاداش‌های مرحله‌ای هم جدا از این کش‌بک هستند.</p>
+    </article>
+  </section>
 
-    <section>
-      <h2>سه بخش ساده، یک نتیجه</h2>
-      <p class="lead">همه محاسبات خودکار انجام می‌شود؛ لازم نیست چیزی فعال کنید.</p>
-      <div class="steps">
-        <article class="card step"><div class="number">۱</div><strong>خرید یا تمدید می‌کنید</strong><span>فقط مبلغی که واقعاً پرداخت شده، واجد XP و کش‌بک جدید است.</span></article>
-        <article class="card step"><div class="number">۲</div><strong>XP و سطح جلو می‌رود</strong><span>XP مجموع فعالیت شما را نشان می‌دهد؛ سطح با خرید ۹۰ روز اخیر تعیین می‌شود.</span></article>
-        <article class="card step"><div class="number">۳</div><strong>اعتبار برای خرید بعدی می‌گیرید</strong><span>کش‌بک و جوایز مرحله‌ای وارد اعتبار باشگاه می‌شوند و در خرید جدید خودکار مصرف می‌شوند.</span></article>
-      </div>
-    </section>
+  <section>
+    <h2>سؤال‌های رایج</h2>
+    <details><summary>اعتبار باشگاه پول نقد است؟</summary><p>خیر. اعتبار برای خرید و تمدید در هامون استفاده می‌شود و قابل برداشت نیست.</p></details>
+    <details><summary>اگر سطح من پایین بیاید چه می‌شود؟</summary><p>سطح بر اساس ۹۰ روز اخیر محاسبه می‌شود؛ با ادامه خرید و تمدید می‌توانید سطح را حفظ یا دوباره ارتقا دهید.</p></details>
+    <details><summary>اعتبارم چطور مصرف می‌شود؟</summary><p>اگر اعتبار قابل استفاده داشته باشید، ربات قبل از تأیید خرید مقدار اعتبار و مبلغ نهایی کسرشونده از کیف پول را نشان می‌دهد.</p></details>
+  </section>
 
-    <section>
-      <h2>جایزه‌های مرحله‌ای</h2>
-      <p class="lead">وقتی در بازه ۹۰ روزه از یک مرز عبور کنید، جایزه آن مرحله یک‌بار به اعتبار باشگاه اضافه می‌شود.</p>
-      <div class="table"><table><thead><tr><th>خرید واجد امتیاز در ۹۰ روز</th><th>جایزه</th></tr></thead><tbody>
-        <tr><td>۲٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۳۰٬۰۰۰ تومان اعتبار</td></tr>
-        <tr><td>۵٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۱۰۰٬۰۰۰ تومان اعتبار</td></tr>
-        <tr><td>۱۰٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۲۵۰٬۰۰۰ تومان اعتبار</td></tr>
-        <tr><td>۲۰٬۰۰۰٬۰۰۰ تومان</td><td class="reward">+۶۰۰٬۰۰۰ تومان اعتبار</td></tr>
-      </tbody></table></div>
-    </section>
+  <section class="cta">
+    <h2>وضعیت شخصی خودت را در ربات ببین</h2>
+    <p class="muted">سطح، XP، اعتبار، Streak و فاصله تا هدف بعدی داخل یک منو نمایش داده می‌شود.</p>
+    <span class="bot">ربات ← 🏆 باشگاه هامون</span>
+  </section>
 
-    <section class="two">
-      <article class="card">
-        <h2>🔥 تداوم خرید = XP سریع‌تر</h2>
-        <p class="lead">اگر در ماه‌های متوالی خرید یا تمدید موفق داشته باشید، ضریب XP فعال می‌شود.</p>
-        <div class="streaks">
-          <div class="streak"><span>۲ ماه متوالی</span><b>+۱۰٪ XP</b></div>
-          <div class="streak"><span>۳ ماه متوالی</span><b>+۲۰٪ XP</b></div>
-          <div class="streak"><span>۶ ماه متوالی</span><b>+۳۰٪ XP</b></div>
-        </div>
-      </article>
-      <article class="card">
-        <h2>🎁 قوانین اعتبار باشگاه</h2>
-        <ul class="rules">
-          <li>اعتبار باشگاه <b>قابل برداشت نقدی نیست</b> و برای خرید در هامون استفاده می‌شود.</li>
-          <li>در هر خرید جدید، حداکثر <b>۳۰٪ مبلغ</b> می‌تواند با اعتبار باشگاه پرداخت شود.</li>
-          <li>سیستم اعتبار قابل استفاده را <b>خودکار</b> در مرحله تأیید خرید حساب می‌کند.</li>
-          <li>هر اعتبار جدید <b>۶۰ روز</b> مهلت مصرف دارد و اعتبار نزدیک‌تر به انقضا زودتر استفاده می‌شود.</li>
-          <li>مبلغی که با اعتبار باشگاه پرداخت شود، دوباره XP یا کش‌بک ایجاد نمی‌کند.</li>
-        </ul>
-      </article>
-    </section>
-
-    <section>
-      <article class="card example">
-        <h2>یک مثال ساده</h2>
-        <p class="lead">فرض کنید Gold هستید و یک خرید ۵۰۰ هزار تومانی را کاملاً از کیف پول پرداخت می‌کنید.</p>
-        <div class="math">⭐ ۵۰۰ XP پایه &nbsp;•&nbsp; 🎁 ۷٬۵۰۰ تومان کش‌بک</div>
-        <p class="lead">اگر Streak سه‌ماهه داشته باشید، همان خرید به‌جای ۵۰۰ XP، مقدار ۶۰۰ XP می‌دهد. اگر بخشی از خرید با اعتبار باشگاه پرداخت شود، XP و کش‌بک فقط روی بخش پرداخت واقعی محاسبه می‌شود.</p>
-      </article>
-    </section>
-
-    <section class="faq">
-      <h2>سؤال‌های رایج</h2>
-      <details><summary>XP من از بین می‌رود؟</summary><p>XP مجموع فعالیت شماست و به‌خاطر افت سطح کم نمی‌شود. اما Level بر اساس خرید و تمدید ۹۰ روز اخیر محاسبه می‌شود تا فعالیت فعلی شما را نشان دهد.</p></details>
-      <details><summary>خریدهای قبلی من حساب می‌شوند؟</summary><p>سابقه خرید و تمدید قبلی برای محاسبه XP و وضعیت فعالیت شما در نظر گرفته می‌شود. جوایز مالی قدیمی به‌صورت برگشتی و یک‌باره پرداخت نمی‌شوند؛ پاداش‌های جدید از زمان فعال‌شدن باشگاه ایجاد می‌شوند.</p></details>
-      <details><summary>اعتبار باشگاه چه زمانی استفاده می‌شود؟</summary><p>در خرید سرور جدید، ربات قبل از تأیید نهایی دقیقاً نشان می‌دهد چه مقدار از اعتبار باشگاه و چه مقدار از کیف پول شما استفاده می‌شود.</p></details>
-      <details><summary>تمدید هم امتیاز دارد؟</summary><p>بله. تمدید موفق سرویس هم برای XP، Level و Streak حساب می‌شود.</p></details>
-    </section>
-
-    <section class="cta">
-      <h2>وضعیت شخصی‌تان را در ربات ببینید</h2>
-      <p>سطح، XP، اعتبار قابل استفاده، فاصله تا جایزه بعدی و Streak همان‌جا به‌روز نمایش داده می‌شود.</p>
-      <span class="botpath">ربات هامون ← 🏆 باشگاه هامون</span>
-    </section>
-
-    <footer>HamoonCloud • قوانین باشگاه ممکن است برای کمپین‌های آینده توسعه پیدا کند؛ وضعیت و پاداش‌های ثبت‌شده هر کاربر در ربات نمایش داده می‌شود.</footer>
-  </main>
+  <footer>HamoonCloud • Hamoon Club</footer>
+</main>
 </body>
 </html>
