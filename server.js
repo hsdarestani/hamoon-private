@@ -193,7 +193,7 @@ app.get('/zibal/callback', async (req, res) => {
   const trackId = String(req.query.trackId || req.query.track_id || '').trim();
   const queryOrderId = String(req.query.orderId || req.query.order_id || '').trim();
   const callbackSuccess = String(req.query.success || '').trim();
-  const merchant = process.env.ZIBAL_MERCHANT_ID || '68985f4ba45c72000bcfd5a2a';
+  const merchant = process.env.ZIBAL_MERCHANT_ID || '68985f4ba45c72000bcfd5a2';
 
   function html(title, message) {
     return `<!doctype html>
@@ -296,22 +296,16 @@ app.get('/zibal/callback', async (req, res) => {
       return res.send(html('پرداخت موفق', `کیف پول شما به مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان شارژ شد. می‌توانید به ربات برگردید.`));
     } catch (e) {
       try { await conn.rollback(); } catch {}
-      console.error('[ZIBAL_CALLBACK] credit failed:', e.message || e);
-      return res.status(500).send(html('خطای ثبت پرداخت', 'پرداخت تأیید شد اما ثبت اعتبار کامل نشد. لطفاً با پشتیبانی تماس بگیرید.'));
+      console.error('[ZIBAL_CALLBACK] db error:', e.code || e.message);
+      return res.status(500).send(html('خطای ثبت پرداخت', 'پرداخت تأیید شد اما ثبت آن با خطا مواجه شد. لطفاً با پشتیبانی تماس بگیرید.'));
     } finally {
       conn.release();
     }
   } catch (e) {
-    console.error('[ZIBAL_CALLBACK] verify exception:', e.response?.data || e.message || e);
-    return res.status(500).send(html('خطای بررسی پرداخت', 'ارتباط با سرویس پرداخت با مشکل مواجه شد. لطفاً چند دقیقه بعد بررسی کنید.'));
+    console.error('[ZIBAL_CALLBACK] fatal:', e.response?.data || e.message);
+    return res.status(500).send(html('خطای بررسی پرداخت', 'امکان بررسی پرداخت وجود ندارد. لطفاً چند دقیقه بعد با پشتیبانی تماس بگیرید.'));
   }
 });
 
-app.use((err, _req, res, _next) => {
-  console.error('[DASHBOARD_SERVER]', err.stack || err.message || err);
-  res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', message: 'خطای داخلی سرویس.' });
-});
-
-app.listen(port, '0.0.0.0', () => {
-  console.log(`[DASHBOARD_SERVER] listening on 0.0.0.0:${port}`);
-});
+app.use((_req, res) => res.status(404).json({ ok: false, error: 'NOT_FOUND', message: 'مسیر پیدا نشد.' }));
+app.listen(port, () => console.log(`[dashboard-server] listening on ${port}; /dashboard and /console routes enabled`));
