@@ -37,7 +37,10 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
-    HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0'
+    HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0',
+    LOYALTY_SILVER_CASHBACK: '2',
+    LOYALTY_GOLD_CASHBACK: '4',
+    LOYALTY_BLACK_CASHBACK: '6'
   };
   for (const [key, value] of Object.entries(forced)) process.env[key] = value;
 
