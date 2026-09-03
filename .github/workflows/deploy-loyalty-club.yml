@@ -7,6 +7,9 @@ on:
       - 'services/loyalty-club.js'
       - 'loyalty-club-bootstrap.js'
       - 'runtime-bootstrap.js'
+      - 'server.js'
+      - 'public/club/**'
+      - '.env.example'
       - '.github/workflows/deploy-loyalty-club.yml'
   workflow_dispatch:
 
@@ -34,13 +37,17 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Validate loyalty source and runtime patch
+      - name: Validate loyalty source, bot patch and public guide
         shell: bash
         run: |
           set -euo pipefail
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check runtime-bootstrap.js
+          node --check server.js
+          grep -q 'باشگاه هامون' public/club/index.html
+          grep -q '۱٬۰۰۰ تومان' public/club/index.html
+          grep -q '۳۰٪' public/club/index.html
           node <<'NODE'
           const fs = require('fs');
           const { applyPatches } = require('./runtime-bootstrap');
@@ -49,7 +56,12 @@ jobs:
             "require('./services/loyalty-club')",
             "'🏆 باشگاه هامون'",
             "case '🏆 باشگاه هامون'",
-            "case 'LOYALTY_REFRESH'"
+            "case 'LOYALTY_REFRESH'",
+            "getRedemptionPreview(userId, finalPrice)",
+            "consumeCredit({",
+            "recordEligibleSpend({",
+            "eventKey: `renewal:",
+            "ℹ️ قوانین و نحوه کار"
           ];
           for (const marker of required) {
             if (!output.includes(marker)) throw new Error('Missing loyalty marker: ' + marker);
@@ -72,7 +84,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy production bot
+      - name: Deploy production bot and club page
         shell: bash
         run: |
           set -euo pipefail
@@ -96,11 +108,19 @@ jobs:
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check runtime-bootstrap.js
+          node --check server.js
+          grep -q 'باشگاه هامون' public/club/index.html
           node <<'NODE'
           const fs = require('fs');
           const { applyPatches } = require('./runtime-bootstrap');
           const output = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
-          for (const marker of ["'🏆 باشگاه هامون'", "case 'LOYALTY_REFRESH'"]) {
+          for (const marker of [
+            "'🏆 باشگاه هامون'",
+            "case 'LOYALTY_REFRESH'",
+            "getRedemptionPreview(userId, finalPrice)",
+            "consumeCredit({",
+            "eventKey: `renewal:"
+          ]) {
             if (!output.includes(marker)) throw new Error('Production runtime patch missing: ' + marker);
           }
           new Function('require', 'module', 'exports', '__filename', '__dirname', output);
@@ -108,8 +128,19 @@ jobs:
           NODE
 
           pm2 restart hamoonbot --update-env
+          pm2 restart dashboard-server --update-env
           sleep 5
-          pm2 describe hamoonbot | grep -E 'status|restarts|uptime|script path' | head -n 16 || true
+
           pm2 pid hamoonbot | grep -Eq '^[1-9][0-9]*$'
+          pm2 pid dashboard-server | grep -Eq '^[1-9][0-9]*$'
+          curl -fsS --max-time 10 http://127.0.0.1:3000/health | grep -q '"ok":true'
+          curl -fsS --max-time 10 http://127.0.0.1:3000/club | grep -q 'باشگاه هامون'
+
+          public_club_code="$(curl -kLsS --max-time 15 -o /tmp/hamoon-club-public -w '%{http_code}' https://pay.hamooncloud.ir/club || true)"
+          echo "public /club -> HTTP ${public_club_code:-000}"
+          test "$public_club_code" = '200'
+          grep -q 'باشگاه هامون' /tmp/hamoon-club-public
+          rm -f /tmp/hamoon-club-public
+
           echo 'loyalty_deploy_ok=true'
           REMOTE
