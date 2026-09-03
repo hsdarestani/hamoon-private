@@ -16,6 +16,7 @@ const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-
 const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
 const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
 const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-bootstrap');
+const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
@@ -61,19 +62,21 @@ function installCleanIpChangeModule() {
 }
 
 function applyPatches(coreSource) {
-  return applyResellerBillingGracePatches(
-    applyBillingRenewalGuardPatches(
-      applyHetznerManagementScopePatch(
-        applyHetznerPurchaseArchitecturePatches(
-          applyRebuildPatches(
-            applyBillingCyclePatches(
-              applyHetznerChangeIpPatches(
-                applyHetznerTrafficPatches(
-                  applyFeaturePatches(
-                    applyHetznerPendingDeliveryRecoveryPatches(
-                      applyProviderVisibilityPatches(
-                        applyHetznerUpgradeSafetyPatches(
-                          applyZibalRefererPatches(coreSource)
+  return applyLoyaltyClubPatches(
+    applyResellerBillingGracePatches(
+      applyBillingRenewalGuardPatches(
+        applyHetznerManagementScopePatch(
+          applyHetznerPurchaseArchitecturePatches(
+            applyRebuildPatches(
+              applyBillingCyclePatches(
+                applyHetznerChangeIpPatches(
+                  applyHetznerTrafficPatches(
+                    applyFeaturePatches(
+                      applyHetznerPendingDeliveryRecoveryPatches(
+                        applyProviderVisibilityPatches(
+                          applyHetznerUpgradeSafetyPatches(
+                            applyZibalRefererPatches(coreSource)
+                          )
                         )
                       )
                     )
