@@ -6,6 +6,7 @@ on:
     paths:
       - 'services/loyalty-club.js'
       - 'loyalty-club-bootstrap.js'
+      - 'loyalty-history-bootstrap.js'
       - 'runtime-bootstrap.js'
       - 'server.js'
       - 'public/club/**'
@@ -43,6 +44,7 @@ jobs:
           set -euo pipefail
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
+          node --check loyalty-history-bootstrap.js
           node --check runtime-bootstrap.js
           node --check server.js
           grep -q 'باشگاه هامون' public/club/index.html
@@ -61,6 +63,7 @@ jobs:
             "consumeCredit({",
             "recordEligibleSpend({",
             "eventKey: `renewal:",
+            "syncHistory(userId)",
             "ℹ️ قوانین و نحوه کار"
           ];
           for (const marker of required) {
@@ -107,6 +110,7 @@ jobs:
 
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
+          node --check loyalty-history-bootstrap.js
           node --check runtime-bootstrap.js
           node --check server.js
           grep -q 'باشگاه هامون' public/club/index.html
@@ -119,7 +123,8 @@ jobs:
             "case 'LOYALTY_REFRESH'",
             "getRedemptionPreview(userId, finalPrice)",
             "consumeCredit({",
-            "eventKey: `renewal:"
+            "eventKey: `renewal:",
+            "syncHistory(userId)"
           ]) {
             if (!output.includes(marker)) throw new Error('Production runtime patch missing: ' + marker);
           }
