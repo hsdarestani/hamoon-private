@@ -7,8 +7,15 @@ on:
     paths:
       - Hetzner/hetzner-api.js
       - index.js
+      - index-core.js
+      - runtime-bootstrap.js
+      - hetzner-purchase-architecture-bootstrap.js
+      - hetzner-purchase-images.js
+      - provider-capabilities.js
       - scripts/reconcile-hetzner-billing-amounts.js
       - scripts/validate-hetzner-pricing.js
+      - scripts/validate-hetzner-purchase-architecture.js
+      - scripts/validate-provider-capabilities.js
       - package.json
       - .github/workflows/validate-hetzner-pricing.yml
   push:
@@ -17,8 +24,15 @@ on:
     paths:
       - Hetzner/hetzner-api.js
       - index.js
+      - index-core.js
+      - runtime-bootstrap.js
+      - hetzner-purchase-architecture-bootstrap.js
+      - hetzner-purchase-images.js
+      - provider-capabilities.js
       - scripts/reconcile-hetzner-billing-amounts.js
       - scripts/validate-hetzner-pricing.js
+      - scripts/validate-hetzner-purchase-architecture.js
+      - scripts/validate-provider-capabilities.js
       - package.json
       - .github/workflows/validate-hetzner-pricing.yml
 
@@ -35,5 +49,6 @@ jobs:
       - run: node -c index.js
       - run: node -c scripts/reconcile-hetzner-billing-amounts.js
       - run: node scripts/validate-hetzner-pricing.js
-      - run: npm run validate:hetzner-lifecycle
+      - run: npm run validate:hetzner-purchase-architecture
       - run: npm run validate:provider-capabilities
+      - run: npm run validate:hetzner-lifecycle
