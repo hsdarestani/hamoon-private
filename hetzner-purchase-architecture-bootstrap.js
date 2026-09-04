@@ -39,7 +39,7 @@ function applyHetznerPurchaseArchitecturePatches(coreSource) {
 
   const imageAfter = [
     '    console.log(`🟢 [handleImageSelection] Triggered for user ${userId} in ${dcConfig.name}`);',
-    '    const tok = await openstackApi.getToken(dcConfig);',
+    '    const tok = isHetznerDc(dcConfig) ? null : await openstackApi.getToken(dcConfig);',
     '    const selectedFlavorForImages = state[userId]?.selectedFlavor;',
     '    if (isHetznerDc(dcConfig) && !selectedFlavorForImages) {',
     "      return sendMessage(chatId, '❌ اطلاعات پلن منقضی شده است. لطفاً خرید را دوباره شروع کنید.');",
