@@ -8,6 +8,14 @@ function replaceOnce(source, before, after, label) {
   return source.replace(before, after);
 }
 
+function replaceExactCount(source, before, after, expected, label) {
+  const count = source.split(before).length - 1;
+  if (count !== expected) {
+    throw new Error(`[hetzner-purchase-architecture-bootstrap] ${label}: expected ${expected} matches, found ${count}`);
+  }
+  return source.split(before).join(after);
+}
+
 function applyHetznerPurchaseArchitecturePatches(coreSource) {
   let source = String(coreSource);
 
@@ -54,6 +62,35 @@ function applyHetznerPurchaseArchitecturePatches(coreSource) {
   ].join('\n');
 
   source = replaceOnce(source, imageBefore, imageAfter, 'selected image validation');
+
+  const snapshotBefore = [
+    "      hasCapability(dcConfig, 'listSnapshots') ? openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {",
+    '        console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);',
+    '        return [];',
+    '      }) : Promise.resolve([])'
+  ].join('\n');
+
+  const snapshotAfter = [
+    "      !isHetznerDc(dcConfig) && hasCapability(dcConfig, 'listSnapshots') ? openstackApi.listSnapshots(dcConfig, tok, userId).catch(err => {",
+    '        console.error(`⚠️ [${dcConfig.name}] listSnapshots error:`, err.message);',
+    '        return [];',
+    '      }) : Promise.resolve([])'
+  ].join('\n');
+
+  source = replaceExactCount(source, snapshotBefore, snapshotAfter, 2, 'purchase snapshot bypass');
+
+  const confirmBefore = [
+    '    await bot.editMessageText(messageText, {',
+    '      chat_id: chatId,',
+    '      message_id: messageId,'
+  ].join('\n');
+
+  const confirmAfter = [
+    '    // HAMOON_IMAGE_CONFIRM_RESILIENT_V2',
+    '    await editOrSendMessage(chatId, messageId, messageText, {'
+  ].join('\n');
+
+  source = replaceOnce(source, confirmBefore, confirmAfter, 'resilient image confirmation');
 
   return source;
 }

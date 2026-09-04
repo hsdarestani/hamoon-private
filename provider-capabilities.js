@@ -38,7 +38,13 @@ const PROVIDER_CAPABILITIES = {
     createKeyPair: false,
     deleteKeyPair: false
   },
-  hetzner: {},
+  hetzner: {
+    // The current Hetzner adapter does not implement snapshot listing/building.
+    // Keep these disabled so purchase flows never fall through to OpenStack-only calls.
+    snapshot: false,
+    listSnapshots: false,
+    buildFromSnapshot: false
+  },
   openstack: {}
 };
 

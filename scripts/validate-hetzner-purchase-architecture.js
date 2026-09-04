@@ -27,5 +27,10 @@ assert(patched.includes('const selectedFlavorForImages = state[userId]?.selected
 assert(patched.includes('const tok = isHetznerDc(dcConfig) ? null : await openstackApi.getToken(dcConfig);'), 'Hetzner image selection skips OpenStack token lookup');
 assert(!patched.includes('Fetching images & snapshots for ${dcConfig.name}`);\n    const [images, snapshots] = await Promise.all([\n      openstackApi.listImages(dcConfig, tok).catch'), 'flavor step no longer uses unfiltered Hetzner image list');
 
+const snapshotBypasses = (patched.match(/!isHetznerDc\(dcConfig\) && hasCapability\(dcConfig, 'listSnapshots'\)/g) || []).length;
+assert(snapshotBypasses === 2, 'Hetzner purchase flow bypasses unsupported snapshot lookup in both selection steps');
+assert(patched.includes('// HAMOON_IMAGE_CONFIRM_RESILIENT_V2'), 'image confirmation uses resilient Telegram edit fallback');
+assert(patched.includes("await editOrSendMessage(chatId, messageId, messageText, {\n      parse_mode: 'MarkdownV2'"), 'image confirmation falls back from edit to send');
+
 new Function('require', 'module', 'exports', '__filename', '__dirname', patched);
 console.log('validate-hetzner-purchase-architecture: ok');
