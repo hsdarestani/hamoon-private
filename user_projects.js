@@ -130,29 +130,6 @@ minAlertToman: 100000
 minAlertToman: 100000
 },
   ],
-
-    '925143600': [
-    {
-      dcKey: 'tebyan',
-      label: 'Tebyan / Account #2844',
-      auth: {
-        OS_AUTH_URL: 'http://94.232.171.61:5000',
-        OS_INTERFACE: 'public',
-        OS_IDENTITY_API_VERSION: '3',
-
-        OS_PROJECT_ID: '1135d79cbec94e8588ea64a995178589',
-        OS_PROJECT_NAME: 'Account #2844',
-        OS_USER_DOMAIN_NAME: 'Default',
-        OS_PROJECT_DOMAIN_ID: 'default',
-
-        OS_USERNAME: 'hb_client_3446_1',
-        OS_PASSWORD: '15zv8BQE',
-      },
-      pricePerGbToman: 500,
-      downloadOnly: true,
-minAlertToman: 100000
-},
-  ],
 };
 
 /**
