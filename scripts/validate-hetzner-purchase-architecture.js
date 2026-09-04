@@ -31,6 +31,10 @@ const snapshotBypasses = (patched.match(/!isHetznerDc\(dcConfig\) && hasCapabili
 assert(snapshotBypasses === 2, 'Hetzner purchase flow bypasses unsupported snapshot lookup in both selection steps');
 assert(patched.includes('// HAMOON_IMAGE_CONFIRM_RESILIENT_V2'), 'image confirmation uses resilient Telegram edit fallback');
 assert(patched.includes("await editOrSendMessage(chatId, messageId, messageText, {\n      parse_mode: 'MarkdownV2'"), 'image confirmation falls back from edit to send');
+assert(patched.includes("escapeMarkdownV2('-' + formatToman(loyaltyPreview.creditUsable))"), 'negative loyalty credit is escaped as one MarkdownV2 value');
+assert(!patched.includes('اعتبار باشگاه: -${escapeMarkdownV2(formatToman(loyaltyPreview.creditUsable))}'), 'raw MarkdownV2 minus is removed from loyalty confirmation');
+assert(patched.includes('// HAMOON_MARKDOWNV2_PLAIN_FALLBACK_V1'), 'MarkdownV2 confirmation has a plain-text last-resort fallback');
+assert(patched.includes("delete safeOptions.parse_mode;"), 'plain-text fallback removes Markdown parse mode');
 
 new Function('require', 'module', 'exports', '__filename', '__dirname', patched);
 console.log('validate-hetzner-purchase-architecture: ok');
