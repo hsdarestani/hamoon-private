@@ -12,6 +12,7 @@ on:
       - 'zibal-referer-bootstrap.js'
       - 'provider-visibility.js'
       - 'provider-visibility-bootstrap.js'
+      - 'user_projects.js'
       - 'hetzner-purchase-images.js'
       - 'hetzner-purchase-architecture-bootstrap.js'
       - 'hetzner-management-scope-bootstrap.js'
@@ -56,6 +57,7 @@ jobs:
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check zibal-referer-bootstrap.js
+          node --check user_projects.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
@@ -115,6 +117,7 @@ jobs:
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check zibal-referer-bootstrap.js
+          node --check user_projects.js
           node --check hetzner-purchase-images.js
           node --check hetzner-purchase-architecture-bootstrap.js
           node --check hetzner-management-scope-bootstrap.js
