@@ -25,6 +25,8 @@ const helperCalls = (patched.match(/hetzner-purchase-images'\)\.listCompatibleIm
 assert(helperCalls === 2, 'purchase flow uses architecture-aware image catalog in both selection steps');
 assert(patched.includes('const selectedFlavorForImages = state[userId]?.selectedFlavor;'), 'image callback revalidates against selected flavor');
 assert(!patched.includes('Fetching images & snapshots for ${dcConfig.name}`);\n    const [images, snapshots] = await Promise.all([\n      openstackApi.listImages(dcConfig, tok).catch'), 'flavor step no longer uses unfiltered Hetzner image list');
+assert(patched.includes('// HAMOON_IMAGE_CONFIRM_RESILIENT'), 'image confirmation has resilient edit fallback marker');
+assert(patched.includes('await editOrSendMessage(chatId, messageId, messageText, {\n      parse_mode: \'MarkdownV2\''), 'image confirmation falls back from Telegram edit to send');
 
 new Function('require', 'module', 'exports', '__filename', '__dirname', patched);
 console.log('validate-hetzner-purchase-architecture: ok');
