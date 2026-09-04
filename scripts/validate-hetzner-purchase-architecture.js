@@ -24,6 +24,7 @@ assert(imageArchitecture({ architecture: 'x86' }) === 'x86', 'explicit x86 image
 const helperCalls = (patched.match(/hetzner-purchase-images'\)\.listCompatibleImages/g) || []).length;
 assert(helperCalls === 2, 'purchase flow uses architecture-aware image catalog in both selection steps');
 assert(patched.includes('const selectedFlavorForImages = state[userId]?.selectedFlavor;'), 'image callback revalidates against selected flavor');
+assert(patched.includes('const tok = isHetznerDc(dcConfig) ? null : await openstackApi.getToken(dcConfig);'), 'Hetzner image selection skips OpenStack token lookup');
 assert(!patched.includes('Fetching images & snapshots for ${dcConfig.name}`);\n    const [images, snapshots] = await Promise.all([\n      openstackApi.listImages(dcConfig, tok).catch'), 'flavor step no longer uses unfiltered Hetzner image list');
 
 new Function('require', 'module', 'exports', '__filename', '__dirname', patched);
