@@ -55,31 +55,6 @@ function applyHetznerPurchaseArchitecturePatches(coreSource) {
 
   source = replaceOnce(source, imageBefore, imageAfter, 'selected image validation');
 
-  const confirmEditBefore = [
-    '    await bot.editMessageText(messageText, {',
-    '      chat_id: chatId,',
-    '      message_id: messageId,',
-    "      parse_mode: 'MarkdownV2',",
-    '      reply_markup: {',
-    '        inline_keyboard: [',
-    '          [',
-    "            { text: '✅ تایید نهایی', callback_data: 'CONFIRM_PURCHASE' },",
-    "            { text: '❌ لغو', callback_data: 'CANCEL' }"
-  ].join('\n');
-
-  const confirmEditAfter = [
-    '    // HAMOON_IMAGE_CONFIRM_RESILIENT',
-    '    await editOrSendMessage(chatId, messageId, messageText, {',
-    "      parse_mode: 'MarkdownV2',",
-    '      reply_markup: {',
-    '        inline_keyboard: [',
-    '          [',
-    "            { text: '✅ تایید نهایی', callback_data: 'CONFIRM_PURCHASE' },",
-    "            { text: '❌ لغو', callback_data: 'CANCEL' }"
-  ].join('\n');
-
-  source = replaceOnce(source, confirmEditBefore, confirmEditAfter, 'resilient purchase confirmation message');
-
   return source;
 }
 
