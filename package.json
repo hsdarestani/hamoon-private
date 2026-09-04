@@ -4,10 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "npm run validate:syntax && npm run validate:db-exports && npm run validate:provider-visibility && npm run validate:server-display-names && npm run validate:hetzner-console && npm run validate:hetzner-traffic && npm run validate:novnc-console && npm run validate:provider-capabilities && npm run validate:production-patch && npm run validate:hetzner-lifecycle && npm run validate:clean-ip-runtime && npm run validate:hetzner-pricing",
+    "test": "npm run validate:syntax && npm run validate:db-exports && npm run validate:provider-visibility && npm run validate:server-display-names && npm run validate:hetzner-console && npm run validate:hetzner-traffic && npm run validate:novnc-console && npm run validate:provider-capabilities && npm run validate:hetzner-purchase-architecture && npm run validate:production-patch && npm run validate:hetzner-lifecycle && npm run validate:clean-ip-runtime && npm run validate:hetzner-pricing",
     "start": "node index.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
     "validate:provider-capabilities": "node scripts/validate-provider-capabilities.js",
+    "validate:hetzner-purchase-architecture": "node scripts/validate-hetzner-purchase-architecture.js",
     "validate:provider-visibility": "node scripts/validate-provider-visibility.js",
     "validate:syntax": "node -c index.js && node -c index-core.js && node -c runtime-bootstrap.js && node -c provider-visibility.js && node -c provider-visibility-bootstrap.js && node -c server-display-names.js && node -c server-display-names-bootstrap.js && node -c hetzner-console-bootstrap.js && node -c hetzner-traffic.js && node -c hetzner-traffic-bootstrap.js && node -c services/hetzner-clean-ip-change.js && node -c services/hetzner-lifecycle.js && node -c console-session.js && node -c db.js && node -c scheduler.js && node -c dashboard-api.js && node -c customer-api.js && node -c server.js && node -c scripts/smoke-reseller-api-live.js",
     "validate:server-display-names": "node scripts/validate-server-display-names.js",
