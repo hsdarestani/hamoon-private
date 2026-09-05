@@ -1,0 +1,80 @@
+name: Verify Hetzner Target Srv-HET-470171
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-hetzner-target-470171.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Verify production status
+        shell: bash
+        run: |
+          set +e
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE' > "$RUNNER_TEMP/verify.log" 2>&1
+          set +e
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH" || { echo 'VERIFY_QUERY=app_path_failed'; exit 0; }
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [rows]=await c.query(`
+              SELECT p.status, IF(p.delivered_at IS NULL,'no','yes') delivered
+              FROM purchases p
+              LEFT JOIN server_display_names n
+                ON n.telegram_id=p.telegram_id AND n.datacenter=p.datacenter AND n.server_id=p.server_id
+              WHERE p.server_name=? OR n.display_name=?
+              ORDER BY p.updated_at DESC LIMIT 1
+            `,['Srv-HET-470171','Srv-HET-470171']);
+            const row=rows[0]||null;
+            console.log('VERIFY_FOUND='+(row?'yes':'no'));
+            console.log('VERIFY_STATUS='+(row?String(row.status||'unknown').replace(/[^a-zA-Z0-9_:-]/g,''):'not_found'));
+            console.log('VERIFY_DELIVERED='+(row?row.delivered:'unknown'));
+            await c.end();
+          })().catch(e=>console.log('VERIFY_QUERY=failed:'+String(e.message||e).replace(/\s+/g,'_').slice(0,80)));
+          NODE
+          pm2 logs hamoonbot --lines 240 --nostream 2>/dev/null | grep 'HETZNER_DELIVERED_STATUS_REPAIRED' | tail -n 5 | sed 's/.*/VERIFY_REPAIR_LOG=present/' | head -n 1 || true
+          REMOTE
+          echo "SSH_EXIT=$?" >> "$RUNNER_TEMP/verify.log"
+          exit 0
+      - name: Commit sanitized verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops
+          {
+            echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            grep -E '^(VERIFY_FOUND|VERIFY_STATUS|VERIFY_DELIVERED|VERIFY_REPAIR_LOG|VERIFY_QUERY|SSH_EXIT)=' "$RUNNER_TEMP/verify.log" || true
+          } > ops/verify-Srv-HET-470171.txt
+          git config user.name "Hossein Darestani"
+          git config user.email "45485005+hsdarestani@users.noreply.github.com"
+          git add ops/verify-Srv-HET-470171.txt
+          git commit -m 'ops(hetzner): verify Srv-HET-470171 after status repair'
+          git push origin HEAD:main
