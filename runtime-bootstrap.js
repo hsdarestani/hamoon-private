@@ -23,6 +23,8 @@ const { installStrictCheckHostFetch } = require('./services/check-host-strict-fe
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
+const DELIVERED_STATUS_REPAIR_MARK = Symbol.for('hamoon.deliveredStatusRepairInstalled');
+
 function applyRuntimeSafetyDefaults() {
   const datacenters = require('./datacenters');
   if (datacenters && Object.prototype.hasOwnProperty.call(datacenters, 'afracloud')) {
@@ -66,6 +68,65 @@ function installCleanIpChangeModule() {
   if (require.cache[legacyPath]) require.cache[legacyPath].exports = cleanModule;
 }
 
+// markDelivered intentionally returns true only for the first delivery. A rebuild or
+// later lifecycle check can put an already-delivered row back into a pending state.
+// The old DB helper then refuses to touch it because delivered_at is already set,
+// leaving a healthy server stuck in pending_ip_quality forever. Preserve the
+// first-delivery return value (so credentials are never re-sent) but repair the
+// stale status whenever a fresh readiness check says the server is deliverable.
+function installDeliveredStatusRepair() {
+  const db = require('./db');
+  if (db[DELIVERED_STATUS_REPAIR_MARK]) return false;
+  if (typeof db.markDelivered !== 'function') throw new Error('DB_MARK_DELIVERED_UNAVAILABLE');
+
+  const originalMarkDelivered = db.markDelivered.bind(db);
+  db.markDelivered = async function markDeliveredWithStatusRepair(
+    telegramId,
+    serverId,
+    datacenter,
+    publicIp
+  ) {
+    const newlyDelivered = await originalMarkDelivered(
+      telegramId,
+      serverId,
+      datacenter,
+      publicIp
+    );
+    if (newlyDelivered) return true;
+
+    const purchase = await db.getPurchaseForOwner?.(
+      telegramId,
+      serverId,
+      datacenter
+    ).catch(() => null);
+
+    if (!purchase?.delivered_at) return false;
+    if (String(purchase.status || '').toLowerCase() === 'active') return false;
+
+    if (publicIp && typeof db.updatePublicIp === 'function') {
+      await db.updatePublicIp(telegramId, serverId, datacenter, publicIp).catch(() => false);
+    }
+    const repaired = await db.updateScopedStatus?.(
+      telegramId,
+      serverId,
+      datacenter,
+      'active'
+    );
+
+    if (repaired) {
+      console.log('[HETZNER_DELIVERED_STATUS_REPAIRED]', {
+        server_id: String(serverId),
+        datacenter: String(datacenter),
+        previous_status: String(purchase.status || 'unknown')
+      });
+    }
+    return false;
+  };
+
+  db[DELIVERED_STATUS_REPAIR_MARK] = true;
+  return true;
+}
+
 function applyPatches(coreSource) {
   return applyPurchaseConfirmationSafetyPatches(
     applyLoyaltyHistoryPatches(
@@ -106,6 +167,7 @@ function run() {
   installSafeLifecycleModule();
   installHetznerReconcilePolicy();
   installCleanIpChangeModule();
+  installDeliveredStatusRepair();
   const corePath = path.join(__dirname, 'index-core.js');
   const source = applyPatches(fs.readFileSync(corePath, 'utf8'));
   const child = new Module(corePath, module.parent);
@@ -120,6 +182,7 @@ module.exports = {
   applyPatches,
   applyRuntimeSafetyDefaults,
   installCleanIpChangeModule,
+  installDeliveredStatusRepair,
   installSafeLifecycleModule,
   run
 };
