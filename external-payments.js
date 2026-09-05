@@ -8,6 +8,7 @@ const PLANS = Object.freeze({
 });
 const START_BUCKETS = new Map();
 const MERCHANT_FALLBACK = '68985f4ba45c72000bcfd5a2';
+const PAYMENT_PUBLIC_ORIGIN = 'https://pay.hamooncloud.ir';
 
 function validIntent(value) { return /^[A-Za-z0-9_-]{20,128}$/.test(String(value || '')); }
 function validReceipt(value) { return /^[a-f0-9]{24,64}$/.test(String(value || '')); }
@@ -71,7 +72,7 @@ async function createGatewayPayment({ db, axios, appName, intent, plan, amountTo
   const amountRial = Number(amountToman) * 10;
   const orderId = `${orderPrefix}-${receipt}`;
   const merchant = process.env.ZIBAL_MERCHANT_ID || MERCHANT_FALLBACK;
-  const callbackUrl = `https://pay.hamooncloud.ir${callbackPath}?receipt=${encodeURIComponent(receipt)}`;
+  const callbackUrl = `${PAYMENT_PUBLIC_ORIGIN}${callbackPath}?receipt=${encodeURIComponent(receipt)}`;
   await ensureTable(db);
   await db.pool.execute(
     `INSERT INTO external_payments(receipt,app,external_ref,plan,amount_toman,amount_rial,order_id,metadata_hash,status)
@@ -173,7 +174,7 @@ function mountExternalPayments(app, { db, axios }) {
     if (!validIntent(intent)||!selected) return res.status(400).send(errorPage('لینک پرداخت معتبر نیست','لطفاً از داخل وستالند دوباره روی پرداخت بزن.'));
     try {
       const p=await createGatewayPayment({db,axios,appName:'vestaland',intent,plan,amountToman:selected.amountToman,label:selected.label,orderPrefix:'vl',callbackPath:'/payments/vestaland/callback'});
-      return res.redirect(302,`https://gateway.zibal.ir/start/${encodeURIComponent(p.trackId)}`);
+      return res.redirect(302,`${PAYMENT_PUBLIC_ORIGIN}/payment/start/${encodeURIComponent(p.trackId)}`);
     } catch (error) {
       console.error('[VESTALAND_PAYMENT_START]',error.gatewayData||error.response?.data||error.code||error.message);
       return res.status(502).send(errorPage('درگاه در دسترس نیست','شروع پرداخت انجام نشد. لطفاً دوباره امتحان کن.'));
@@ -196,7 +197,7 @@ function mountExternalPayments(app, { db, axios }) {
         return res.status(409).send(errorPage('سفارش قابل پرداخت نیست','سبد یا مبلغ تغییر کرده؛ از داخل وستالند دوباره پرداخت رو شروع کن.'));
       }
       const p=await createGatewayPayment({db,axios,appName:'vestaland-market',intent,plan:store,amountToman,label:String(d.label||'خرید بازار وستالند').slice(0,180),orderPrefix:'vlm',callbackPath:'/payments/vestaland-market/callback',metadataHash});
-      return res.redirect(302,`https://gateway.zibal.ir/start/${encodeURIComponent(p.trackId)}`);
+      return res.redirect(302,`${PAYMENT_PUBLIC_ORIGIN}/payment/start/${encodeURIComponent(p.trackId)}`);
     } catch (error) {
       console.error('[VESTALAND_MARKET_START]',error.gatewayData||error.response?.data||error.code||error.message);
       return res.status(502).send(errorPage('شروع پرداخت انجام نشد','اتصال امن هامون‌کلود به سفارش برقرار نشد. لطفاً دوباره امتحان کن.'));
