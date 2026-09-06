@@ -28,5 +28,15 @@ assert(handler.includes('openstackApi.listFlavors(dcConfig)'), 'cycle change doe
 assert(handler.includes('getFlavorCyclePrice(selectedFlavor, newCycle)'), 'target cycle does not use the catalog cycle price');
 assert(!handler.includes('Math.round(hourlyPrice * targetCycleHours)'), 'target price still extrapolates hourly price by cycle hours');
 
+assert(handler.includes('openstackApi.isHetznerConfig(dcConfig)'), 'existing Hetzner plan recovery is not provider-scoped');
+assert(handler.includes('openstackApi.getServer(dcConfig, null, serverId)'), 'existing Hetzner plan recovery does not verify the provider server type');
+assert(handler.includes('openstackApi.listHetznerServerTypes(dcConfig)'), 'existing Hetzner plan recovery does not use the raw server type catalog');
+assert(handler.includes('providerFlavorId === purchaseFlavorId'), 'existing Hetzner plan recovery does not require DB/provider flavor agreement');
+assert(handler.includes('BILLING_CYCLE_EXISTING_HETZNER_PLAN_RECOVERED'), 'existing Hetzner plan recovery audit marker is missing');
+assert(handler.includes('BILLING_CYCLE_RECOVERED_PRICE_MISMATCH'), 'recovered Hetzner pricing drift guard is missing');
+assert(handler.includes('currentCycleAmount * 0.25'), 'recovered Hetzner pricing drift tolerance is missing');
+assert(handler.includes('price_monthly?.gross'), 'recovered Hetzner monthly price does not come from provider raw pricing');
+assert(handler.includes('price_hourly?.gross'), 'recovered Hetzner hourly price does not come from provider raw pricing');
+
 new vm.Script(patched, { filename: 'index-core.patched.js' });
 console.log('validate-billing-cycle-change: ok');
