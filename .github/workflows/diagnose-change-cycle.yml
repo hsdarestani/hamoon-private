@@ -41,9 +41,13 @@ jobs:
           echo '=== LIVE COMMIT ==='
           git rev-parse HEAD
           git log -1 --oneline
-          echo '=== RECENT CYCLE / TELEGRAM ERRORS ==='
-          pm2 logs hamoonbot --lines 4000 --nostream 2>/dev/null \
-            | grep -Ei "BILLING_CYCLE_CHANGE_FAILED|BILLING_CYCLE_LIVE_PRICE_FALLBACK|BILLING_FLAVOR|INVALID_TARGET_BILLING_AMOUNT|INVALID_BILLING_AMOUNT|Change Cycle|change cycle|DB_UPDATE_CYCLE|Error sending message|Telegram API Error Body|parse entities|reserved|can't parse|cannot parse|wallet|deadlock|lock wait" \
-            | tail -n 700 || true
+          echo '=== BILLING FAILURE CONTEXT ==='
+          pm2 logs hamoonbot --lines 5000 --nostream 2>/dev/null \
+            | grep -A 8 -B 1 -E "\[BILLING_CYCLE_CHANGE_FAILED\]|\[BILLING_CYCLE_LIVE_PRICE_FALLBACK\]" \
+            | tail -n 320 || true
+          echo '=== RELATED TELEGRAM ERRORS ==='
+          pm2 logs hamoonbot --lines 2500 --nostream 2>/dev/null \
+            | grep -Ei "Error sending message|Telegram API Error Body|parse entities|reserved|can't parse|cannot parse" \
+            | tail -n 120 || true
           echo '=== END ==='
           REMOTE
