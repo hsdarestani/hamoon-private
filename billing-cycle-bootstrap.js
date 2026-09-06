@@ -50,9 +50,8 @@ function applyBillingCyclePatches(source) {
       return editOrSendMessage(chatId, messageId, '❌ دوره پرداخت فعلی یا انتخاب‌شده نامعتبر است.');
     }
 
-    // Use the exact same plan catalog that the normal purchase flow uses. In
-    // particular, Hetzner monthly prices must come from amount_monthly rather
-    // than from hourly * 720, because Hetzner's monthly cap can be lower.
+    // Prefer the same sellable catalog used by normal purchases. Hetzner's
+    // monthly cap must come from amount_monthly rather than hourly * 720.
     let pricingDc = dcConfig;
     try {
       const liveFlavors = await openstackApi.listFlavors(dcConfig);
@@ -68,12 +67,108 @@ function applyBillingCyclePatches(source) {
     }
 
     const purchaseFlavorId = String(purchase.flavor_id || '').trim().toLowerCase();
-    const selectedFlavor = (Array.isArray(pricingDc?.flavors) ? pricingDc.flavors : []).find((flavor) => {
+    let selectedFlavor = (Array.isArray(pricingDc?.flavors) ? pricingDc.flavors : []).find((flavor) => {
       const ids = [flavor?.id, flavor?.hetzner_type, flavor?.server_type]
         .filter(Boolean)
         .map((value) => String(value).trim().toLowerCase());
       return ids.includes(purchaseFlavorId);
     });
+
+    // Existing Hetzner servers can legitimately use a server type that is no
+    // longer returned by the *sellable* catalog for that location. Billing an
+    // existing server must not depend on whether the plan can be newly ordered
+    // today. If Hetzner confirms that the running server still has the same
+    // type stored in our purchase record, recover its location-specific raw
+    // hourly/monthly prices directly from /server_types.
+    if (!selectedFlavor && openstackApi.isHetznerConfig(dcConfig)) {
+      try {
+        const providerServer = await openstackApi.getServer(dcConfig, null, serverId);
+        const providerFlavorId = String(
+          providerServer?.server_type?.name ||
+          providerServer?.server_type ||
+          providerServer?.type ||
+          ''
+        ).trim().toLowerCase();
+
+        if (providerFlavorId && providerFlavorId === purchaseFlavorId) {
+          const rawTypes = await openstackApi.listHetznerServerTypes(dcConfig);
+          const rawType = (Array.isArray(rawTypes) ? rawTypes : []).find((serverType) =>
+            String(serverType?.name || '').trim().toLowerCase() === providerFlavorId
+          );
+
+          if (rawType) {
+            const preferredLocation = String(dcConfig?.HETZNER_LOCATION || dcConfig?.location || '').trim().toLowerCase();
+            const fallbackLocations = String(dcConfig?.HETZNER_LOCATION_FALLBACKS || '')
+              .split(',')
+              .map((value) => String(value || '').trim().toLowerCase())
+              .filter(Boolean);
+            const priceLocations = [...new Set([preferredLocation, ...fallbackLocations].filter(Boolean))];
+            const rawPrices = Array.isArray(rawType?.prices) ? rawType.prices : [];
+            let rawPrice = null;
+
+            for (const location of priceLocations) {
+              rawPrice = rawPrices.find((price) =>
+                String(price?.location || '').trim().toLowerCase() === location &&
+                (price?.price_hourly || price?.price_monthly)
+              ) || null;
+              if (rawPrice) break;
+            }
+            if (!rawPrice && !priceLocations.length) {
+              rawPrice = rawPrices.find((price) => price?.price_hourly || price?.price_monthly) || null;
+            }
+
+            const hourlyEur = Number(rawPrice?.price_hourly?.gross || rawPrice?.price_hourly?.net || 0);
+            const monthlyEur = Number(rawPrice?.price_monthly?.gross || rawPrice?.price_monthly?.net || 0);
+
+            if (hourlyEur > 0 && monthlyEur > 0) {
+              const eurToToman = Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
+              const baseMultiplier = Number(process.env.HETZNER_PRICE_MULTIPLIER || 1);
+              const hourlyMultiplier = Number(process.env.HETZNER_HOURLY_PRICE_MULTIPLIER || baseMultiplier);
+              const monthlyMultiplier = Number(process.env.HETZNER_MONTHLY_PRICE_MULTIPLIER || baseMultiplier);
+              const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
+              const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
+              const roundTo = Math.max(1, Number(process.env.HETZNER_PRICE_ROUND_TO || 1000));
+              const roundProviderPrice = (value) => Math.max(roundTo, Math.ceil(Number(value || 0) / roundTo) * roundTo);
+              const hourlyToman = roundProviderPrice(Math.max(minHourly, hourlyEur * eurToToman * hourlyMultiplier));
+              const monthlyToman = roundProviderPrice(Math.max(minMonthly, monthlyEur * eurToToman * monthlyMultiplier));
+
+              selectedFlavor = {
+                id: providerFlavorId,
+                hetzner_type: providerFlavorId,
+                server_type: providerFlavorId,
+                amount_hourly: hourlyToman,
+                amount_monthly: monthlyToman,
+                hourly_price_toman: hourlyToman,
+                monthly_price_toman: monthlyToman,
+                price: hourlyToman,
+                monthly_toman: monthlyToman,
+                __existingHetznerBillingRecovery: true
+              };
+              pricingDc = {
+                ...pricingDc,
+                flavors: [selectedFlavor, ...(Array.isArray(pricingDc?.flavors) ? pricingDc.flavors : [])]
+              };
+
+              console.log('[BILLING_CYCLE_EXISTING_HETZNER_PLAN_RECOVERED]', {
+                server_id: serverId,
+                datacenter: purchase.datacenter,
+                flavor_id: providerFlavorId,
+                location: rawPrice?.location || preferredLocation || null,
+                hourly_amount: hourlyToman,
+                monthly_amount: monthlyToman
+              });
+            }
+          }
+        }
+      } catch (recoveryError) {
+        console.warn('[BILLING_CYCLE_EXISTING_HETZNER_PLAN_RECOVERY_FAILED]', {
+          server_id: serverId,
+          datacenter: purchase.datacenter,
+          flavor_id: purchaseFlavorId,
+          message: recoveryError?.message || String(recoveryError)
+        });
+      }
+    }
 
     if (!selectedFlavor) {
       throw Object.assign(new Error('BILLING_FLAVOR_NOT_FOUND'), { code: 'BILLING_FLAVOR_NOT_FOUND' });
@@ -82,6 +177,25 @@ function applyBillingCyclePatches(source) {
     const currentCycleAmount = Number(normalizeStoredCycleAmount(purchase, pricingDc) || 0);
     if (!(currentCycleAmount > 0)) {
       throw Object.assign(new Error('INVALID_BILLING_AMOUNT'), { code: 'INVALID_BILLING_AMOUNT' });
+    }
+
+    // For a recovered non-sellable Hetzner plan, protect grandfathered/legacy
+    // records: only use today's raw provider price when it is reasonably close
+    // to the amount already stored for the current cycle.
+    if (selectedFlavor.__existingHetznerBillingRecovery) {
+      const providerCurrentPrice = Number(getFlavorCyclePrice(selectedFlavor, currentCycle) || 0);
+      const allowedDrift = Math.max(2000, currentCycleAmount * 0.25);
+      if (!(providerCurrentPrice > 0) || Math.abs(providerCurrentPrice - currentCycleAmount) > allowedDrift) {
+        console.warn('[BILLING_CYCLE_RECOVERED_PRICE_MISMATCH]', {
+          server_id: serverId,
+          datacenter: purchase.datacenter,
+          flavor_id: purchaseFlavorId,
+          stored_amount: currentCycleAmount,
+          provider_amount: providerCurrentPrice,
+          allowed_drift: allowedDrift
+        });
+        throw Object.assign(new Error('BILLING_RECOVERED_PRICE_MISMATCH'), { code: 'BILLING_RECOVERED_PRICE_MISMATCH' });
+      }
     }
 
     const catalogTargetPrice = Number(getFlavorCyclePrice(selectedFlavor, newCycle) || 0);
@@ -163,7 +277,12 @@ function applyBillingCyclePatches(source) {
       message: error?.message || String(error)
     });
 
-    const pricingErrorCodes = new Set(['INVALID_BILLING_AMOUNT', 'INVALID_TARGET_BILLING_AMOUNT', 'BILLING_FLAVOR_NOT_FOUND']);
+    const pricingErrorCodes = new Set([
+      'INVALID_BILLING_AMOUNT',
+      'INVALID_TARGET_BILLING_AMOUNT',
+      'BILLING_FLAVOR_NOT_FOUND',
+      'BILLING_RECOVERED_PRICE_MISMATCH'
+    ]);
     const safeMessage = pricingErrorCodes.has(error?.code)
       ? '❌ قیمت دوره این سرور به‌صورت معتبر پیدا نشد و برای جلوگیری از محاسبه اشتباه تغییری انجام نشد. لطفاً با پشتیبانی تماس بگیرید.'
       : '❌ تغییر دوره پرداخت انجام نشد. لطفاً دوباره تلاش کنید و اگر مشکل ادامه داشت با پشتیبانی تماس بگیرید.';
