@@ -45,9 +45,74 @@ jobs:
           pm2 logs hamoonbot --lines 5000 --nostream 2>/dev/null \
             | grep -A 8 -B 1 -E "\[BILLING_CYCLE_CHANGE_FAILED\]|\[BILLING_CYCLE_LIVE_PRICE_FALLBACK\]" \
             | tail -n 320 || true
-          echo '=== RELATED TELEGRAM ERRORS ==='
-          pm2 logs hamoonbot --lines 2500 --nostream 2>/dev/null \
-            | grep -Ei "Error sending message|Telegram API Error Body|parse entities|reserved|can't parse|cannot parse" \
-            | tail -n 120 || true
+          echo '=== FAILED SERVER DETAILS ==='
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const datacenters = require('./datacenters');
+          const cloudApi = require('./cloud-api');
+          const ids = ['164667660', '164612695'];
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            const [rows] = await conn.execute(
+              'SELECT telegram_id,server_id,datacenter,flavor_id,duration,amount,status,created_at,updated_at,last_billed_at FROM purchases WHERE server_id IN (?,?) ORDER BY server_id',
+              ids
+            );
+            for (const row of rows) {
+              const dc = datacenters[row.datacenter];
+              let providerType = null;
+              let providerLocation = null;
+              let providerError = null;
+              try {
+                const srv = await cloudApi.getServer(dc, null, row.server_id);
+                providerType = srv?.server_type?.name || srv?.server_type || srv?.flavor?.id || srv?.type || null;
+                providerLocation = srv?.datacenter?.location?.name || srv?.location?.name || srv?.location || null;
+              } catch (e) {
+                providerError = e?.message || String(e);
+              }
+              let liveMatch = null;
+              let liveCount = 0;
+              let liveError = null;
+              try {
+                const flavors = await cloudApi.listFlavors(dc);
+                liveCount = Array.isArray(flavors) ? flavors.length : 0;
+                const keys = [row.flavor_id, providerType].filter(Boolean).map(v => String(v).trim().toLowerCase());
+                liveMatch = (flavors || []).find(f => [f?.id, f?.hetzner_type, f?.server_type].filter(Boolean).map(v => String(v).trim().toLowerCase()).some(v => keys.includes(v))) || null;
+              } catch (e) {
+                liveError = e?.message || String(e);
+              }
+              console.log(JSON.stringify({
+                telegram_id: String(row.telegram_id),
+                server_id: String(row.server_id),
+                datacenter: row.datacenter,
+                flavor_id: row.flavor_id,
+                duration: row.duration,
+                amount: Number(row.amount || 0),
+                status: row.status,
+                created_at: row.created_at,
+                last_billed_at: row.last_billed_at,
+                provider_type: providerType,
+                provider_location: providerLocation,
+                provider_error: providerError,
+                live_catalog_count: liveCount,
+                live_match: liveMatch ? {
+                  id: liveMatch.id,
+                  hetzner_type: liveMatch.hetzner_type,
+                  amount_hourly: liveMatch.amount_hourly,
+                  amount_monthly: liveMatch.amount_monthly,
+                  price: liveMatch.price,
+                  monthly_toman: liveMatch.monthly_toman
+                } : null,
+                live_error: liveError
+              }));
+            }
+            await conn.end();
+          })().catch(err => { console.error('DETAIL_DIAG_FAILED', err); process.exit(1); });
+          NODE
           echo '=== END ==='
           REMOTE
