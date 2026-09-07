@@ -29,7 +29,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Compact duplicate billing audit
+      - name: Lifetime duplicate billing audit
         shell: bash
         run: |
           set -euo pipefail
@@ -42,45 +42,41 @@ jobs:
           require('dotenv').config();
           const mysql = require('mysql2/promise');
           const userId = '1045202254';
-          const iso = v => v ? new Date(v).toISOString() : null;
-
           (async () => {
-            const c = await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
             try {
-              const [[u]] = await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]);
-              if (!u) throw new Error('USER_NOT_FOUND');
-              console.log('AUDIT_USER=' + userId);
-              console.log('WALLET=' + Number(u.wallet||0));
-
-              const [purchases] = await c.execute(`SELECT server_id,server_name,duration,amount FROM purchases WHERE telegram_id=? AND status!='deleted' ORDER BY created_at`,[userId]);
-              console.log('PURCHASE_COUNT=' + purchases.length);
-              for (const p of purchases) console.log('SERVER=' + JSON.stringify({server_id:String(p.server_id),server_name:String(p.server_name||''),duration:String(p.duration||''),amount:Number(p.amount||0)}));
-
-              const [logs] = await c.execute(`SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? AND amount<0 AND type='billing' AND timestamp>=DATE_SUB(NOW(),INTERVAL 30 DAY) ORDER BY timestamp,id`,[userId]);
-              const candidates=[];
-              for (const p of purchases) {
-                const sid=String(p.server_id||''); const name=String(p.server_name||'');
-                const m=logs.filter(l=>{const d=String(l.description||''); return (sid&&d.includes(sid))||(name&&d.includes(name));});
+              const [[u]]=await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]);
+              if(!u) throw new Error('USER_NOT_FOUND');
+              const [purchases]=await c.execute(`SELECT server_id,server_name,duration,amount,created_at FROM purchases WHERE telegram_id=? AND status!='deleted' ORDER BY created_at`,[userId]);
+              const [logs]=await c.execute(`SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? AND amount<0 AND type='billing' ORDER BY timestamp,id`,[userId]);
+              const unique=[]; const seen=new Set(); const byServer={};
+              for(const p of purchases){
+                const sid=String(p.server_id||''), name=String(p.server_name||'');
+                const matching=logs.filter(l=>{const d=String(l.description||'');return (sid&&d.includes(sid))||(name&&d.includes(name));});
                 let prev=null;
-                for (const l of m) {
-                  if (prev) {
+                for(const l of matching){
+                  if(prev){
                     const gap=(new Date(l.timestamp)-new Date(prev.timestamp))/1000;
-                    if (gap>=0 && gap<600) candidates.push({server_id:sid,server_name:name,duration:String(p.duration||''),first_log_id:Number(prev.id),duplicate_log_id:Number(l.id),first_at:iso(prev.timestamp),duplicate_at:iso(l.timestamp),gap_seconds:Math.round(gap),first_amount:Number(prev.amount),duplicate_amount:Number(l.amount),refund_candidate:Math.abs(Number(l.amount||0))});
+                    if(gap>=0&&gap<600&&!seen.has(Number(l.id))){
+                      seen.add(Number(l.id));
+                      unique.push({id:Number(l.id),amount:Math.abs(Number(l.amount||0)),server_id:sid});
+                      byServer[sid]=(byServer[sid]||0)+1;
+                    }
                   }
                   prev=l;
                 }
               }
-              const unique=[]; const seen=new Set();
-              for (const x of candidates) if (!seen.has(x.duplicate_log_id)) {seen.add(x.duplicate_log_id); unique.push(x);}
-              console.log('DUPLICATE_CANDIDATE_COUNT=' + unique.length);
-              for (const x of unique) console.log('DUPLICATE=' + JSON.stringify(x));
-              console.log('DUPLICATE_LOG_IDS=' + unique.map(x=>x.duplicate_log_id).join(','));
-              console.log('REFUND_CANDIDATE_TOMAN=' + Math.round(unique.reduce((s,x)=>s+x.refund_candidate,0)));
-
+              const refund=Math.round(unique.reduce((s,x)=>s+x.amount,0));
               const [refunds]=await c.execute(`SELECT id,amount,description,timestamp FROM wallet_logs WHERE telegram_id=? AND type='billing_duplicate_refund' ORDER BY timestamp DESC LIMIT 10`,[userId]);
-              console.log('EXISTING_DUPLICATE_REFUNDS=' + refunds.length);
-              for (const r of refunds) console.log('PRIOR_REFUND=' + JSON.stringify({id:Number(r.id),amount:Number(r.amount),description:String(r.description||''),timestamp:iso(r.timestamp)}));
-            } finally { await c.end(); }
+              console.log('AUDIT_SCOPE=LIFETIME');
+              console.log('WALLET='+Number(u.wallet||0));
+              console.log('PURCHASE_COUNT='+purchases.length);
+              console.log('EARLIEST_PURCHASE_AT='+(purchases[0]?.created_at?new Date(purchases[0].created_at).toISOString():'none'));
+              console.log('DUPLICATE_CANDIDATE_COUNT='+unique.length);
+              console.log('DUPLICATE_BY_SERVER='+JSON.stringify(byServer));
+              console.log('REFUND_CANDIDATE_TOMAN='+refund);
+              console.log('EXISTING_DUPLICATE_REFUNDS='+refunds.length);
+            } finally {await c.end();}
           })().catch(e=>{console.error('AUDIT_FAILED='+String(e.code||e.message));process.exit(1);});
           NODE
           REMOTE
