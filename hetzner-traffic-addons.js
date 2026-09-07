@@ -26,7 +26,7 @@ function mysqlDate(value) {
 
 function getCustomerTrafficPrice(pricePerTb) {
   const providerPricePerTb = Math.max(0, Number(pricePerTb || 0));
-  const fx = Math.max(0, Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000));
+  const fx = Math.max(0, Number(process.env.HETZNER_TRAFFIC_EUR_TO_TOMAN || process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000));
   const multiplier = Math.max(0, Number(process.env.HETZNER_TRAFFIC_PRICE_MULTIPLIER || process.env.HETZNER_PRICE_MULTIPLIER || 1));
   return {
     providerPricePerTb,
