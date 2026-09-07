@@ -10,6 +10,7 @@ const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
+const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
 const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
@@ -132,18 +133,20 @@ function applyPatches(coreSource) {
     applyLoyaltyHistoryPatches(
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
-          applyBillingRenewalGuardPatches(
-            applyHetznerManagementScopePatch(
-              applyHetznerPurchaseArchitecturePatches(
-                applyRebuildPatches(
-                  applyBillingCyclePatches(
-                    applyHetznerChangeIpPatches(
-                      applyHetznerTrafficPatches(
-                        applyFeaturePatches(
-                          applyHetznerPendingDeliveryRecoveryPatches(
-                            applyProviderVisibilityPatches(
-                              applyHetznerUpgradeSafetyPatches(
-                                applyZibalRefererPatches(coreSource)
+          applyBillingSettlementPatches(
+            applyBillingRenewalGuardPatches(
+              applyHetznerManagementScopePatch(
+                applyHetznerPurchaseArchitecturePatches(
+                  applyRebuildPatches(
+                    applyBillingCyclePatches(
+                      applyHetznerChangeIpPatches(
+                        applyHetznerTrafficPatches(
+                          applyFeaturePatches(
+                            applyHetznerPendingDeliveryRecoveryPatches(
+                              applyProviderVisibilityPatches(
+                                applyHetznerUpgradeSafetyPatches(
+                                  applyZibalRefererPatches(coreSource)
+                                )
                               )
                             )
                           )
