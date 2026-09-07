@@ -74,6 +74,46 @@ function buildMetricsPath(serverId, range, now = new Date()) {
   };
 }
 
+function normalizeLocation(value) {
+  return String(value?.name || value || '').trim().toLowerCase();
+}
+
+function getServerTrafficPricing(server, dcConfig = {}) {
+  const prices = Array.isArray(server?.server_type?.prices) ? server.server_type.prices : [];
+  const wanted = [
+    normalizeLocation(server?.datacenter?.location?.name),
+    normalizeLocation(server?.datacenter?.location),
+    normalizeLocation(dcConfig?.HETZNER_LOCATION),
+    normalizeLocation(dcConfig?.location)
+  ].filter(Boolean);
+
+  let price = null;
+  for (const location of wanted) {
+    price = prices.find(item => normalizeLocation(item?.location) === location) || null;
+    if (price) break;
+  }
+  if (!price && prices.length === 1) price = prices[0];
+
+  const includedTraffic = Math.max(0, Number(
+    price?.included_traffic ??
+    server?.included_traffic ??
+    0
+  ));
+  const pricePerTbTraffic = Number(
+    price?.price_per_tb_traffic?.gross ??
+    price?.price_per_tb_traffic?.net ??
+    process.env.HETZNER_TRAFFIC_EUR_PER_TB ??
+    0
+  );
+
+  return {
+    included_traffic: includedTraffic,
+    price_per_tb_traffic: Math.max(0, pricePerTbTraffic),
+    currency: String(process.env.HETZNER_TRAFFIC_CURRENCY || 'EUR'),
+    pricing_location: price?.location || wanted[0] || null
+  };
+}
+
 async function getServerTraffic(dcConfig, serverId, range = 'current') {
   const selectedRange = selectedTrafficRange(range);
   const generatedAt = new Date();
@@ -92,6 +132,7 @@ async function getServerTraffic(dcConfig, serverId, range = 'current') {
     throw error;
   }
 
+  const pricing = getServerTrafficPricing(server, dcConfig);
   const result = {
     server_id: String(server.id),
     server_name: server.name || String(server.id),
@@ -99,7 +140,10 @@ async function getServerTraffic(dcConfig, serverId, range = 'current') {
     range: selectedRange,
     incoming_traffic: Math.max(0, Number(server.ingoing_traffic || 0)),
     outgoing_traffic: Math.max(0, Number(server.outgoing_traffic || 0)),
-    included_traffic: Math.max(0, Number(server.included_traffic || 0)),
+    included_traffic: pricing.included_traffic,
+    price_per_tb_traffic: pricing.price_per_tb_traffic,
+    traffic_price_currency: pricing.currency,
+    pricing_location: pricing.pricing_location,
     period_incoming_traffic: null,
     period_outgoing_traffic: null,
     period_available: selectedRange === 'current',
@@ -110,9 +154,8 @@ async function getServerTraffic(dcConfig, serverId, range = 'current') {
   };
 
   if (selectedRange === 'current') {
-    // Hetzner's server counters are the provider-authoritative counters for the
-    // current calendar-month traffic allowance. They are intentionally not tied
-    // to the customer's HamoonCloud purchase/renewal date.
+    // Hetzner's server counters are provider-authoritative for the current
+    // calendar-month allowance. Billing is based on outgoing traffic only.
     result.period_incoming_traffic = result.incoming_traffic;
     result.period_outgoing_traffic = result.outgoing_traffic;
     return result;
@@ -144,5 +187,6 @@ module.exports = {
   selectedTrafficRange,
   currentHetznerTrafficPeriod,
   buildMetricsPath,
+  getServerTrafficPricing,
   getServerTraffic
 };
