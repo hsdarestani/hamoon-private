@@ -6,6 +6,9 @@ on:
     paths:
       - 'hetzner-traffic.js'
       - 'hetzner-traffic-bootstrap.js'
+      - 'hetzner-traffic-addons.js'
+      - 'billing-settlement-bootstrap.js'
+      - 'billing-settlement.js'
       - 'scripts/validate-hetzner-traffic.js'
       - 'scripts/validate-hetzner-traffic-period.js'
       - '.github/workflows/deploy-hetzner-traffic-period.yml'
@@ -13,6 +16,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: hamoon-production-billing-deploy
+  cancel-in-progress: false
 
 jobs:
   validate-and-deploy:
@@ -32,6 +39,9 @@ jobs:
           set -euo pipefail
           node --check hetzner-traffic.js
           node --check hetzner-traffic-bootstrap.js
+          node --check hetzner-traffic-addons.js
+          node --check billing-settlement.js
+          node --check billing-settlement-bootstrap.js
           node --check runtime-bootstrap.js
           node scripts/validate-hetzner-traffic.js
           node scripts/validate-hetzner-traffic-period.js
@@ -61,12 +71,21 @@ jobs:
           cd "$APP_PATH"
           echo '=== BEFORE ==='
           git rev-parse --short HEAD
-          git fetch origin main
+          fetched=0
+          for attempt in 1 2 3 4 5 6; do
+            if git fetch origin main; then fetched=1; break; fi
+            echo "git fetch collision; retry $attempt/6"
+            sleep 3
+          done
+          test "$fetched" = 1
           git checkout main
           git merge --ff-only origin/main
           echo '=== VALIDATE ==='
           node --check hetzner-traffic.js
           node --check hetzner-traffic-bootstrap.js
+          node --check hetzner-traffic-addons.js
+          node --check billing-settlement.js
+          node --check billing-settlement-bootstrap.js
           node --check runtime-bootstrap.js
           node scripts/validate-hetzner-traffic.js
           node scripts/validate-hetzner-traffic-period.js
@@ -75,7 +94,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT TRAFFIC ERRORS ==='
-          pm2 logs hamoonbot --lines 160 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|HETZNER_TRAFFIC_ERROR|hetzner-traffic' | tail -n 80 || true
+          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|HETZNER_TRAFFIC_ERROR|HETZNER_TRAFFIC_BUY|HETZNER_TRAFFIC_BILLING|hetzner-traffic' | tail -n 100 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
