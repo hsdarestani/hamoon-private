@@ -7,6 +7,7 @@ on:
       - 'hetzner-traffic.js'
       - 'hetzner-traffic-bootstrap.js'
       - 'hetzner-traffic-addons.js'
+      - 'hetzner-change-ip-bootstrap.js'
       - 'billing-settlement-bootstrap.js'
       - 'billing-settlement.js'
       - 'scripts/validate-hetzner-traffic.js'
@@ -40,6 +41,7 @@ jobs:
           node --check hetzner-traffic.js
           node --check hetzner-traffic-bootstrap.js
           node --check hetzner-traffic-addons.js
+          node --check hetzner-change-ip-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
           node --check runtime-bootstrap.js
@@ -84,6 +86,7 @@ jobs:
           node --check hetzner-traffic.js
           node --check hetzner-traffic-bootstrap.js
           node --check hetzner-traffic-addons.js
+          node --check hetzner-change-ip-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
           node --check runtime-bootstrap.js
@@ -94,7 +97,7 @@ jobs:
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
           echo '=== RECENT TRAFFIC ERRORS ==='
-          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|HETZNER_TRAFFIC_ERROR|HETZNER_TRAFFIC_BUY|HETZNER_TRAFFIC_BILLING|hetzner-traffic' | tail -n 100 || true
+          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|HETZNER_TRAFFIC_ERROR|HETZNER_TRAFFIC_BUY|HETZNER_TRAFFIC_BILLING|hetzner-traffic|HETZNER_CHANGE_IP' | tail -n 100 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
