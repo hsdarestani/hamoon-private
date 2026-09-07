@@ -106,7 +106,7 @@ function applyHetznerChangeIpPatches(originalSource) {
     'add change IP callbacks'
   );
 
-  const trafficBlock = `    if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId)) {\n      keyboard.push([{ text: '📊 مصرف ترافیک', callback_data: short('HETZNER_TRAFFIC', { range: 'current' }) }]);\n    }`;
+  const trafficBlock = `    if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId)) {\n      keyboard.push([\n        { text: '📊 مصرف ترافیک', callback_data: short('HETZNER_TRAFFIC', { range: 'current' }) },\n        { text: '➕ خرید ترافیک', callback_data: short('HETZNER_TRAFFIC_BUY') }\n      ]);\n    }`;
   const trafficAndIp = `${trafficBlock}\n    if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId) && ['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(String(purchase.status || '').toLowerCase())) {\n      keyboard.push([{ text: '🔄 تغییر IP', callback_data: short('HETZNER_CHANGE_IP_ASK') }]);\n    }`;
 
   source = replaceInSection(
