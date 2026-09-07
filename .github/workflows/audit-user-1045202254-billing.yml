@@ -1,0 +1,176 @@
+name: Audit user 1045202254 billing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-user-1045202254-billing.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Audit production billing records
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const userId = '1045202254';
+          const cycleHours = { hourly: 1, daily: 24, weekly: 168, monthly: 720 };
+          const iso = value => value instanceof Date ? value.toISOString() : (value ? new Date(value).toISOString() : null);
+
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || '127.0.0.1',
+              user: process.env.DB_USER,
+              password: process.env.DB_PASSWORD,
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            try {
+              const [users] = await conn.execute(
+                'SELECT telegram_id, wallet, created_at, updated_at FROM users WHERE telegram_id = ? LIMIT 1',
+                [userId]
+              );
+              if (!users.length) throw new Error('USER_NOT_FOUND');
+              console.log('USER ' + JSON.stringify({
+                telegram_id: userId,
+                wallet: Number(users[0].wallet || 0),
+                created_at: iso(users[0].created_at),
+                updated_at: iso(users[0].updated_at)
+              }));
+
+              const [purchases] = await conn.execute(
+                `SELECT server_id, datacenter, server_name, flavor_id, amount, duration, status, auto_renew,
+                        suspend_reason, created_at, last_billed_at, updated_at
+                 FROM purchases
+                 WHERE telegram_id = ? AND status != 'deleted'
+                 ORDER BY created_at ASC`,
+                [userId]
+              );
+              console.log('PURCHASE_COUNT=' + purchases.length);
+              for (const p of purchases) {
+                console.log('PURCHASE ' + JSON.stringify({
+                  ...p,
+                  amount: Number(p.amount || 0),
+                  created_at: iso(p.created_at),
+                  last_billed_at: iso(p.last_billed_at),
+                  updated_at: iso(p.updated_at)
+                }));
+              }
+
+              const [logs] = await conn.execute(
+                `SELECT id, amount, description, type, timestamp
+                 FROM wallet_logs
+                 WHERE telegram_id = ?
+                   AND timestamp >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 ORDER BY timestamp ASC, id ASC`,
+                [userId]
+              );
+              console.log('WALLET_LOG_COUNT_30D=' + logs.length);
+              for (const l of logs) {
+                console.log('WALLET_LOG ' + JSON.stringify({
+                  id: Number(l.id), amount: Number(l.amount || 0), type: l.type,
+                  description: String(l.description || '').slice(0, 240), timestamp: iso(l.timestamp)
+                }));
+              }
+
+              const negativeBilling = logs.filter(l => Number(l.amount) < 0 && ['billing','hetzner_traffic_overage'].includes(String(l.type || '').toLowerCase()));
+              const duplicateCandidates = [];
+
+              for (const p of purchases) {
+                const name = String(p.server_name || '').trim();
+                const serverId = String(p.server_id || '').trim();
+                if (!name && !serverId) continue;
+                const matching = negativeBilling.filter(l => {
+                  const d = String(l.description || '');
+                  return (name && d.includes(name)) || (serverId && d.includes(serverId));
+                });
+                matching.sort((a,b) => new Date(a.timestamp) - new Date(b.timestamp) || Number(a.id)-Number(b.id));
+
+                let previous = null;
+                for (const l of matching) {
+                  if (previous) {
+                    const deltaSec = (new Date(l.timestamp) - new Date(previous.timestamp)) / 1000;
+                    // A true server renewal cannot legitimately happen twice within 10 minutes,
+                    // including hourly plans. This threshold targets the reported cron/resume race.
+                    if (deltaSec >= 0 && deltaSec < 600 && String(l.type) === 'billing' && String(previous.type) === 'billing') {
+                      duplicateCandidates.push({
+                        server_id: serverId,
+                        server_name: name,
+                        duration: p.duration,
+                        expected_cycle_hours: cycleHours[String(p.duration)] || null,
+                        first_log_id: Number(previous.id),
+                        duplicate_log_id: Number(l.id),
+                        first_at: iso(previous.timestamp),
+                        duplicate_at: iso(l.timestamp),
+                        gap_seconds: Math.round(deltaSec),
+                        first_amount: Number(previous.amount),
+                        duplicate_amount: Number(l.amount),
+                        refund_candidate: Math.abs(Number(l.amount || 0)),
+                        first_description: String(previous.description || '').slice(0, 220),
+                        duplicate_description: String(l.description || '').slice(0, 220)
+                      });
+                    }
+                  }
+                  previous = l;
+                }
+              }
+
+              console.log('DUPLICATE_CANDIDATE_COUNT=' + duplicateCandidates.length);
+              let refund = 0;
+              const seenLogIds = new Set();
+              for (const d of duplicateCandidates) {
+                console.log('DUPLICATE_CANDIDATE ' + JSON.stringify(d));
+                if (!seenLogIds.has(d.duplicate_log_id)) {
+                  seenLogIds.add(d.duplicate_log_id);
+                  refund += Number(d.refund_candidate || 0);
+                }
+              }
+              console.log('REFUND_CANDIDATE_TOMAN=' + Math.round(refund));
+
+              const [existingRefunds] = await conn.execute(
+                `SELECT id, amount, description, type, timestamp
+                 FROM wallet_logs
+                 WHERE telegram_id = ? AND type = 'billing_duplicate_refund'
+                 ORDER BY timestamp DESC LIMIT 20`,
+                [userId]
+              );
+              console.log('EXISTING_DUPLICATE_REFUNDS=' + existingRefunds.length);
+              for (const r of existingRefunds) console.log('EXISTING_REFUND ' + JSON.stringify({id:Number(r.id),amount:Number(r.amount),description:r.description,timestamp:iso(r.timestamp)}));
+            } finally {
+              await conn.end();
+            }
+          })().catch(error => { console.error('AUDIT_FAILED', error.code || error.message); process.exit(1); });
+          NODE
+          REMOTE
