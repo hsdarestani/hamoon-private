@@ -277,7 +277,7 @@ async function settleHetznerTrafficOverage({
       return { status: 'already_billed', charged: 0, overageBytes: roundedOverage, billedBytes };
     }
 
-    const fx = Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
+    const fx = Number(process.env.HETZNER_TRAFFIC_EUR_TO_TOMAN || process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
     const multiplier = Number(process.env.HETZNER_TRAFFIC_PRICE_MULTIPLIER || process.env.HETZNER_PRICE_MULTIPLIER || 1);
     const rawToman = (deltaBytes / DECIMAL_TB_BYTES) * providerPricePerTb * fx * multiplier;
     const amount = Math.max(1, Math.round(rawToman));
