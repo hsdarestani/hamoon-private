@@ -19,125 +19,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build legacy baseline
+      - name: Compose legacy runtime and apply resume recovery
         run: |
+          set -euo pipefail
+          node --check resume-transactional-bootstrap.js
+          node --check billing-settlement-recovery.js
           node - <<'NODE'
           const fs = require('fs');
-          const { applyProviderVisibilityPatches } = require('./provider-visibility-bootstrap');
-          const { applyHetznerPendingDeliveryRecoveryPatches } = require('./hetzner-pending-delivery-recovery-bootstrap');
-          const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
-          const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
-          const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
-          const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
-          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
-          const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
-          const { applyRebuildPatches } = require('./rebuild-bootstrap');
-          const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
-          const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
-          const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
-          const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-bootstrap');
-          const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
-          const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
-          const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmation-safety-bootstrap');
-          const core = fs.readFileSync('index-core.js','utf8');
-          const baseline = applyPurchaseConfirmationSafetyPatches(
-            applyLoyaltyHistoryPatches(
-              applyLoyaltyClubPatches(
-                applyResellerBillingGracePatches(
-                  applyBillingSettlementPatches(
-                    applyBillingRenewalGuardPatches(
-                      applyHetznerManagementScopePatch(
-                        applyHetznerPurchaseArchitecturePatches(
-                          applyRebuildPatches(
-                            applyBillingCyclePatches(
-                              applyHetznerChangeIpPatches(
-                                applyHetznerTrafficPatches(
-                                  applyFeaturePatches(
-                                    applyHetznerPendingDeliveryRecoveryPatches(
-                                      applyProviderVisibilityPatches(
-                                        applyHetznerUpgradeSafetyPatches(
-                                          applyZibalRefererPatches(core)
-                                        )
-                                      )
-                                    )
-                                  )
-                                )
-                              )
-                            )
-                          )
-                        )
-                      )
-                    )
-                  )
-                )
-              )
-            )
-          );
-          fs.writeFileSync('/tmp/hamoon-baseline.js', baseline);
-          console.log('baseline: ok');
-          NODE
-
-      - name: Anchor settlement import
-        run: grep -F "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');" /tmp/hamoon-baseline.js
-
-      - name: Anchor resume function
-        run: grep -F "async function resumePurchaseWithBillingGuard(userId, purchase, dcConfig) {" /tmp/hamoon-baseline.js
-
-      - name: Anchor charged declaration
-        run: |
-          node - <<'NODE'
-          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
-          if(!s.includes("  let charged = 0;\n  if (renewal.cycleDue) {")) throw new Error('CHARGED_DECLARATION_ANCHOR_MISSING');
-          NODE
-
-      - name: Anchor charged settlement line
-        run: grep -F "charged = settlement.status === 'charged' ? Number(settlement.charged || renewal.cycleAmount) : 0;" /tmp/hamoon-baseline.js
-
-      - name: Anchor provider power block
-        run: |
-          node - <<'NODE'
-          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
-          const n=`  try {
-            await openstackApi.resumeServer(dcConfig, null, serverId);
-          } catch (error) {
-            await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
-            await updatePurchaseSuspendReason(serverId, 'resume_failed').catch(() => {});
-            throw error;
+          const runtime = require('./runtime-bootstrap');
+          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
+          const baseline = runtime.applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          const out = applyResumeTransactionalPatches(baseline);
+          const required = [
+            "require('./billing-settlement-recovery')",
+            'renewalSettlementEventKey',
+            'rollbackServerRenewalAtomic({',
+            'PROVIDER_POWER_ON_NOT_CONFIRMED',
+            'resumeProviderErrorMessage(error)'
+          ];
+          for (const marker of required) {
+            if (!out.includes(marker)) throw new Error('FINAL_RESUME_MARKER_MISSING:' + marker);
           }
-
-          if (!charged) {
-            await updatePurchaseStatus(serverId, 'active');
-            await updatePurchaseSuspendReason(serverId, null).catch(() => {});
-          }
-          `;
-          if(!s.includes(n)) throw new Error('PROVIDER_POWER_BLOCK_ANCHOR_MISSING');
-          NODE
-
-      - name: Anchor bulk error block
-        run: |
-          node - <<'NODE'
-          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
-          const n=`        console.error('[START_MY_SERVERS] failed:', { userId, server_id: purchase.server_id, dcKey, error: error.message });
-                  results.push({ name: purchase.server_name || purchase.server_id, ok: false, message: 'روشن‌کردن سرور با خطای ارائه‌دهنده مواجه شد. لطفاً کمی بعد دوباره تلاش کنید.' });`;
-          if(!s.includes(n)) throw new Error('BULK_ERROR_ANCHOR_MISSING');
-          NODE
-
-      - name: Anchor single error block
-        run: |
-          node - <<'NODE'
-          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
-          const n=`    console.error('[RESUME_BILLING_GUARD_FAILED]', { user: effectiveUserId, server_id: payload.serverId, message: error.message });
-              return sendMessage(effectiveChatId, '❌ روشن‌کردن سرور انجام نشد. لطفاً کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.');`;
-          if(!s.includes(n)) throw new Error('SINGLE_ERROR_ANCHOR_MISSING');
-          NODE
-
-      - name: Apply final resume patch
-        run: |
-          node - <<'NODE'
-          const fs=require('fs');
-          const { applyResumeTransactionalPatches }=require('./resume-transactional-bootstrap');
-          const out=applyResumeTransactionalPatches(fs.readFileSync('/tmp/hamoon-baseline.js','utf8'));
-          if(!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) throw new Error('FINAL_MARKER_MISSING');
-          console.log('resume patch: ok');
+          new Function(out);
+          console.log('resume recovery composition: ok');
           NODE
