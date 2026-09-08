@@ -8,6 +8,9 @@ on:
       - 'billing-renewal-guard-bootstrap.js'
       - 'billing-settlement.js'
       - 'billing-settlement-bootstrap.js'
+      - 'billing-settlement-recovery.js'
+      - 'resume-transactional-bootstrap.js'
+      - 'scripts/recover-suspended-server.js'
       - 'hetzner-traffic.js'
       - 'reseller-billing-grace-bootstrap.js'
       - 'rebuild-bootstrap.js'
@@ -63,6 +66,9 @@ jobs:
           node --check billing-renewal-guard-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
+          node --check billing-settlement-recovery.js
+          node --check resume-transactional-bootstrap.js
+          node --check scripts/recover-suspended-server.js
           node --check hetzner-traffic.js
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
@@ -88,7 +94,10 @@ jobs:
           const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           const required = [
             "require('./billing-settlement')",
+            "require('./billing-settlement-recovery')",
             'settleServerRenewalAtomic({',
+            'rollbackServerRenewalAtomic({',
+            'PROVIDER_POWER_ON_NOT_CONFIRMED',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
             '[HETZNER_TRAFFIC_BILLED]'
@@ -140,6 +149,9 @@ jobs:
           node --check billing-renewal-guard-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
+          node --check billing-settlement-recovery.js
+          node --check resume-transactional-bootstrap.js
+          node --check scripts/recover-suspended-server.js
           node --check hetzner-traffic.js
           node --check reseller-billing-grace-bootstrap.js
           node --check rebuild-bootstrap.js
@@ -165,7 +177,10 @@ jobs:
           const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           const required = [
             "require('./billing-settlement')",
+            "require('./billing-settlement-recovery')",
             'settleServerRenewalAtomic({',
+            'rollbackServerRenewalAtomic({',
+            'PROVIDER_POWER_ON_NOT_CONFIRMED',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
             '[HETZNER_TRAFFIC_BILLED]'
@@ -186,8 +201,10 @@ jobs:
           pm2 restart hamoonbot --update-env
           sleep 4
           pm2 describe hamoonbot | grep -E 'status|restarts|uptime' | head -n 12 || true
+          echo '=== TARGETED RECOVERY ==='
+          node scripts/recover-suspended-server.js Srv-FIN-7b24a5
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED' | tail -n 120 || true
+          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED|OPS_RECOVERY' | tail -n 120 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
