@@ -21,7 +21,7 @@ function applyResumeTransactionalPatches(input) {
   if (!source.includes(recoveryImport)) {
     source = insertAfterRequireLine(
       source,
-      "require('./billing-settlement');",
+      "require('./billing-settlement')",
       recoveryImport,
       'settlement-import'
     );
