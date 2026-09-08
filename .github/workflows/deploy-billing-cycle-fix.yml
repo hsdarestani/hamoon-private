@@ -126,7 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -198,7 +198,7 @@ jobs:
           echo '=== TARGETED RECOVERY ==='
           node scripts/recover-suspended-server.js Srv-FIN-7b24a5
           echo '=== RECENT STARTUP ERRORS ==='
-          pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED|OPS_RECOVERY' | tail -n 120 || true
+          timeout 20s pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED|OPS_RECOVERY' | tail -n 120 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
