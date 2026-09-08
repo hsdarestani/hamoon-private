@@ -26,53 +26,83 @@ jobs:
           node --check scripts/recover-suspended-server.js
           node --check runtime-bootstrap.js
 
-      - name: Isolated billing resume chain
+      - name: Compose legacy baseline without resume recovery
         run: |
           node - <<'NODE'
           const fs = require('fs');
+          const { applyProviderVisibilityPatches } = require('./provider-visibility-bootstrap');
+          const { applyHetznerPendingDeliveryRecoveryPatches } = require('./hetzner-pending-delivery-recovery-bootstrap');
+          const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
+          const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
+          const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
+          const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
           const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
           const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
-          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
-          let out = fs.readFileSync('index-core.js', 'utf8');
-          out = applyBillingRenewalGuardPatches(out);
-          out = applyBillingSettlementPatches(out);
-          out = applyResumeTransactionalPatches(out);
-          if (!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) throw new Error('ISOLATED_RESUME_MARKER_MISSING');
-          console.log('isolated billing resume chain: ok');
-          NODE
-
-      - name: Add reseller grace after resume
-        run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
-          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
           const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
-          let out = fs.readFileSync('index-core.js', 'utf8');
-          out = applyBillingRenewalGuardPatches(out);
-          out = applyBillingSettlementPatches(out);
-          out = applyResumeTransactionalPatches(out);
-          out = applyResellerBillingGracePatches(out);
-          console.log('reseller grace after resume: ok');
-          NODE
-
-      - name: Add loyalty club after reseller
-        run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
-          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
-          const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
+          const { applyRebuildPatches } = require('./rebuild-bootstrap');
+          const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
+          const { applyHetznerManagementScopePatch } = require('./hetzner-management-scope-bootstrap');
+          const { applyZibalRefererPatches } = require('./zibal-referer-bootstrap');
+          const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-bootstrap');
           const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
-          let out = fs.readFileSync('index-core.js', 'utf8');
-          out = applyBillingRenewalGuardPatches(out);
-          out = applyBillingSettlementPatches(out);
-          out = applyResumeTransactionalPatches(out);
-          out = applyResellerBillingGracePatches(out);
-          out = applyLoyaltyClubPatches(out);
-          console.log('loyalty club after resume: ok');
+          const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
+          const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmation-safety-bootstrap');
+          const core = fs.readFileSync('index-core.js','utf8');
+          const baseline = applyPurchaseConfirmationSafetyPatches(
+            applyLoyaltyHistoryPatches(
+              applyLoyaltyClubPatches(
+                applyResellerBillingGracePatches(
+                  applyBillingSettlementPatches(
+                    applyBillingRenewalGuardPatches(
+                      applyHetznerManagementScopePatch(
+                        applyHetznerPurchaseArchitecturePatches(
+                          applyRebuildPatches(
+                            applyBillingCyclePatches(
+                              applyHetznerChangeIpPatches(
+                                applyHetznerTrafficPatches(
+                                  applyFeaturePatches(
+                                    applyHetznerPendingDeliveryRecoveryPatches(
+                                      applyProviderVisibilityPatches(
+                                        applyHetznerUpgradeSafetyPatches(
+                                          applyZibalRefererPatches(core)
+                                        )
+                                      )
+                                    )
+                                  )
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          );
+          if (!baseline.includes("require('./billing-settlement')")) throw new Error('BASELINE_BILLING_SETTLEMENT_MISSING');
+          fs.writeFileSync('/tmp/hamoon-baseline.js', baseline);
+          console.log('legacy baseline: ok');
+          NODE
+
+      - name: Apply final resume recovery to legacy baseline
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
+          const baseline = fs.readFileSync('/tmp/hamoon-baseline.js','utf8');
+          const composed = applyResumeTransactionalPatches(baseline);
+          for (const marker of [
+            "require('./billing-settlement-recovery')",
+            'renewalSettlementEventKey',
+            'rollbackServerRenewalAtomic({',
+            'PROVIDER_POWER_ON_NOT_CONFIRMED',
+            'resumeProviderErrorMessage(error)'
+          ]) {
+            if (!composed.includes(marker)) throw new Error('FINAL_RESUME_MARKER_MISSING:' + marker);
+          }
+          console.log('final resume recovery over baseline: ok');
           NODE
 
       - name: Full runtime composition
