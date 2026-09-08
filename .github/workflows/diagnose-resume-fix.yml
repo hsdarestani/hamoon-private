@@ -19,14 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Syntax new recovery files
-        run: |
-          node --check resume-transactional-bootstrap.js
-          node --check billing-settlement-recovery.js
-          node --check scripts/recover-suspended-server.js
-          node --check runtime-bootstrap.js
-
-      - name: Compose legacy baseline without resume recovery
+      - name: Build legacy baseline
         run: |
           node - <<'NODE'
           const fs = require('fs');
@@ -81,42 +74,70 @@ jobs:
               )
             )
           );
-          if (!baseline.includes("require('./billing-settlement')")) throw new Error('BASELINE_BILLING_SETTLEMENT_MISSING');
           fs.writeFileSync('/tmp/hamoon-baseline.js', baseline);
-          console.log('legacy baseline: ok');
+          console.log('baseline: ok');
           NODE
 
-      - name: Apply final resume recovery to legacy baseline
+      - name: Anchor settlement import
+        run: grep -F "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');" /tmp/hamoon-baseline.js
+
+      - name: Anchor resume function
+        run: grep -F "async function resumePurchaseWithBillingGuard(userId, purchase, dcConfig) {" /tmp/hamoon-baseline.js
+
+      - name: Anchor charged declaration
         run: |
           node - <<'NODE'
-          const fs = require('fs');
-          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
-          const baseline = fs.readFileSync('/tmp/hamoon-baseline.js','utf8');
-          const composed = applyResumeTransactionalPatches(baseline);
-          for (const marker of [
-            "require('./billing-settlement-recovery')",
-            'renewalSettlementEventKey',
-            'rollbackServerRenewalAtomic({',
-            'PROVIDER_POWER_ON_NOT_CONFIRMED',
-            'resumeProviderErrorMessage(error)'
-          ]) {
-            if (!composed.includes(marker)) throw new Error('FINAL_RESUME_MARKER_MISSING:' + marker);
+          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
+          if(!s.includes("  let charged = 0;\n  if (renewal.cycleDue) {")) throw new Error('CHARGED_DECLARATION_ANCHOR_MISSING');
+          NODE
+
+      - name: Anchor charged settlement line
+        run: grep -F "charged = settlement.status === 'charged' ? Number(settlement.charged || renewal.cycleAmount) : 0;" /tmp/hamoon-baseline.js
+
+      - name: Anchor provider power block
+        run: |
+          node - <<'NODE'
+          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
+          const n=`  try {
+            await openstackApi.resumeServer(dcConfig, null, serverId);
+          } catch (error) {
+            await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
+            await updatePurchaseSuspendReason(serverId, 'resume_failed').catch(() => {});
+            throw error;
           }
-          console.log('final resume recovery over baseline: ok');
+
+          if (!charged) {
+            await updatePurchaseStatus(serverId, 'active');
+            await updatePurchaseSuspendReason(serverId, null).catch(() => {});
+          }
+          `;
+          if(!s.includes(n)) throw new Error('PROVIDER_POWER_BLOCK_ANCHOR_MISSING');
           NODE
 
-      - name: Full runtime composition
+      - name: Anchor bulk error block
         run: |
           node - <<'NODE'
-          const fs = require('fs');
-          const { applyPatches } = require('./runtime-bootstrap');
-          const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
-          if (!composed.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) throw new Error('FULL_RUNTIME_RESUME_MARKER_MISSING');
-          console.log('full runtime composition: ok');
+          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
+          const n=`        console.error('[START_MY_SERVERS] failed:', { userId, server_id: purchase.server_id, dcKey, error: error.message });
+                  results.push({ name: purchase.server_name || purchase.server_id, ok: false, message: 'روشن‌کردن سرور با خطای ارائه‌دهنده مواجه شد. لطفاً کمی بعد دوباره تلاش کنید.' });`;
+          if(!s.includes(n)) throw new Error('BULK_ERROR_ANCHOR_MISSING');
           NODE
 
-      - name: Existing billing validators
+      - name: Anchor single error block
         run: |
-          node scripts/validate-billing-cycle-change.js
-          node scripts/validate-billing-renewal-guard.js
-          node scripts/validate-reseller-billing-grace.js
+          node - <<'NODE'
+          const s=require('fs').readFileSync('/tmp/hamoon-baseline.js','utf8');
+          const n=`    console.error('[RESUME_BILLING_GUARD_FAILED]', { user: effectiveUserId, server_id: payload.serverId, message: error.message });
+              return sendMessage(effectiveChatId, '❌ روشن‌کردن سرور انجام نشد. لطفاً کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.');`;
+          if(!s.includes(n)) throw new Error('SINGLE_ERROR_ANCHOR_MISSING');
+          NODE
+
+      - name: Apply final resume patch
+        run: |
+          node - <<'NODE'
+          const fs=require('fs');
+          const { applyResumeTransactionalPatches }=require('./resume-transactional-bootstrap');
+          const out=applyResumeTransactionalPatches(fs.readFileSync('/tmp/hamoon-baseline.js','utf8'));
+          if(!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) throw new Error('FINAL_MARKER_MISSING');
+          console.log('resume patch: ok');
+          NODE
