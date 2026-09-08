@@ -6,13 +6,25 @@ function replaceRequired(source, needle, replacement, label) {
   return source.slice(0, pos) + replacement + source.slice(pos + needle.length);
 }
 
+function insertAfterRequireLine(source, requireNeedle, insertion, label) {
+  const pos = source.indexOf(requireNeedle);
+  if (pos < 0) throw new Error(`RESUME_TRANSACTIONAL_PATCH_MISSING:${label}`);
+  const lineEnd = source.indexOf('\n', pos);
+  if (lineEnd < 0) return `${source}\n${insertion}`;
+  return source.slice(0, lineEnd) + `\n${insertion}` + source.slice(lineEnd);
+}
+
 function applyResumeTransactionalPatches(input) {
   let source = String(input || '');
 
-  const settlementImport = "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');";
   const recoveryImport = "const { rollbackServerRenewalAtomic } = require('./billing-settlement-recovery');";
   if (!source.includes(recoveryImport)) {
-    source = replaceRequired(source, settlementImport, `${settlementImport}\n${recoveryImport}`, 'settlement-import');
+    source = insertAfterRequireLine(
+      source,
+      "require('./billing-settlement');",
+      recoveryImport,
+      'settlement-import'
+    );
   }
 
   const resumeFn = 'async function resumePurchaseWithBillingGuard(userId, purchase, dcConfig) {';
