@@ -1,0 +1,51 @@
+name: Diagnose Resume Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'resume-transactional-bootstrap.js'
+      - 'billing-settlement-recovery.js'
+      - 'runtime-bootstrap.js'
+      - '.github/workflows/diagnose-resume-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax new recovery files
+        run: |
+          node --check resume-transactional-bootstrap.js
+          node --check billing-settlement-recovery.js
+          node --check scripts/recover-suspended-server.js
+          node --check runtime-bootstrap.js
+
+      - name: Compose runtime
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          for (const marker of [
+            "require('./billing-settlement-recovery')",
+            'renewalSettlementEventKey',
+            'rollbackServerRenewalAtomic({',
+            'PROVIDER_POWER_ON_NOT_CONFIRMED',
+            'resumeProviderErrorMessage(error)'
+          ]) {
+            if (!composed.includes(marker)) throw new Error('RESUME_FIX_MARKER_MISSING:' + marker);
+          }
+          console.log('resume runtime composition: ok');
+          NODE
+
+      - name: Existing billing validators
+        run: |
+          node scripts/validate-billing-cycle-change.js
+          node scripts/validate-billing-renewal-guard.js
+          node scripts/validate-reseller-billing-grace.js
