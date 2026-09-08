@@ -94,10 +94,7 @@ jobs:
           const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           const required = [
             "require('./billing-settlement')",
-            "require('./billing-settlement-recovery')",
             'settleServerRenewalAtomic({',
-            'rollbackServerRenewalAtomic({',
-            'PROVIDER_POWER_ON_NOT_CONFIRMED',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
             '[HETZNER_TRAFFIC_BILLED]'
@@ -177,10 +174,7 @@ jobs:
           const composed = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           const required = [
             "require('./billing-settlement')",
-            "require('./billing-settlement-recovery')",
             'settleServerRenewalAtomic({',
-            'rollbackServerRenewalAtomic({',
-            'PROVIDER_POWER_ON_NOT_CONFIRMED',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
             '[HETZNER_TRAFFIC_BILLED]'
