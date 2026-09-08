@@ -11,6 +11,7 @@ const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap')
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
 const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
+const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
 const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
 const { applyHetznerPurchaseArchitecturePatches } = require('./hetzner-purchase-architecture-bootstrap');
@@ -124,7 +125,7 @@ function installDeliveredStatusRepair() {
 }
 
 function applyPatches(coreSource) {
-  return applyPurchaseConfirmationSafetyPatches(
+  const baseline = applyPurchaseConfirmationSafetyPatches(
     applyLoyaltyHistoryPatches(
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
@@ -157,6 +158,7 @@ function applyPatches(coreSource) {
       )
     )
   );
+  return applyResumeTransactionalPatches(baseline);
 }
 
 function run() {
