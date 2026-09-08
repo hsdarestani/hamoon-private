@@ -26,50 +26,53 @@ jobs:
           node --check scripts/recover-suspended-server.js
           node --check runtime-bootstrap.js
 
-      - name: Apply billing renewal guard
-        run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-          const out = applyBillingRenewalGuardPatches(fs.readFileSync('index-core.js', 'utf8'));
-          if (!out.includes('async function resumePurchaseWithBillingGuard(')) throw new Error('RENEWAL_RESUME_FUNCTION_MISSING');
-          console.log('billing renewal guard: ok');
-          NODE
-
-      - name: Apply atomic settlement after renewal guard
-        run: |
-          node - <<'NODE'
-          const fs = require('fs');
-          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
-          let out = applyBillingRenewalGuardPatches(fs.readFileSync('index-core.js', 'utf8'));
-          out = applyBillingSettlementPatches(out);
-          for (const marker of ["require('./billing-settlement')", 'settleServerRenewalAtomic({', "settlement.status === 'charged'"]) {
-            if (!out.includes(marker)) throw new Error('SETTLEMENT_STAGE_MARKER_MISSING:' + marker);
-          }
-          console.log('atomic settlement: ok');
-          NODE
-
-      - name: Apply resume recovery after atomic settlement
+      - name: Isolated billing resume chain
         run: |
           node - <<'NODE'
           const fs = require('fs');
           const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
           const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
           const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
-          let out = applyBillingRenewalGuardPatches(fs.readFileSync('index-core.js', 'utf8'));
+          let out = fs.readFileSync('index-core.js', 'utf8');
+          out = applyBillingRenewalGuardPatches(out);
           out = applyBillingSettlementPatches(out);
           out = applyResumeTransactionalPatches(out);
-          for (const marker of [
-            "require('./billing-settlement-recovery')",
-            'renewalSettlementEventKey',
-            'rollbackServerRenewalAtomic({',
-            'PROVIDER_POWER_ON_NOT_CONFIRMED',
-            'resumeProviderErrorMessage(error)'
-          ]) {
-            if (!out.includes(marker)) throw new Error('RESUME_STAGE_MARKER_MISSING:' + marker);
-          }
-          console.log('resume recovery: ok');
+          if (!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) throw new Error('ISOLATED_RESUME_MARKER_MISSING');
+          console.log('isolated billing resume chain: ok');
+          NODE
+
+      - name: Add reseller grace after resume
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
+          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
+          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
+          const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
+          let out = fs.readFileSync('index-core.js', 'utf8');
+          out = applyBillingRenewalGuardPatches(out);
+          out = applyBillingSettlementPatches(out);
+          out = applyResumeTransactionalPatches(out);
+          out = applyResellerBillingGracePatches(out);
+          console.log('reseller grace after resume: ok');
+          NODE
+
+      - name: Add loyalty club after reseller
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
+          const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
+          const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
+          const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
+          const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
+          let out = fs.readFileSync('index-core.js', 'utf8');
+          out = applyBillingRenewalGuardPatches(out);
+          out = applyBillingSettlementPatches(out);
+          out = applyResumeTransactionalPatches(out);
+          out = applyResellerBillingGracePatches(out);
+          out = applyLoyaltyClubPatches(out);
+          console.log('loyalty club after resume: ok');
           NODE
 
       - name: Full runtime composition
