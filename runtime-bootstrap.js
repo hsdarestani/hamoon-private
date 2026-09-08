@@ -135,8 +135,8 @@ function applyPatches(coreSource) {
     applyLoyaltyHistoryPatches(
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
-          applyBillingSettlementPatches(
-            applyResumeTransactionalPatches(
+          applyResumeTransactionalPatches(
+            applyBillingSettlementPatches(
               applyBillingRenewalGuardPatches(
                 applyHetznerManagementScopePatch(
                   applyHetznerPurchaseArchitecturePatches(
