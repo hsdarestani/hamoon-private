@@ -131,25 +131,23 @@ function installDeliveredStatusRepair() {
 }
 
 function applyPatches(coreSource) {
-  return applyPurchaseConfirmationSafetyPatches(
+  const baseline = applyPurchaseConfirmationSafetyPatches(
     applyLoyaltyHistoryPatches(
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
-          applyResumeTransactionalPatches(
-            applyBillingSettlementPatches(
-              applyBillingRenewalGuardPatches(
-                applyHetznerManagementScopePatch(
-                  applyHetznerPurchaseArchitecturePatches(
-                    applyRebuildPatches(
-                      applyBillingCyclePatches(
-                        applyHetznerChangeIpPatches(
-                          applyHetznerTrafficPatches(
-                            applyFeaturePatches(
-                              applyHetznerPendingDeliveryRecoveryPatches(
-                                applyProviderVisibilityPatches(
-                                  applyHetznerUpgradeSafetyPatches(
-                                    applyZibalRefererPatches(coreSource)
-                                  )
+          applyBillingSettlementPatches(
+            applyBillingRenewalGuardPatches(
+              applyHetznerManagementScopePatch(
+                applyHetznerPurchaseArchitecturePatches(
+                  applyRebuildPatches(
+                    applyBillingCyclePatches(
+                      applyHetznerChangeIpPatches(
+                        applyHetznerTrafficPatches(
+                          applyFeaturePatches(
+                            applyHetznerPendingDeliveryRecoveryPatches(
+                              applyProviderVisibilityPatches(
+                                applyHetznerUpgradeSafetyPatches(
+                                  applyZibalRefererPatches(coreSource)
                                 )
                               )
                             )
@@ -166,6 +164,9 @@ function applyPatches(coreSource) {
       )
     )
   );
+  // Run resume recovery last so legacy patch anchors are resolved before the
+  // lifecycle block becomes provider-aware and transactional.
+  return applyResumeTransactionalPatches(baseline);
 }
 
 function run() {
