@@ -10,6 +10,7 @@ const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
+const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
 const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
 const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
@@ -135,18 +136,20 @@ function applyPatches(coreSource) {
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
           applyBillingSettlementPatches(
-            applyBillingRenewalGuardPatches(
-              applyHetznerManagementScopePatch(
-                applyHetznerPurchaseArchitecturePatches(
-                  applyRebuildPatches(
-                    applyBillingCyclePatches(
-                      applyHetznerChangeIpPatches(
-                        applyHetznerTrafficPatches(
-                          applyFeaturePatches(
-                            applyHetznerPendingDeliveryRecoveryPatches(
-                              applyProviderVisibilityPatches(
-                                applyHetznerUpgradeSafetyPatches(
-                                  applyZibalRefererPatches(coreSource)
+            applyResumeTransactionalPatches(
+              applyBillingRenewalGuardPatches(
+                applyHetznerManagementScopePatch(
+                  applyHetznerPurchaseArchitecturePatches(
+                    applyRebuildPatches(
+                      applyBillingCyclePatches(
+                        applyHetznerChangeIpPatches(
+                          applyHetznerTrafficPatches(
+                            applyFeaturePatches(
+                              applyHetznerPendingDeliveryRecoveryPatches(
+                                applyProviderVisibilityPatches(
+                                  applyHetznerUpgradeSafetyPatches(
+                                    applyZibalRefererPatches(coreSource)
+                                  )
                                 )
                               )
                             )
