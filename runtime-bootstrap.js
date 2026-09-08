@@ -10,7 +10,6 @@ const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
-const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
 const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
 const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
@@ -71,12 +70,6 @@ function installCleanIpChangeModule() {
   if (require.cache[legacyPath]) require.cache[legacyPath].exports = cleanModule;
 }
 
-// markDelivered intentionally returns true only for the first delivery. A rebuild or
-// later lifecycle check can put an already-delivered row back into a pending state.
-// The old DB helper then refuses to touch it because delivered_at is already set,
-// leaving a healthy server stuck in pending_ip_quality forever. Preserve the
-// first-delivery return value (so credentials are never re-sent) but repair the
-// stale status whenever a fresh readiness check says the server is deliverable.
 function installDeliveredStatusRepair() {
   const db = require('./db');
   if (db[DELIVERED_STATUS_REPAIR_MARK]) return false;
@@ -131,7 +124,7 @@ function installDeliveredStatusRepair() {
 }
 
 function applyPatches(coreSource) {
-  const baseline = applyPurchaseConfirmationSafetyPatches(
+  return applyPurchaseConfirmationSafetyPatches(
     applyLoyaltyHistoryPatches(
       applyLoyaltyClubPatches(
         applyResellerBillingGracePatches(
@@ -164,9 +157,6 @@ function applyPatches(coreSource) {
       )
     )
   );
-  // Run resume recovery last so legacy patch anchors are resolved before the
-  // lifecycle block becomes provider-aware and transactional.
-  return applyResumeTransactionalPatches(baseline);
 }
 
 function run() {
