@@ -1,7 +1,21 @@
 'use strict';
 
+function replaceOnce(source, needle, replacement, label) {
+  const first = source.indexOf(needle);
+  if (first < 0) throw new Error(`RESUME_TRANSACTIONAL_PATCH_MISSING:${label}`);
+  if (source.indexOf(needle, first + needle.length) >= 0) throw new Error(`RESUME_TRANSACTIONAL_PATCH_DUPLICATE:${label}`);
+  return source.slice(0, first) + replacement + source.slice(first + needle.length);
+}
+
 function applyResumeTransactionalPatches(source) {
   let out = String(source || '');
+
+  const settlementImport = "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');";
+  const recoveryImport = "const { rollbackServerRenewalAtomic } = require('./billing-settlement-recovery');";
+  if (!out.includes(recoveryImport)) {
+    if (!out.includes(settlementImport)) throw new Error('RESUME_TRANSACTIONAL_SETTLEMENT_IMPORT_MISSING');
+    out = out.replace(settlementImport, `${settlementImport}\n${recoveryImport}`);
+  }
 
   if (!out.includes('function resumeProviderErrorInfo(error)')) {
     const anchor = 'async function resumePurchaseWithBillingGuard(userId, purchase, dcConfig) {';
@@ -17,10 +31,10 @@ function applyResumeTransactionalPatches(source) {
 function resumeProviderErrorMessage(error) {
   const info = resumeProviderErrorInfo(error);
   if (error?.code === 'OPERATION_IN_PROGRESS' || info.status === 423 || info.code === 'locked') {
-    return '⏳ عملیات قبلی روی سرور در Hetzner هنوز تمام نشده است. سیستم چند بار تلاش کرد؛ لطفاً کمی بعد دوباره امتحان کنید.';
+    return '⏳ عملیات قبلی روی سرور در Hetzner هنوز تمام نشده است. سیستم چند بار تلاش کرد و وضعیت واقعی سرور را هم بررسی کرد؛ لطفاً کمی بعد دوباره امتحان کنید.';
   }
   if (info.status === 401 || info.status === 403) {
-    return '❌ ارتباط حساب ارائه‌دهنده نیاز به بررسی پشتیبانی دارد. هیچ مبلغ اضافه‌ای بابت تلاش ناموفق کسر نمی‌شود.';
+    return '❌ ارتباط حساب ارائه‌دهنده نیاز به بررسی پشتیبانی دارد. هیچ مبلغی بابت روشن‌کردن ناموفق از دست نمی‌رود.';
   }
   if (info.status === 404) {
     return '❌ این سرور در سمت ارائه‌دهنده پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.';
@@ -29,26 +43,51 @@ function resumeProviderErrorMessage(error) {
     return '⏳ ارائه‌دهنده موقتاً تعداد درخواست‌ها را محدود کرده است. لطفاً کمی بعد دوباره تلاش کنید.';
   }
   if ((info.status && info.status >= 500) || ['econnreset','etimedout','econnaborted'].includes(info.code)) {
-    return '⏳ ارتباط با ارائه‌دهنده موقتاً ناموفق بود. مبلغ تمدید در صورت روشن‌نشدن سرور خودکار به کیف پول برمی‌گردد.';
+    return '⏳ ارتباط با ارائه‌دهنده موقتاً ناموفق بود. اگر تمدید همین تلاش کسر شده باشد، مبلغ خودکار به کیف پول برمی‌گردد.';
   }
   if (error?.code === 'RESUME_REFUND_FAILED') {
     return '❌ روشن‌کردن سرور انجام نشد و بازگردانی خودکار مبلغ نیاز به بررسی پشتیبانی دارد.';
   }
-  return '❌ روشن‌کردن سرور در سمت ارائه‌دهنده انجام نشد. در صورت ناموفق بودن روشن‌شدن، مبلغ تمدید خودکار به کیف پول برمی‌گردد.';
+  return '❌ روشن‌کردن سرور در سمت ارائه‌دهنده تأیید نشد. اگر تمدید همین تلاش کسر شده باشد، مبلغ خودکار به کیف پول برمی‌گردد.';
+}
+
+async function confirmProviderServerRunning(dcConfig, serverId, attempts = 10, delayMs = 2000) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const providerServer = await openstackApi.getServer(dcConfig, null, serverId);
+      const providerStatus = String(providerServer?.status || '').toLowerCase();
+      if (providerStatus === 'running' || providerStatus === 'active') return true;
+    } catch (_) {}
+    if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  return false;
 }
 
 `;
     out = out.replace(anchor, helper + anchor);
   }
 
-  if (!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) {
-    const oldBlock = `    charged = renewal.cycleAmount;
-    await recordWalletLog(userId, -charged, 'تمدید و فعال‌سازی مجدد سرور ' + (purchase.server_name || serverId), 'billing');
-    await updatePurchaseStatus(serverId, 'active', purchase.last_billed_traffic_gb, new Date());
-    await updatePurchaseSuspendReason(serverId, null).catch(() => {});
+  if (!out.includes('let renewalSettlementEventKey = null;')) {
+    out = replaceOnce(
+      out,
+      `  let charged = 0;\n  if (renewal.cycleDue) {`,
+      `  let charged = 0;\n  let renewalSettlementEventKey = null;\n  if (renewal.cycleDue) {`,
+      'settlement-event-key-declaration'
+    );
   }
 
-  try {
+  const chargedNeedle = `    charged = settlement.status === 'charged' ? Number(settlement.charged || renewal.cycleAmount) : 0;`;
+  if (!out.includes('renewalSettlementEventKey = settlement.status')) {
+    out = replaceOnce(
+      out,
+      chargedNeedle,
+      `${chargedNeedle}\n    renewalSettlementEventKey = settlement.status === 'charged' ? settlement.eventKey : null;`,
+      'settlement-event-key-capture'
+    );
+  }
+
+  if (!out.includes('PROVIDER_POWER_ON_NOT_CONFIRMED')) {
+    const oldBlock = `  try {
     await openstackApi.resumeServer(dcConfig, null, serverId);
   } catch (error) {
     await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
@@ -61,43 +100,33 @@ function resumeProviderErrorMessage(error) {
     await updatePurchaseSuspendReason(serverId, null).catch(() => {});
   }
 `;
-    const newBlock = `    charged = renewal.cycleAmount;
-    await recordWalletLog(userId, -charged, 'تمدید و فعال‌سازی مجدد سرور ' + (purchase.server_name || serverId), 'billing');
-  }
-
-  let providerConfirmedRunning = false;
-  let providerError = null;
+    const newBlock = `  let providerError = null;
   try {
     await openstackApi.resumeServer(dcConfig, null, serverId);
   } catch (error) {
     providerError = error;
   }
 
-  // Power actions are asynchronous. A timeout/423 can still mean that a prior
-  // power-on was accepted, so reconcile provider state before refunding.
-  const verifyAttempts = providerError ? 8 : 12;
-  for (let attempt = 0; attempt < verifyAttempts; attempt += 1) {
-    try {
-      const providerServer = await openstackApi.getServer(dcConfig, null, serverId);
-      const providerStatus = String(providerServer?.status || '').toLowerCase();
-      if (providerStatus === 'running' || providerStatus === 'active') {
-        providerConfirmedRunning = true;
-        break;
-      }
-    } catch (_) {}
-    if (attempt + 1 < verifyAttempts) await new Promise(resolve => setTimeout(resolve, 2000));
-  }
+  // Hetzner power actions are asynchronous. A 423/timeout can mean that a
+  // previous power-on is still completing, so verify provider state before
+  // declaring failure or compensating a just-settled renewal.
+  const providerConfirmedRunning = await confirmProviderServerRunning(
+    dcConfig,
+    serverId,
+    providerError ? 10 : 12,
+    2000
+  );
 
   if (!providerConfirmedRunning) {
-    if (charged > 0) {
+    if (charged > 0 && renewalSettlementEventKey) {
       try {
-        await creditUser(userId, charged);
-        await recordWalletLog(
-          userId,
-          charged,
-          'بازگشت خودکار هزینه تمدید ناموفق سرور ' + (purchase.server_name || serverId),
-          'billing_refund'
-        );
+        await rollbackServerRenewalAtomic({
+          telegramId: userId,
+          serverId,
+          datacenter: purchase.datacenter || dcConfig.key,
+          eventKey: renewalSettlementEventKey,
+          reason: 'resume_failed'
+        });
         charged = 0;
       } catch (refundError) {
         await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
@@ -107,22 +136,79 @@ function resumeProviderErrorMessage(error) {
         wrapped.cause = refundError;
         throw wrapped;
       }
+    } else {
+      await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
+      await updatePurchaseSuspendReason(serverId, 'resume_failed').catch(() => {});
     }
-    await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
-    await updatePurchaseSuspendReason(serverId, 'resume_failed').catch(() => {});
-    throw providerError || Object.assign(new Error('PROVIDER_POWER_ON_NOT_CONFIRMED'), { code: 'PROVIDER_POWER_ON_NOT_CONFIRMED' });
+    throw providerError || Object.assign(
+      new Error('PROVIDER_POWER_ON_NOT_CONFIRMED'),
+      { code: 'PROVIDER_POWER_ON_NOT_CONFIRMED' }
+    );
   }
 
-  // Commit the new billing boundary only after the provider confirms running.
-  if (charged > 0) {
-    await updatePurchaseStatus(serverId, 'active', purchase.last_billed_traffic_gb, new Date());
-  } else {
-    await updatePurchaseStatus(serverId, 'active');
-  }
+  // Atomic settlement already advances the billing boundary when charged.
+  // For a not-due/already-settled resume, only restore lifecycle state now.
+  if (!charged) await updatePurchaseStatus(serverId, 'active');
   await updatePurchaseSuspendReason(serverId, null).catch(() => {});
 `;
-    if (!out.includes(oldBlock)) throw new Error('RESUME_TRANSACTIONAL_BLOCK_MARKER_MISSING');
-    out = out.replace(oldBlock, newBlock);
+    out = replaceOnce(out, oldBlock, newBlock, 'manual-resume-confirmation');
+  }
+
+  if (!out.includes('[ATOMIC_RENEWAL_RESUME_ROLLED_BACK]')) {
+    const oldAuto = `        if (status === 'suspended') {
+          try {
+            const tok = await openstackApi.getToken(dcConfig);
+            await openstackApi.resumeServer(dcConfig, tok, server_id);
+            await sendMessage(userId, '✅ سرور ' + escapeMarkdownV2(server_name) + ' مجددا فعال شد.');
+          } catch (e) {
+            console.warn('[Billing] resume failed after atomic renewal', { status: e.response?.status, server_id, datacenter: purchase.datacenter, message: e.message });
+          }
+        }`;
+    const newAuto = `        if (status === 'suspended') {
+          let resumeError = null;
+          try {
+            const tok = await openstackApi.getToken(dcConfig);
+            await openstackApi.resumeServer(dcConfig, tok, server_id);
+          } catch (e) {
+            resumeError = e;
+          }
+
+          const running = await confirmProviderServerRunning(dcConfig, server_id, resumeError ? 10 : 12, 2000);
+          if (!running) {
+            try {
+              const rollback = await rollbackServerRenewalAtomic({
+                telegramId: userId,
+                serverId: server_id,
+                datacenter: purchase.datacenter,
+                eventKey: renewalSettlement.eventKey,
+                reason: 'resume_failed'
+              });
+              console.warn('[ATOMIC_RENEWAL_RESUME_ROLLED_BACK]', {
+                server_id,
+                datacenter: purchase.datacenter,
+                refunded: rollback.refunded || 0,
+                provider_status: resumeProviderErrorInfo(resumeError).status,
+                provider_code: resumeProviderErrorInfo(resumeError).code
+              });
+              await sendMessage(
+                userId,
+                '⚠️ تمدید سرور ' + escapeMarkdownV2(server_name) + ' انجام شد اما روشن‌شدن در Hetzner تأیید نشد؛ مبلغ همین تمدید خودکار به کیف پول برگشت. لطفاً کمی بعد دوباره روشن‌کردن سرور را بزنید.'
+              ).catch(() => {});
+            } catch (rollbackError) {
+              console.error('[ATOMIC_RENEWAL_RESUME_ROLLBACK_FAILED]', {
+                server_id,
+                datacenter: purchase.datacenter,
+                message: rollbackError.message
+              });
+            }
+            continue;
+          }
+
+          await updatePurchaseStatus(server_id, 'active').catch(() => {});
+          await updatePurchaseSuspendReason(server_id, null).catch(() => {});
+          await sendMessage(userId, '✅ سرور ' + escapeMarkdownV2(server_name) + ' مجددا فعال شد.');
+        }`;
+    out = replaceOnce(out, oldAuto, newAuto, 'automatic-renewal-resume-confirmation');
   }
 
   if (!out.includes('status: providerInfo.status')) {
@@ -138,8 +224,7 @@ function resumeProviderErrorMessage(error) {
           error: error.message
         });
         results.push({ name: purchase.server_name || purchase.server_id, ok: false, message: resumeProviderErrorMessage(error) });`;
-    if (!out.includes(oldBulk)) throw new Error('RESUME_TRANSACTIONAL_BULK_CATCH_MARKER_MISSING');
-    out = out.replace(oldBulk, newBulk);
+    out = replaceOnce(out, oldBulk, newBulk, 'bulk-error-message');
   }
 
   if (!out.includes('return sendMessage(effectiveChatId, resumeProviderErrorMessage(error));')) {
@@ -154,14 +239,17 @@ function resumeProviderErrorMessage(error) {
       message: error.message
     });
     return sendMessage(effectiveChatId, resumeProviderErrorMessage(error));`;
-    if (!out.includes(oldSingle)) throw new Error('RESUME_TRANSACTIONAL_SINGLE_CATCH_MARKER_MISSING');
-    out = out.replace(oldSingle, newSingle);
+    out = replaceOnce(out, oldSingle, newSingle, 'single-error-message');
   }
 
   const required = [
+    recoveryImport,
     'function resumeProviderErrorInfo(error)',
+    'async function confirmProviderServerRunning(',
+    'renewalSettlementEventKey',
     'PROVIDER_POWER_ON_NOT_CONFIRMED',
-    'billing_refund',
+    'rollbackServerRenewalAtomic({',
+    '[ATOMIC_RENEWAL_RESUME_ROLLED_BACK]',
     'resumeProviderErrorMessage(error)',
     'status: providerInfo.status'
   ];
