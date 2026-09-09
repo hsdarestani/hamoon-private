@@ -33,6 +33,7 @@ function applyRuntimeSafetyDefaults() {
     delete datacenters.afracloud;
   }
 
+  // HAMOON_IR_QUALITY_QUORUM_V1
   const forced = {
     HETZNER_IP_QUALITY_REQUIRED: 'true',
     HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(10 * 365 * 24 * 60 * 60 * 1000),
