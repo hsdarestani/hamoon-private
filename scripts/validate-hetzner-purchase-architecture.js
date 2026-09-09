@@ -22,10 +22,15 @@ assert(imageArchitecture({ architecture: 'arm' }) === 'arm', 'explicit ARM image
 assert(imageArchitecture({ architecture: 'x86' }) === 'x86', 'explicit x86 image architecture is preserved');
 
 const helperCalls = (patched.match(/hetzner-purchase-images'\)\.listCompatibleImages/g) || []).length;
-assert(helperCalls === 2, 'purchase flow uses architecture-aware image catalog in both selection steps');
+assert(helperCalls === 3, 'purchase and rebuild flows use the architecture-aware image catalog');
 assert(patched.includes('const selectedFlavorForImages = state[userId]?.selectedFlavor;'), 'image callback revalidates against selected flavor');
 assert(patched.includes('const tok = isHetznerDc(dcConfig) ? null : await openstackApi.getToken(dcConfig);'), 'Hetzner image selection skips OpenStack token lookup');
 assert(!patched.includes('Fetching images & snapshots for ${dcConfig.name}`);\n    const [images, snapshots] = await Promise.all([\n      openstackApi.listImages(dcConfig, tok).catch'), 'flavor step no longer uses unfiltered Hetzner image list');
+
+assert(patched.includes('let serverType = purchase?.flavor_id || state[userId]?.selectedFlavor?.id || \'\';'), 'rebuild resolves the managed server plan from the purchase first');
+assert(patched.includes('const providerServer = await openstackApi.getServer(dcConfig, null, serverId).catch(() => null);'), 'rebuild falls back to the provider server type when DB plan metadata is missing');
+assert(patched.includes("? await require('./hetzner-purchase-images').listCompatibleImages(dcConfig, serverType)"), 'rebuild requests images for the current Hetzner architecture');
+assert(patched.includes("return bot.sendMessage(chatId, '❌ در حال حاضر سیستم‌عامل سازگاری برای این پلن پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.');"), 'rebuild never sends an empty image keyboard');
 
 const snapshotBypasses = (patched.match(/!isHetznerDc\(dcConfig\) && hasCapability\(dcConfig, 'listSnapshots'\)/g) || []).length;
 assert(snapshotBypasses === 2, 'Hetzner purchase flow bypasses unsupported snapshot lookup in both selection steps');
