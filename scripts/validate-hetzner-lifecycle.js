@@ -4,6 +4,7 @@ const fs = require('fs');
 const lifecycle = require('../services/hetzner-lifecycle');
 const detector = require('../provider-detector');
 const cloud = require('../cloud-api');
+const runtime = require('../runtime-bootstrap');
 
 (async () => {
   assert(detector.isHetznerConfig({ apiType: 'hetzner', key: 'hetzner-fsn1' }));
@@ -100,10 +101,14 @@ const cloud = require('../cloud-api');
   await lifecycle.changePublicIpLifecycle({ db, dc:{apiType:'hetzner'}, telegramId:'u', serverId:'s', datacenter:'hetzner', provider, waitOptions:{waitTcp:async()=>true, timeoutMs:10} });
   cloud.getServer=origGet; cloud.waitHetznerAction=origWait;
   assert.deepStrictEqual(ops, ['create','poweroff','wait','unassign:old','assign:new','delete:old','poweron','dbip']);
+
+  // Validate the effective runtime source rather than the intentionally legacy
+  // index-core.js template. Runtime bootstraps remove the old unsafe reset call.
   const originalRootPasswordFlow = fs.readFileSync('index-core.js','utf8');
-  assert(/rootPassword = srv\.root_password \|\| null/.test(originalRootPasswordFlow));
-  assert(!/rootPassword = await openstackApi\.resetServerPassword\(effectiveDc, null, srv\.id\)/.test(originalRootPasswordFlow));
-  assert(/HETZNER_PROVISIONING_RECONCILE/.test(originalRootPasswordFlow));
+  const effectiveRootPasswordFlow = runtime.applyPatches(originalRootPasswordFlow);
+  assert(/rootPassword = srv\.root_password \|\| null/.test(effectiveRootPasswordFlow));
+  assert(!/rootPassword = await openstackApi\.resetServerPassword\(effectiveDc, null, srv\.id\)/.test(effectiveRootPasswordFlow));
+  assert(/HETZNER_PROVISIONING_RECONCILE/.test(effectiveRootPasswordFlow));
   assert.strictEqual(lifecycle.pingNodeSuccess([[['OK', 0.04], ['TIMEOUT', 3]]]), true);
   assert.strictEqual(lifecycle.pingNodeSuccess([[['TIMEOUT', 3]]]), false);
   const text = ['customer-api.js','index.js','Hetzner/hetzner-api.js','services/hetzner-lifecycle.js'].map(f=>fs.readFileSync(f,'utf8')).join('\n');
