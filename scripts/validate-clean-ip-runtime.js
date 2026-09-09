@@ -20,7 +20,7 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
   assert(!datacenters.afracloud, 'Afracloud must be removed from runtime datacenters');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_REQUIRED, 'true');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_NODES, '6');
-  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '4');
+  assert.strictEqual(process.env.HETZNER_IP_QUALITY_IR_MIN_SUCCESS, '3');
   assert.strictEqual(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES, '2');
   assert.strictEqual(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS, '20');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);

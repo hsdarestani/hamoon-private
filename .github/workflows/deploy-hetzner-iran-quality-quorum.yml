@@ -1,0 +1,76 @@
+name: Deploy Hetzner Iran quality quorum
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-hetzner-lifecycle.js'
+      - '.github/workflows/deploy-hetzner-iran-quality-quorum.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci --ignore-scripts
+
+      - name: Validate quality/runtime changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -c runtime-bootstrap.js
+          npm run validate:clean-ip-runtime
+          npm run validate:hetzner-lifecycle
+          grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git pull --ff-only
+          node scripts/restore-server-secret-key.js .env >/dev/null
+          node -c runtime-bootstrap.js
+          grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
+          npm run validate:clean-ip-runtime
+          npm run validate:hetzner-lifecycle
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 4
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = 'online'
+          echo 'PRODUCTION_QUORUM_FIX=verified'
+          REMOTE

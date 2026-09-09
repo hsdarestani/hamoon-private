@@ -100,10 +100,16 @@ const cloud = require('../cloud-api');
   await lifecycle.changePublicIpLifecycle({ db, dc:{apiType:'hetzner'}, telegramId:'u', serverId:'s', datacenter:'hetzner', provider, waitOptions:{waitTcp:async()=>true, timeoutMs:10} });
   cloud.getServer=origGet; cloud.waitHetznerAction=origWait;
   assert.deepStrictEqual(ops, ['create','poweroff','wait','unassign:old','assign:new','delete:old','poweron','dbip']);
-  const originalRootPasswordFlow = fs.readFileSync('index-core.js','utf8');
-  assert(/rootPassword = srv\.root_password \|\| null/.test(originalRootPasswordFlow));
-  assert(!/rootPassword = await openstackApi\.resetServerPassword\(effectiveDc, null, srv\.id\)/.test(originalRootPasswordFlow));
-  assert(/HETZNER_PROVISIONING_RECONCILE/.test(originalRootPasswordFlow));
+
+  // The provider normally returns the initial root password. If it does not,
+  // the guarded pre-store flow intentionally performs one provider password
+  // reset before recordPurchase so the reconciler never sees a passwordless row.
+  const rootPasswordFlow = fs.readFileSync('index-core.js','utf8');
+  assert(/rootPassword = srv\.root_password \|\| null/.test(rootPasswordFlow));
+  assert(/HETZNER_PASSWORD_PRESTORE_V1/.test(rootPasswordFlow));
+  assert(/if \(!rootPassword\)[\s\S]{0,1000}rootPassword = await openstackApi\.resetServerPassword\(effectiveDc, null, srv\.id\)/.test(rootPasswordFlow));
+  assert(/hetzner_original_password_missing/.test(rootPasswordFlow));
+  assert(/HETZNER_PROVISIONING_RECONCILE/.test(rootPasswordFlow));
   assert.strictEqual(lifecycle.pingNodeSuccess([[['OK', 0.04], ['TIMEOUT', 3]]]), true);
   assert.strictEqual(lifecycle.pingNodeSuccess([[['TIMEOUT', 3]]]), false);
   const text = ['customer-api.js','index.js','Hetzner/hetzner-api.js','services/hetzner-lifecycle.js'].map(f=>fs.readFileSync(f,'utf8')).join('\n');

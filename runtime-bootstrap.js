@@ -33,13 +33,18 @@ function applyRuntimeSafetyDefaults() {
     delete datacenters.afracloud;
   }
 
+  // HAMOON_IR_QUALITY_QUORUM_V1
   const forced = {
     HETZNER_IP_QUALITY_REQUIRED: 'true',
     HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(10 * 365 * 24 * 60 * 60 * 1000),
     HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES: '2',
     HETZNER_MAX_IP_QUALITY_ROTATIONS: '20',
     HETZNER_IP_QUALITY_IR_NODES: '6',
-    HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '4',
+    // Check-Host currently exposes four Iran nodes in normal operation. Requiring
+    // all four makes one slow/offline probe strand otherwise healthy Hetzner IPs
+    // as "inconclusive" forever. Keep the strict per-node ICMP+TCP/22 check, but
+    // use a 3-of-4 quorum so a single probe outage cannot block delivery/change-IP.
+    HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3',
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
     HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0',
