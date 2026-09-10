@@ -118,7 +118,7 @@ jobs:
             } finally {
               await c.end();
             }
-          })().catch(e => { console.error('AUDIT_FAILED=' + String(e.code || e.message)); process.exit(1); });
+          })().catch(e => { console.error('AUDIT_FAILED=' + String(e.code || e.message)); console.error('AUDIT_MESSAGE=' + String(e.sqlMessage || e.message || '')); process.exit(1); });
           NODE
 
           echo "PM2_STATUS_BEGIN"
