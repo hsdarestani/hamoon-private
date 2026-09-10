@@ -200,6 +200,7 @@ jobs:
             } finally {
               await c2.end();
             }
+            process.exit(0);
           })().catch(e => {
             console.error('REPAIR_FAILED=' + String(e.code || e.message));
             console.error('REPAIR_MESSAGE=' + String(e.sqlMessage || e.message || ''));
