@@ -125,7 +125,7 @@ jobs:
           echo "PM2_STATUS_END"
           echo "RECENT_BILLING_RUNTIME_BEGIN"
           timeout 20s pm2 logs hamoonbot --lines 2500 --nostream 2>/dev/null |
-            grep -E '5825867194|\[CRON\]|ATOMIC_RENEWAL|Billing Error|skipping missing datacenter' |
+            grep -A 10 -E '5825867194|\[CRON\]|ATOMIC_RENEWAL|Billing Error|skipping missing datacenter' |
             tail -n 250 || true
           echo "RECENT_BILLING_RUNTIME_END"
           REMOTE
