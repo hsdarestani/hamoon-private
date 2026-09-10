@@ -77,7 +77,7 @@ jobs:
           const mysql=require('mysql2/promise');
           const runtime=require('./runtime-bootstrap');
           runtime.applyRuntimeSafetyDefaults();
-          runtime.installStrictCheckHostFetch();
+          require('./services/check-host-strict-fetch').installStrictCheckHostFetch();
           const lifecycle=require('./services/hetzner-lifecycle');
           (async()=>{
             const c=await mysql.createConnection({
