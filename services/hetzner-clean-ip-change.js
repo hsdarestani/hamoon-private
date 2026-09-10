@@ -52,12 +52,17 @@ async function probeSshReachability(ip, options = {}) {
 }
 
 async function probeIranQuality(ip) {
-  const probeAttempts = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, 3, 1, 6);
+  // Keep one Check-Host request alive long enough for Iranian TCP probes to
+  // complete. Restarting a short request repeatedly only resets its timer and
+  // can produce permanent "insufficient_results" while global probes are 6/6.
+  const probeAttempts = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, 1, 1, 3);
+  const polls = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLLS, 15, 6, 24);
+  const pollDelayMs = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS, 1500, 750, 4000);
   let last = null;
   for (let attempt = 1; attempt <= probeAttempts; attempt += 1) {
-    last = await lifecycle.checkIpQuality(ip);
+    last = await lifecycle.checkIpQuality(ip, { polls, pollDelayMs });
     if (last?.ok || last?.definitive) return last;
-    if (attempt < probeAttempts) await sleep(1800);
+    if (attempt < probeAttempts) await sleep(2500);
   }
   return last;
 }

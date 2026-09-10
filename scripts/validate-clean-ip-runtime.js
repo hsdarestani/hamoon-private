@@ -26,6 +26,9 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
   assert(Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS) > 300 * 24 * 60 * 60 * 1000);
   assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS), 30 * 60 * 1000);
   assert.strictEqual(Number(process.env.HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS), 0);
+  assert.strictEqual(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, '1');
+  assert.strictEqual(process.env.HETZNER_CHANGE_IP_QUALITY_POLLS, '15');
+  assert.strictEqual(process.env.HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS, '1500');
 
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['TIMEOUT'], ['TIMEOUT'], ['TIMEOUT']]]), false);
   assert.strictEqual(strictCheckHost.strictPingState([[['OK'], ['OK'], ['OK'], ['TIMEOUT']]]), true);
@@ -89,6 +92,23 @@ const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
     })
   });
   assert.strictEqual(healthy.ok, true);
+
+  const originalQualityCheck = lifecycle.checkIpQuality;
+  let observedProbeOptions = null;
+  lifecycle.checkIpQuality = async (ip, options) => {
+    observedProbeOptions = options;
+    return {
+      ok: true, definitive: true, checked: true, reason: 'ok',
+      iran: { success: 3, selected: 6 }, global: { success: 6, selected: 6 }
+    };
+  };
+  try {
+    const patientProbe = await cleanChange.probeIranQuality('3.3.3.3');
+    assert.strictEqual(patientProbe.ok, true);
+    assert.deepStrictEqual(observedProbeOptions, { polls: 15, pollDelayMs: 1500 });
+  } finally {
+    lifecycle.checkIpQuality = originalQualityCheck;
+  }
 
   const originalChange = baseChange.changeHetznerPublicIp;
   const originalRemember = baseChange.rememberIp;
