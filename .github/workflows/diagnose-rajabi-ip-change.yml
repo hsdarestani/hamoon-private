@@ -72,6 +72,42 @@ jobs:
             } finally {await c.end();}
           })().catch(e=>{console.error('DIAG_DB_FAILED='+String(e.code||e.message));console.error('DIAG_DB_MESSAGE='+String(e.sqlMessage||e.message));process.exit(1)});
           NODE
+          node <<'NODEPROBE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const runtime=require('./runtime-bootstrap');
+          runtime.applyRuntimeSafetyDefaults();
+          runtime.installStrictCheckHostFetch();
+          const lifecycle=require('./services/hetzner-lifecycle');
+          (async()=>{
+            const c=await mysql.createConnection({
+              host:process.env.DB_HOST||'127.0.0.1',
+              user:process.env.DB_USER,
+              password:process.env.DB_PASSWORD,
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            try {
+              const [rows]=await c.execute(
+                `SELECT server_id,server_name,public_ip FROM purchases
+                 WHERE telegram_id='6940016723' AND status='active' AND public_ip IS NOT NULL
+                 ORDER BY updated_at DESC LIMIT 2`
+              );
+              console.log('ACTIVE_PROBE_TARGETS='+rows.length);
+              for(const row of rows){
+                const result=await lifecycle.checkIpQuality(row.public_ip,{polls:15,pollDelayMs:1500});
+                console.log('LIVE_PROBE='+JSON.stringify({
+                  server_id:String(row.server_id),
+                  server_name:row.server_name,
+                  ok:Boolean(result.ok),
+                  definitive:Boolean(result.definitive),
+                  reason:result.reason,
+                  iran:result.iran,
+                  global:result.global
+                }));
+              }
+            } finally {await c.end();}
+          })().catch(e=>{console.error('LIVE_PROBE_FAILED='+String(e.message||e));process.exit(1)});
+          NODEPROBE
           echo "IP_CHANGE_LOGS_BEGIN"
           timeout 20s pm2 logs hamoonbot --lines 8000 --nostream 2>/dev/null |
             grep -A 14 -B 2 -E '5\.75\.193\.123|5\.75\.207\.199|HETZNER_CHANGE_IP_INCONCLUSIVE_RETRY|HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK|IP_QUALITY_CHECK_UNAVAILABLE' |
