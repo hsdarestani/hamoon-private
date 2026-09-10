@@ -11,8 +11,13 @@ function applyBillingSettlementPatches(input) {
   let source = String(input || '');
 
   const importNeedle = "const hetznerLifecycle = require('./services/hetzner-lifecycle');";
-  const importReplacement = `${importNeedle}\nconst { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');`;
-  if (!source.includes("require('./billing-settlement')")) {
+  const settlementImport = "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');";
+  const importReplacement = `${importNeedle}\n${settlementImport}`;
+
+  // Check for the actual bindings, not merely any textual mention of the module.
+  // Other runtime patches/validators can contain require('./billing-settlement')
+  // as a string and previously caused this import to be skipped at runtime.
+  if (!source.includes(settlementImport)) {
     source = replaceOnce(source, importNeedle, importReplacement, 'import');
   }
 
@@ -28,6 +33,9 @@ function applyBillingSettlementPatches(input) {
   const resumeReplacement = `    const settlement = await settleServerRenewalAtomic({\n      telegramId: userId,\n      serverId,\n      datacenter: purchase.datacenter || dcConfig.key,\n      serverName: purchase.server_name || serverId,\n      renewalAmount: renewal.cycleAmount,\n      trafficCost: 0,\n      billableTrafficGb: purchase.last_billed_traffic_gb,\n      now: new Date()\n    });\n    if (settlement.status === 'insufficient') {\n      return { ok: false, message: '⚠️ موجودی هم‌زمان تغییر کرد و هزینه تمدید قابل کسر نبود. موجودی را بررسی و دوباره تلاش کنید.' };\n    }\n    if (!['charged', 'not_due', 'already_settled'].includes(settlement.status)) {\n      return { ok: false, message: '❌ تمدید اتمیک سرور انجام نشد. لطفاً با پشتیبانی تماس بگیرید.' };\n    }\n    charged = settlement.status === 'charged' ? Number(settlement.charged || renewal.cycleAmount) : 0;`;
   source = replaceOnce(source, resumeNeedle, resumeReplacement, 'resume-atomicity');
 
+  if (!source.includes(settlementImport)) {
+    throw new Error('BILLING_SETTLEMENT_BINDINGS_MISSING');
+  }
   return source;
 }
 
