@@ -40,6 +40,15 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
+          echo "PRODUCTION_HEAD=$(git rev-parse HEAD)"
+          node - <<'NODEVERIFY'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const source = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          const binding = "const { settleServerRenewalAtomic, settleHetznerTrafficOverage } = require('./billing-settlement');";
+          console.log('ATOMIC_BINDING_COUNT=' + source.split(binding).length - 1);
+          console.log('ATOMIC_CALL_COUNT=' + (source.match(/settleServerRenewalAtomic\s*\(/g) || []).length);
+          NODEVERIFY
           node <<'NODE'
           require('dotenv').config();
           const mysql = require('mysql2/promise');
