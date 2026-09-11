@@ -1,0 +1,133 @@
+name: Repair Missing Hetzner IP Delivery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-missing-hetzner-ip-delivery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Repair provider IP, power on, reconcile and notify
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          const TelegramBot = require('node-telegram-bot-api');
+          const runtime = require('./runtime-bootstrap');
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+          runtime.applyRuntimeSafetyDefaults();
+          runtime.installSafeLifecycleModule();
+          const lifecycle = require('./services/hetzner-lifecycle');
+          const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
+          const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+          const code = s => `<pre><code>${esc(s)}</code></pre>`;
+          const waitAction = async (dc, action) => {
+            const id = action?.id || action?.action?.id;
+            if (id) await cloud.waitHetznerAction(dc, id, 180000);
+          };
+          const providerIp = srv => srv?.public_net?.ipv4?.ip || srv?.addresses?.public?.find?.(a=>Number(a.version)===4)?.addr || srv?.public_ip || null;
+
+          (async()=>{
+            const [rows]=await db.pool.execute(`SELECT telegram_id,server_id,datacenter,server_name,status FROM purchases WHERE delivered_at IS NULL AND (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%') AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality') ORDER BY created_at`);
+            console.log('CANDIDATES='+rows.length);
+
+            for (const p of rows) {
+              const dc0 = datacenters[p.datacenter] || datacenters.hetzner;
+              const dc = { ...dc0, key: p.datacenter };
+              let srv = await cloud.getServer(dc, null, p.server_id);
+              let ip = providerIp(srv);
+              if (!ip) {
+                const location = srv?.datacenter?.location?.name || srv?.location?.name || srv?.location || dc.HETZNER_LOCATION || 'nbg1';
+                let newIp = null;
+                try {
+                  newIp = await cloud.createPrimaryIpv4(dc, null, location);
+                  if (!newIp?.id || !newIp?.ip) throw new Error('PRIMARY_IP_CREATE_EMPTY');
+                  const assignAction = await cloud.assignPrimaryIp(dc, null, newIp.id, p.server_id);
+                  await waitAction(dc, assignAction);
+                  await db.updatePublicIp(p.telegram_id, p.server_id, p.datacenter, newIp.ip);
+                  ip = newIp.ip;
+                  console.log('IP_REPAIRED server_id='+p.server_id+' ip='+ip+' location='+location);
+                } catch (e) {
+                  if (newIp?.id) await cloud.deletePrimaryIp(dc, null, newIp.id).catch(()=>{});
+                  throw e;
+                }
+              }
+
+              srv = await cloud.getServer(dc, null, p.server_id);
+              const state = String(srv?.status || srv?.state || '').toLowerCase();
+              if (['off','stopped','shutoff','suspended'].some(x=>state.includes(x))) {
+                const action = await cloud.powerOnHetznerServer(dc, p.server_id);
+                await waitAction(dc, action);
+                console.log('POWERED_ON server_id='+p.server_id);
+              }
+            }
+
+            const results = await lifecycle.reconcileProvisioning({
+              db,
+              resolveDatacenter: key => {
+                const dc = datacenters[key] || datacenters.hetzner;
+                return dc ? { ...dc, key } : null;
+              },
+              timeoutMs: 120000,
+              maxIpRotations: Number(process.env.HETZNER_MAX_IP_QUALITY_ROTATIONS || 20)
+            });
+            console.log('RESULTS='+JSON.stringify(results.map(r=>({server_id:String(r.server_id||''),status:r.status,ready:!!r.ready,newly_delivered:!!r.newly_delivered,reason:r.reason||r.quality?.reason||null,quality_fail_open:!!r.quality_fail_open,ip:r.ip||null}))));
+
+            for (const item of results.filter(r=>r.newly_delivered)) {
+              const purchase = await db.getPurchaseByServerId(item.server_id).catch(()=>null);
+              const password = await db.getServerSecret(item.server_id,'root_password').catch(()=>null);
+              if (!purchase || !password) {
+                await db.updateScopedStatus(item.telegram_id,item.server_id,item.datacenter,'manual_review').catch(()=>{});
+                console.log('NOTIFY_SKIPPED_MISSING_SECRET server_id='+item.server_id);
+                continue;
+              }
+              const lines = [
+                `✅ سرور ${esc(purchase.server_name || item.server_id)} اکنون آماده و قابل تحویل است.`,
+                `🔹 IP: <code>${esc(item.ip || purchase.public_ip || '')}</code>`,
+                '✅ SSH در دسترس است.',
+                item.quality_fail_open
+                  ? '✅ سرور روشن و SSH قابل دسترسی است؛ بررسی‌های تکمیلی شبکه در پس‌زمینه ادامه دارد.'
+                  : '✅ تست دسترسی IP از ایران و چند نقطه خارجی تأیید شد.',
+                `🔑 <b>رمز عبور روت:</b>\n${code(password)}`
+              ];
+              await bot.sendMessage(item.telegram_id, lines.join('\n'), { parse_mode:'HTML' });
+              console.log('NOTIFIED server_id='+item.server_id+' user='+item.telegram_id);
+            }
+
+            const [after]=await db.pool.execute(`SELECT telegram_id,server_id,server_name,status,delivered_at,public_ip,ip_quality_attempts,ip_quality_summary FROM purchases WHERE delivered_at IS NULL AND (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%') AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') ORDER BY created_at`);
+            console.log('AFTER_COUNT='+after.length);
+            for(const r of after) console.log('REMAINING='+JSON.stringify(r));
+            await bot.close().catch(()=>{});
+            process.exit(0);
+          })().catch(async e=>{console.error('REPAIR_FAILED',e?.code||e?.message||String(e));await bot.close().catch(()=>{});process.exit(1)});
+          NODE
+          REMOTE
