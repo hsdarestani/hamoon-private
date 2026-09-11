@@ -1,0 +1,57 @@
+name: Audit Pending Hetzner Deliveries
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-pending-hetzner-deliveries.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Audit production pending deliveries
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== PM2 ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time,pid:p?.pid}))})"
+          echo '=== RECONCILE REFERENCES ==='
+          grep -RniE 'reconcileProvisioning|newly_delivered|ip_quality_exhausted' index-core.js *bootstrap.js services 2>/dev/null | head -n 120 || true
+          echo '=== PENDING DB ==='
+          node - <<'NODE'
+          const db=require('./db');
+          (async()=>{
+            const [rows]=await db.pool.execute(`SELECT telegram_id,server_id,datacenter,server_name,status,created_at,lifecycle_updated_at,delivered_at,public_ip,ip_quality_attempts,ip_quality_summary FROM purchases WHERE (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%') AND delivered_at IS NULL AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') ORDER BY created_at ASC`);
+            console.log('PENDING_COUNT='+rows.length);
+            for(const r of rows) console.log(JSON.stringify(r));
+            process.exit(0);
+          })().catch(e=>{console.error(e);process.exit(1)});
+          NODE
+          echo '=== RECENT DELIVERY LOGS ==='
+          pm2 logs hamoonbot --lines 600 --nostream 2>&1 | grep -Ei 'HETZNER.*(DELIVER|PROVISION|QUALITY|PASSWORD)|pending_ip_quality|manual_review|newly_delivered|ip_quality_exhausted' | tail -n 220 || true
+          REMOTE
