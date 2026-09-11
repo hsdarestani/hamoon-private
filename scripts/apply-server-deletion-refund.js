@@ -59,8 +59,6 @@ const lifecycleNew = `async function deletePurchaseServer({ db, dc, telegramId, 
       await db.restorePurchaseStatus?.(telegramId, serverId, datacenter, previous);
       e.safeMessage = safeProviderMessage(e);
     } else {
-      // Keep deletion_pending so the reconciler retries only the financial/DB
-      // completion. Never restore an active state after the provider is gone.
       e.safeMessage = 'سرور حذف شده است اما ثبت نهایی بازگشت اعتبار در حال تکمیل است.';
     }
     throw e;
@@ -95,21 +93,31 @@ const apiOld = `      try {
         throw recordError;
       }
       await db.recordWalletLog(client.telegram_id, 0, \`API server create \${serverId}\`, 'server_api_create').catch(() => {});`;
-const apiNew = `      // API purchases are prepaid exactly like Telegram purchases. This also
-      // makes prorated deletion refunds financially correct and prevents a free
-      // first billing cycle on API-created servers.
-      const initialDebited = await db.debitUser(client.telegram_id, price);
-      if (!initialDebited) {
+const apiNew = `      // API purchases are prepaid exactly like Telegram purchases. The debit
+      // and its financial log are committed atomically, so deletion refunds can
+      // prove that the current cycle was actually paid.
+      const deletionRefunds = require('./server-deletion-refund');
+      const initialCharge = await deletionRefunds.chargeApiInitialCycle({
+        db,
+        telegramId: client.telegram_id,
+        serverId,
+        amount: price,
+        reserve
+      });
+      if (!['charged', 'already_charged'].includes(initialCharge.status)) {
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی کیف پول هم‌زمان تغییر کرده و برای ساخت سرور کافی نیست.');
       }
       try {
         await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning');
         if (ip && db.updatePublicIp) await db.updatePublicIp(client.telegram_id, serverId, dcKey, ip).catch(() => {});
-        await db.recordWalletLog(client.telegram_id, -price, \`API server purchase \${serverId}\`, 'server_api_purchase');
       } catch (recordError) {
-        await db.creditUser(client.telegram_id, price).catch(() => {});
-        await db.recordWalletLog(client.telegram_id, price, \`Rollback API server purchase \${serverId}\`, 'server_api_purchase_rollback').catch(() => {});
+        await deletionRefunds.rollbackApiInitialCycle({
+          db,
+          telegramId: client.telegram_id,
+          serverId,
+          amount: price
+        }).catch(() => {});
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         throw recordError;
       }`;
