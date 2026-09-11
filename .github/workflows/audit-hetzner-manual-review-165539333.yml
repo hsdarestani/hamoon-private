@@ -59,3 +59,5 @@ jobs:
           })().catch(e=>{console.error('AUDIT_FAILED='+String(e.code||e.message));process.exit(1)});
           NODE
           REMOTE
+      - name: Done
+        run: echo 'audit done'
