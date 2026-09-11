@@ -237,6 +237,40 @@ function createCustomerApiRouter() {
       createdServer = await cloud.createServer(dc, null, { name, serverType: plan.hetzner_type, image, location, key_id: keyId, userLabel: client.telegram_id });
       const serverId = String(createdServer.id);
       const ip = publicIpFromServer(createdServer);
+
+      // HETZNER_API_PASSWORD_PRESTORE_V1
+      // API provisioning shares the same safe-delivery requirement as Telegram purchases.
+      // Persist and read-back the credential before exposing the purchase to the reconciler.
+      let rootPassword = createdServer?.root_password || null;
+      if (!rootPassword) {
+        if (createdServer?.action?.id) {
+          await cloud.waitHetznerAction(
+            dc,
+            createdServer.action.id,
+            Number(process.env.HETZNER_PASSWORD_RECOVERY_ACTION_TIMEOUT_MS || 120000)
+          );
+        }
+        rootPassword = await cloud.resetServerPassword(dc, null, serverId);
+      }
+      if (!rootPassword) {
+        const passwordError = new Error('HETZNER_PASSWORD_RECOVERY_EMPTY');
+        passwordError.code = 'HETZNER_PASSWORD_RECOVERY_EMPTY';
+        throw passwordError;
+      }
+      await db.upsertServerSecret({
+        telegramId: client.telegram_id,
+        serverId,
+        datacenter: dcKey,
+        secretType: 'root_password',
+        secretValue: rootPassword
+      });
+      const verifiedRootPassword = await db.getServerSecret(serverId, 'root_password');
+      if (!verifiedRootPassword || verifiedRootPassword !== rootPassword) {
+        const passwordError = new Error('HETZNER_PASSWORD_SECRET_VERIFY_FAILED');
+        passwordError.code = 'HETZNER_PASSWORD_SECRET_VERIFY_FAILED';
+        throw passwordError;
+      }
+
       try {
         await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning');
         if (ip && db.updatePublicIp) await db.updatePublicIp(client.telegram_id, serverId, dcKey, ip).catch(() => {});
