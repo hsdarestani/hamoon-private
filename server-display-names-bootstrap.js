@@ -143,8 +143,8 @@ function applyPatches(originalSource) {
     source,
     `async function handleServerDeletion(chatId, userId, serverId, dcConfig) {`,
     `async function getPrivateKey(chatId, serverId) {`,
-    `        sendMessage(chatId, '✅ سرور با موفقیت حذف شد.');`,
-    `        await clearServerDisplayName(userId, serverId, dcConfig.key).catch(() => {});\n        sendMessage(chatId, '✅ سرور با موفقیت حذف شد.');`,
+    `        logServerEvent({ type: 'server_deleted', server_id: serverId, user_id: userId, datacenter: dcConfig.key });`,
+    `        await clearServerDisplayName(userId, serverId, dcConfig.key).catch(() => {});\n        logServerEvent({ type: 'server_deleted', server_id: serverId, user_id: userId, datacenter: dcConfig.key });`,
     'clear display name after deletion'
   );
 
