@@ -11,6 +11,7 @@ const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap')
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
 const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
+const { applyBillingRenewalTickPatches } = require('./billing-renewal-tick-bootstrap');
 const { applyResumeTransactionalPatches } = require('./resume-transactional-bootstrap');
 const { applyResellerBillingGracePatches } = require('./reseller-billing-grace-bootstrap');
 const { applyRebuildPatches } = require('./rebuild-bootstrap');
@@ -172,7 +173,7 @@ function applyPatches(coreSource) {
       )
     )
   );
-  return applyResumeTransactionalPatches(baseline);
+  return applyBillingRenewalTickPatches(applyResumeTransactionalPatches(baseline));
 }
 
 function run() {
