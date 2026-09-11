@@ -1,0 +1,174 @@
+name: Refund Srv-HET-99e15e overage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refund-srv-het-99e15e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refund:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Refund billed Hetzner overage atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const serverName = 'Srv-HET-99e15e';
+
+          function mysqlDate(value) {
+            return new Date(value).toISOString().slice(0,19).replace('T',' ');
+          }
+
+          (async () => {
+            const c = await mysql.createConnection({
+              host: process.env.DB_HOST || '127.0.0.1',
+              user: process.env.DB_USER,
+              password: process.env.DB_PASSWORD,
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            try {
+              await c.beginTransaction();
+
+              const [purchases] = await c.execute(
+                `SELECT telegram_id, server_id, server_name, datacenter
+                 FROM purchases
+                 WHERE server_name=?
+                 ORDER BY created_at DESC
+                 LIMIT 1 FOR UPDATE`,
+                [serverName]
+              );
+              if (!purchases.length) throw new Error('TARGET_SERVER_NOT_FOUND');
+              const p = purchases[0];
+              const telegramId = String(p.telegram_id);
+              const serverId = String(p.server_id);
+
+              const [trafficRows] = await c.execute(
+                `SELECT period_start, billed_overage_bytes, billed_amount_toman, last_outgoing_bytes, included_traffic_bytes, price_per_tb
+                 FROM hetzner_traffic_billing
+                 WHERE server_id=?
+                 ORDER BY period_start DESC
+                 LIMIT 1 FOR UPDATE`,
+                [serverId]
+              );
+              if (!trafficRows.length) throw new Error('NO_TRAFFIC_BILLING_ROW');
+              const t = trafficRows[0];
+              const billedAmount = Math.max(0, Math.round(Number(t.billed_amount_toman || 0)));
+              if (!(billedAmount > 0)) throw new Error('NO_BILLED_OVERAGE_TO_REFUND');
+
+              const periodLabel = mysqlDate(t.period_start);
+              const refundDescriptionPrefix = `بازگشت هزینه ترافیک مازاد Hetzner سرور ${serverName}؛ دوره ${periodLabel}`;
+              const [existingRefundRows] = await c.execute(
+                `SELECT COALESCE(SUM(amount),0) AS refunded
+                 FROM wallet_logs
+                 WHERE telegram_id=?
+                   AND type='hetzner_traffic_refund'
+                   AND amount>0
+                   AND description LIKE ?`,
+                [telegramId, `${refundDescriptionPrefix}%`]
+              );
+              const alreadyRefunded = Math.max(0, Math.round(Number(existingRefundRows[0]?.refunded || 0)));
+              const refundAmount = Math.max(0, billedAmount - alreadyRefunded);
+
+              const [userRows] = await c.execute(
+                'SELECT wallet FROM users WHERE telegram_id=? LIMIT 1 FOR UPDATE',
+                [telegramId]
+              );
+              if (!userRows.length) throw new Error('USER_NOT_FOUND');
+              const walletBefore = Number(userRows[0].wallet || 0);
+
+              if (!(refundAmount > 0)) {
+                await c.commit();
+                console.log('REFUND_STATUS=already_refunded');
+                console.log('BILLED_OVERAGE_TOMAN=' + billedAmount);
+                console.log('ALREADY_REFUNDED_TOMAN=' + alreadyRefunded);
+                console.log('REFUND_TOMAN=0');
+                console.log('WALLET_AFTER=' + Math.round(walletBefore));
+                return;
+              }
+
+              await c.execute(
+                'UPDATE users SET wallet=wallet+?, updated_at=CURRENT_TIMESTAMP WHERE telegram_id=?',
+                [refundAmount, telegramId]
+              );
+
+              const description = `${refundDescriptionPrefix}؛ ${refundAmount} تومان`;
+              await c.execute(
+                'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
+                [telegramId, refundAmount, description, 'hetzner_traffic_refund']
+              );
+
+              const eventKey = `hetzner-traffic-refund:${serverId}:${periodLabel}:${billedAmount}`;
+              await c.execute(
+                `INSERT INTO billing_events
+                 (event_key, telegram_id, server_id, datacenter, event_type, amount_toman, period_start, period_end, metadata)
+                 VALUES (?, ?, ?, ?, 'hetzner_traffic_refund', ?, ?, NOW(), ?)
+                 ON DUPLICATE KEY UPDATE event_key=event_key`,
+                [
+                  eventKey,
+                  telegramId,
+                  serverId,
+                  String(p.datacenter || 'hetzner'),
+                  refundAmount,
+                  periodLabel,
+                  JSON.stringify({
+                    reason: 'manual_customer_refund_after_traffic_overage_incident',
+                    serverName,
+                    billedAmountAtRefund: billedAmount,
+                    alreadyRefundedBefore: alreadyRefunded,
+                    refundedNow: refundAmount,
+                    billedOverageBytes: Number(t.billed_overage_bytes || 0),
+                    lastOutgoingBytes: Number(t.last_outgoing_bytes || 0),
+                    includedTrafficBytes: Number(t.included_traffic_bytes || 0),
+                    pricePerTb: Number(t.price_per_tb || 0)
+                  })
+                ]
+              );
+
+              const [[after]] = await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[telegramId]);
+              await c.commit();
+
+              console.log('REFUND_STATUS=refunded');
+              console.log('SERVER_ID=' + serverId);
+              console.log('PERIOD_START=' + periodLabel);
+              console.log('BILLED_OVERAGE_TOMAN=' + billedAmount);
+              console.log('ALREADY_REFUNDED_TOMAN=' + alreadyRefunded);
+              console.log('REFUND_TOMAN=' + refundAmount);
+              console.log('WALLET_BEFORE=' + Math.round(walletBefore));
+              console.log('WALLET_AFTER=' + Math.round(Number(after.wallet || 0)));
+            } catch (e) {
+              await c.rollback().catch(() => {});
+              throw e;
+            } finally {
+              await c.end();
+            }
+          })().catch(e => { console.error('REFUND_FAILED=' + String(e.code || e.message)); process.exit(1); });
+          NODE
+          REMOTE
