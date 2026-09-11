@@ -4,6 +4,7 @@ const { ensureBillingSettlementSchema } = require('./billing-settlement');
 
 const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
 const INITIAL_API_PAID_LOG_TYPE = 'server_api_purchase';
+const INITIAL_API_ROLLBACK_LOG_TYPE = 'server_api_purchase_rollback';
 
 function toDate(value) {
   if (!value) return null;
@@ -33,6 +34,109 @@ function isInitialApiCycle(purchase) {
   const billed = toDate(purchase?.last_billed_at);
   if (!created || !billed) return true;
   return Math.abs(billed.getTime() - created.getTime()) < 5 * 60 * 1000;
+}
+
+async function chargeApiInitialCycle({ db, telegramId, serverId, amount, reserve = 0 }) {
+  if (!db?.pool) throw new Error('DB_POOL_UNAVAILABLE');
+  const charge = Math.max(0, Math.round(Number(amount || 0)));
+  const minimumReserve = Math.max(0, Math.round(Number(reserve || 0)));
+  if (!(charge > 0)) return { status: 'invalid_amount', charged: 0 };
+
+  const conn = await db.pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [existing] = await conn.execute(
+      `SELECT id, amount FROM wallet_logs
+       WHERE telegram_id = ? AND type = ? AND description LIKE ?
+       ORDER BY id DESC LIMIT 1`,
+      [String(telegramId), INITIAL_API_PAID_LOG_TYPE, `%${String(serverId)}%`]
+    );
+    if (existing.length) {
+      await conn.commit();
+      return { status: 'already_charged', charged: Math.abs(Number(existing[0].amount || 0)) };
+    }
+
+    const [userRows] = await conn.execute(
+      'SELECT wallet FROM users WHERE telegram_id = ? LIMIT 1 FOR UPDATE',
+      [String(telegramId)]
+    );
+    if (!userRows.length) {
+      await conn.rollback();
+      return { status: 'user_missing', charged: 0 };
+    }
+    const balance = Number(userRows[0].wallet || 0);
+    if (balance < charge + minimumReserve) {
+      await conn.commit();
+      return { status: 'insufficient', charged: 0, balance, required: charge + minimumReserve };
+    }
+
+    await conn.execute(
+      'UPDATE users SET wallet = wallet - ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?',
+      [charge, String(telegramId)]
+    );
+    await conn.execute(
+      'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
+      [String(telegramId), -charge, `API server purchase ${serverId}`, INITIAL_API_PAID_LOG_TYPE]
+    );
+    await conn.commit();
+    return { status: 'charged', charged: charge, newWallet: balance - charge };
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function rollbackApiInitialCycle({ db, telegramId, serverId, amount }) {
+  if (!db?.pool) throw new Error('DB_POOL_UNAVAILABLE');
+  const fallbackAmount = Math.max(0, Math.round(Number(amount || 0)));
+  const conn = await db.pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rollbackRows] = await conn.execute(
+      `SELECT id FROM wallet_logs
+       WHERE telegram_id = ? AND type = ? AND description LIKE ?
+       ORDER BY id DESC LIMIT 1`,
+      [String(telegramId), INITIAL_API_ROLLBACK_LOG_TYPE, `%${String(serverId)}%`]
+    );
+    if (rollbackRows.length) {
+      await conn.commit();
+      return { status: 'already_rolled_back', refunded: 0 };
+    }
+
+    const [chargeRows] = await conn.execute(
+      `SELECT amount FROM wallet_logs
+       WHERE telegram_id = ? AND type = ? AND amount < 0 AND description LIKE ?
+       ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      [String(telegramId), INITIAL_API_PAID_LOG_TYPE, `%${String(serverId)}%`]
+    );
+    if (!chargeRows.length) {
+      await conn.commit();
+      return { status: 'nothing_to_rollback', refunded: 0 };
+    }
+    const refund = Math.max(0, Math.round(Math.abs(Number(chargeRows[0].amount || fallbackAmount))));
+    if (!(refund > 0)) {
+      await conn.commit();
+      return { status: 'nothing_to_rollback', refunded: 0 };
+    }
+
+    await conn.execute(
+      'UPDATE users SET wallet = wallet + ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?',
+      [refund, String(telegramId)]
+    );
+    await conn.execute(
+      'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
+      [String(telegramId), refund, `Rollback API server purchase ${serverId}`, INITIAL_API_ROLLBACK_LOG_TYPE]
+    );
+    await conn.commit();
+    return { status: 'rolled_back', refunded: refund };
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, now = new Date() }) {
@@ -70,15 +174,21 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
     }
 
     // Historically API provisioning created the server without charging the first
-    // cycle. Do not generate free credit for those legacy unpaid initial cycles.
-    // New API purchases create a negative server_api_purchase log containing the
-    // server id before they become eligible for this refund.
+    // cycle. Do not create free credit for those legacy unpaid initial cycles.
     if (isInitialApiCycle(purchase)) {
       const [paidLogs] = await conn.execute(
-        `SELECT id FROM wallet_logs
-         WHERE telegram_id = ? AND type = ? AND amount < 0 AND description LIKE ?
-         ORDER BY id DESC LIMIT 1`,
-        [String(telegramId), INITIAL_API_PAID_LOG_TYPE, `%${String(serverId)}%`]
+        `SELECT p.id
+         FROM wallet_logs p
+         WHERE p.telegram_id = ? AND p.type = ? AND p.amount < 0 AND p.description LIKE ?
+           AND NOT EXISTS (
+             SELECT 1 FROM wallet_logs r
+             WHERE r.telegram_id = p.telegram_id AND r.type = ? AND r.description LIKE ?
+           )
+         ORDER BY p.id DESC LIMIT 1`,
+        [
+          String(telegramId), INITIAL_API_PAID_LOG_TYPE, `%${String(serverId)}%`,
+          INITIAL_API_ROLLBACK_LOG_TYPE, `%${String(serverId)}%`
+        ]
       );
       if (!paidLogs.length) {
         await conn.commit();
@@ -162,7 +272,10 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
 module.exports = {
   HOURS_IN_CYCLE,
   INITIAL_API_PAID_LOG_TYPE,
+  INITIAL_API_ROLLBACK_LOG_TYPE,
   calculateUnusedCycleRefund,
   isInitialApiCycle,
+  chargeApiInitialCycle,
+  rollbackApiInitialCycle,
   refundUnusedServerCycle
 };
