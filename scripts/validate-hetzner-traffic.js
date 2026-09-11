@@ -4,6 +4,7 @@
 const fs = require('fs');
 const traffic = require('../hetzner-traffic');
 const addons = require('../hetzner-traffic-addons');
+const alerts = require('../hetzner-traffic-alerts');
 const { applyPatches } = require('../runtime-bootstrap');
 
 function assert(name, ok) {
@@ -34,6 +35,12 @@ assert('invalid traffic package is rejected', addons.quoteTrafficAddon(1, 7).ok 
 const sampleQuote = addons.quoteTrafficAddon(1, 5);
 assert('valid traffic package produces a positive quote', sampleQuote.ok && sampleQuote.extraBytes === 5_000_000_000_000 && sampleQuote.amountToman > 0);
 
+const twentyTb = 20 * alerts.DECIMAL_TB_BYTES;
+assert('quota alert stays silent below 20 TB allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb - 1, twentyTb) === false);
+assert('quota alert fires exactly at 20 TB allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb, twentyTb) === true);
+assert('quota alert stays active above exhausted allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb + 1, twentyTb) === true);
+assert('quota alert ignores missing allowance', alerts.shouldNotifyTrafficQuotaExhausted(1, 0) === false);
+
 const core = fs.readFileSync('index-core.js', 'utf8');
 try {
   const patched = applyPatches(core);
@@ -49,6 +56,8 @@ try {
   assert('buy extra traffic callbacks are present', ["case 'HETZNER_TRAFFIC_BUY':", "case 'HETZNER_TRAFFIC_BUY_QUOTE':", "case 'HETZNER_TRAFFIC_BUY_CONFIRM':"].every(x => patched.includes(x)));
   assert('traffic package confirmation is idempotent', patched.includes('purchaseTrafficAddonAtomic({') && patched.includes('nonce: payload.nonce'));
   assert('prepaid traffic extends automatic billing allowance', patched.includes('customerIncludedBytes') && patched.includes("require('./hetzner-traffic-addons').getTrafficAddonSummary"));
+  assert('quota exhausted alert is wired into runtime billing', patched.includes("require('./hetzner-traffic-alerts')") && patched.includes('claimTrafficQuotaExhaustedAlert({'));
+  assert('quota alert does not block overage settlement', patched.includes('[HETZNER_TRAFFIC_ALERT_ERROR]') && patched.includes('const trafficSettlement = await settleHetznerTrafficOverage({'));
   assert('console remains active', patched.includes("case 'HCONSOLE':"));
   assert('rename remains active', patched.includes("case 'RENAME_SERVER':"));
   assert('provider visibility remains active', patched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
