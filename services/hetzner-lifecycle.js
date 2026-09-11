@@ -318,14 +318,28 @@ async function deletePurchaseServer({ db, dc, telegramId, serverId, datacenter }
   if (!purchase) { const e = new Error('NOT_FOUND'); e.code = 'NOT_FOUND'; throw e; }
   const previous = purchase.status || 'active';
   await db.markDeletionPending?.(telegramId, serverId, datacenter, previous);
+  let providerDeleted = false;
   try {
-    await cloud.deleteServer(dc, null, serverId);
+    try {
+      await cloud.deleteServer(dc, null, serverId);
+      providerDeleted = true;
+    } catch (providerError) {
+      if (!isNotFound(providerError)) throw providerError;
+      providerDeleted = true;
+    }
+
+    const refund = await require('../server-deletion-refund').refundUnusedServerCycle({
+      db, telegramId, serverId, datacenter
+    });
     await db.markDeleted?.(telegramId, serverId, datacenter);
-    return { status: 'deleted' };
+    return { status: 'deleted', refund };
   } catch (e) {
-    if (isNotFound(e)) { await db.markDeleted?.(telegramId, serverId, datacenter); return { status: 'deleted' }; }
-    await db.restorePurchaseStatus?.(telegramId, serverId, datacenter, previous);
-    e.safeMessage = safeProviderMessage(e);
+    if (!providerDeleted) {
+      await db.restorePurchaseStatus?.(telegramId, serverId, datacenter, previous);
+      e.safeMessage = safeProviderMessage(e);
+    } else {
+      e.safeMessage = 'سرور حذف شده است اما ثبت نهایی بازگشت اعتبار در حال تکمیل است.';
+    }
     throw e;
   }
 }
@@ -338,7 +352,20 @@ async function reconcileDeletionPending({ db, dc }) {
       await cloud.getServer(dc, null, p.server_id);
       out.push({ server_id: p.server_id, status: 'manual_review_provider_still_exists' });
     } catch (e) {
-      if (isNotFound(e)) { await db.markDeleted?.(p.telegram_id, p.server_id, p.datacenter); out.push({ server_id: p.server_id, status: 'deleted' }); }
+      if (isNotFound(e)) {
+        try {
+          const refund = await require('../server-deletion-refund').refundUnusedServerCycle({
+            db,
+            telegramId: p.telegram_id,
+            serverId: p.server_id,
+            datacenter: p.datacenter
+          });
+          await db.markDeleted?.(p.telegram_id, p.server_id, p.datacenter);
+          out.push({ server_id: p.server_id, status: 'deleted', refund });
+        } catch (refundError) {
+          out.push({ server_id: p.server_id, status: 'refund_retry_failed', reason: refundError.code || refundError.message });
+        }
+      }
       else out.push({ server_id: p.server_id, status: 'check_failed' });
     }
   }

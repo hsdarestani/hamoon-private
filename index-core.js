@@ -3087,13 +3087,24 @@ const isHetzner = isHetznerDc(dcConfig);
   await deleteKeyPairFromDb(serverId).catch(()=>{});
 }
 
+        let deletionRefund = null;
         if (isTestServer) {
             await deleteTestServer(serverId);
         } else {
+            deletionRefund = await require('./server-deletion-refund').refundUnusedServerCycle({
+                db: require('./db'),
+                telegramId: userId,
+                serverId,
+                datacenter: dcConfig.key
+            });
             await updatePurchaseStatus(serverId, 'deleted');
         }
 
-        sendMessage(chatId, '✅ سرور با موفقیت حذف شد.');
+        const refundAmount = Number(deletionRefund?.refunded || 0);
+        const refundText = refundAmount > 0
+          ? `\n💰 مبلغ ${refundAmount.toLocaleString('fa-IR')} تومان بابت مانده دوره به کیف پول شما برگشت داده شد.`
+          : '';
+        sendMessage(chatId, `✅ سرور با موفقیت حذف شد.${refundText}`);
         logServerEvent({ type: 'server_deleted', server_id: serverId, user_id: userId, datacenter: dcConfig.key });
     } catch (e) {
         console.error(`Deletion Error for ${serverId} in ${dcConfig.name}:`, e);

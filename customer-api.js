@@ -271,14 +271,34 @@ function createCustomerApiRouter() {
         throw passwordError;
       }
 
+      // API purchases are prepaid exactly like Telegram purchases. The debit
+      // and its financial log are committed atomically, so deletion refunds can
+      // prove that the current cycle was actually paid.
+      const deletionRefunds = require('./server-deletion-refund');
+      const initialCharge = await deletionRefunds.chargeApiInitialCycle({
+        db,
+        telegramId: client.telegram_id,
+        serverId,
+        amount: price,
+        reserve
+      });
+      if (!['charged', 'already_charged'].includes(initialCharge.status)) {
+        await cloud.deleteServer(dc, null, serverId).catch(() => {});
+        return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی کیف پول هم‌زمان تغییر کرده و برای ساخت سرور کافی نیست.');
+      }
       try {
         await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning');
         if (ip && db.updatePublicIp) await db.updatePublicIp(client.telegram_id, serverId, dcKey, ip).catch(() => {});
       } catch (recordError) {
+        await deletionRefunds.rollbackApiInitialCycle({
+          db,
+          telegramId: client.telegram_id,
+          serverId,
+          amount: price
+        }).catch(() => {});
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         throw recordError;
       }
-      await db.recordWalletLog(client.telegram_id, 0, `API server create ${serverId}`, 'server_api_create').catch(() => {});
       res.status(202).json({ ok: true, operation: 'provisioning', server: { id: serverId, name: createdServer.name || name, status: 'provisioning', public_ip: ip, server_type: plan.id, image, location, duration, price } });
     } catch (e) {
       if (createdServer && createdDc && e?.code === 'HETZNER_PLACEMENT_UNAVAILABLE') await cloud.deleteServer(createdDc, null, createdServer.id).catch(() => {});
