@@ -374,10 +374,51 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
           });
           continue;
         }
+
+        // HETZNER_PASSWORD_AUTORECOVERY_V2
+        // A missing provider password is recoverable and should not notify the user/admin
+        // until the automatic reset + encrypted store + read-back has actually failed.
         if (!stored) {
-          await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
-          results.push({ server_id: purchase.server_id, telegram_id: purchase.telegram_id, datacenter: purchase.datacenter, status: 'manual_review', reason: 'password_missing' });
-          continue;
+          try {
+            await cloud.getServer(dc, null, purchase.server_id);
+            const recoveredPassword = await cloud.resetServerPassword(dc, null, purchase.server_id);
+            if (!recoveredPassword) {
+              const err = new Error('RESET_PASSWORD_RETURNED_EMPTY');
+              err.code = 'RESET_PASSWORD_RETURNED_EMPTY';
+              throw err;
+            }
+            if (typeof db.upsertServerSecret !== 'function') {
+              const err = new Error('SERVER_SECRET_STORE_UNAVAILABLE');
+              err.code = 'SERVER_SECRET_STORE_UNAVAILABLE';
+              throw err;
+            }
+            await db.upsertServerSecret({
+              telegramId: purchase.telegram_id,
+              serverId: purchase.server_id,
+              datacenter: purchase.datacenter,
+              secretType: 'root_password',
+              secretValue: recoveredPassword
+            });
+            const verified = await db.getServerSecret?.(purchase.server_id, 'root_password');
+            if (!verified || verified !== recoveredPassword) {
+              const err = new Error('SERVER_SECRET_READBACK_MISMATCH');
+              err.code = 'SERVER_SECRET_READBACK_MISMATCH';
+              throw err;
+            }
+            stored = verified;
+          } catch (recoveryError) {
+            const recoveryCode = String(recoveryError?.code || recoveryError?.message || 'password_recovery_failed').slice(0, 100);
+            await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'manual_review');
+            results.push({
+              server_id: purchase.server_id,
+              telegram_id: purchase.telegram_id,
+              datacenter: purchase.datacenter,
+              status: 'manual_review',
+              reason: 'password_recovery_failed',
+              recovery_error: recoveryCode
+            });
+            continue;
+          }
         }
       }
 
