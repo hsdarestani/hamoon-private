@@ -519,6 +519,69 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
         continue;
       }
 
+      // If a provisioning server exists at Hetzner but lost its primary IPv4
+      // during an interrupted/rolled-back rotation, repair it automatically instead
+      // of leaving the paid server in pending_ip forever.
+      if (isDelivery && readiness.status === 'pending_ip') {
+        let repairIp = null;
+        let repairAssigned = false;
+        try {
+          const providerServer = await cloud.getServer(dc, null, purchase.server_id);
+          if (!publicIpv4(providerServer)) {
+            const location =
+              providerServer?.datacenter?.location?.name ||
+              providerServer?.location?.name ||
+              providerServer?.location ||
+              dc?.HETZNER_LOCATION;
+            if (!location) throw new Error('HETZNER_MISSING_IP_LOCATION_UNKNOWN');
+
+            repairIp = await cloud.createPrimaryIpv4(dc, null, location);
+            if (!repairIp?.id || !repairIp?.ip) throw new Error('HETZNER_MISSING_IP_CREATE_FAILED');
+
+            await waitActionMaybe(dc, await cloud.assignPrimaryIp(dc, null, repairIp.id, purchase.server_id));
+            repairAssigned = true;
+            await db.updatePublicIp?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, repairIp.ip);
+
+            const providerState = String(providerServer?.status || providerServer?.state || '').toLowerCase();
+            if (['off','stopped','shutoff','suspended'].some(state => providerState.includes(state))) {
+              await waitActionMaybe(dc, await cloud.powerOnHetznerServer(dc, purchase.server_id));
+            }
+
+            await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, 'pending_ssh');
+            results.push({
+              server_id: purchase.server_id,
+              telegram_id: purchase.telegram_id,
+              datacenter: purchase.datacenter,
+              previous_status: purchase.status,
+              status: 'pending_ssh',
+              ready: false,
+              ip: repairIp.ip,
+              ip_repaired: true,
+              reason: 'missing_primary_ip_repaired'
+            });
+            continue;
+          }
+        } catch (repairError) {
+          if (repairIp?.id) {
+            if (repairAssigned) {
+              await waitActionMaybe(dc, await cloud.unassignPrimaryIp(dc, null, repairIp.id)).catch(() => null);
+            }
+            await cloud.deletePrimaryIp(dc, null, repairIp.id).catch(() => null);
+          }
+          results.push({
+            server_id: purchase.server_id,
+            telegram_id: purchase.telegram_id,
+            datacenter: purchase.datacenter,
+            previous_status: purchase.status,
+            status: 'pending_ip',
+            ready: false,
+            reason: 'missing_primary_ip_repair_failed',
+            error: String(repairError?.message || repairError).slice(0, 120)
+          });
+          continue;
+        }
+      }
+
       await db.updateScopedStatus?.(purchase.telegram_id, purchase.server_id, purchase.datacenter, readiness.status);
       if (readiness.status === 'pending_ip_quality' && readiness.quality?.definitive) {
         const attempts = Number(purchase.ip_quality_attempts || 0);
