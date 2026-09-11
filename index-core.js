@@ -3704,7 +3704,9 @@ cron.schedule('* * * * *', async () => {
         `✅ سرور ${htmlEscape(purchase.server_name || item.server_id)} اکنون کاملاً آماده و قابل تحویل است.`,
         `🔹 IP: <code>${htmlEscape(item.ip || purchase.public_ip || '')}</code>`,
         '✅ SSH در دسترس است.',
-        '✅ تست دسترسی IP از ایران و چند نقطه خارجی تأیید شد.',
+        item.quality_fail_open
+          ? '✅ سرور روشن و SSH قابل دسترسی است؛ بررسی‌های تکمیلی شبکه در پس‌زمینه ادامه دارد.'
+          : '✅ تست دسترسی IP از ایران و چند نقطه خارجی تأیید شد.',
         `🔑 <b>رمز عبور روت:</b>\n${htmlCodeBlock(password)}`
       ].join('\n');
       await sendMessage(item.telegram_id, msgHtml, {

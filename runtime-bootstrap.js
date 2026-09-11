@@ -36,8 +36,13 @@ function applyRuntimeSafetyDefaults() {
   // HAMOON_IR_QUALITY_QUORUM_V1
   const forced = {
     HETZNER_IP_QUALITY_REQUIRED: 'true',
-    HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(10 * 365 * 24 * 60 * 60 * 1000),
-    HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES: '2',
+    // If the server itself is running and SSH is reachable, an external Check-Host
+    // inconclusive result must not strand a paid server indefinitely. Keep a short
+    // observation window, then deliver while background checks may continue.
+    HETZNER_IP_QUALITY_INCONCLUSIVE_FAIL_OPEN_MS: String(3 * 60 * 1000),
+    // Definitive failures still rotate immediately in the lifecycle. Inconclusive
+    // probes should wait for fail-open instead of churning IPs.
+    HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES: '10',
     HETZNER_MAX_IP_QUALITY_ROTATIONS: '20',
     HETZNER_IP_QUALITY_IR_NODES: '6',
     // Check-Host currently exposes four Iran nodes in normal operation. Requiring
