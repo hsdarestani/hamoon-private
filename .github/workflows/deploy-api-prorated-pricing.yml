@@ -1,0 +1,156 @@
+name: Deploy API Prorated Pricing
+
+on:
+  push:
+    branches: [main, feat/api-prorated-pricing]
+    paths:
+      - 'api-prorated-pricing.js'
+      - 'api-prorated-preload.js'
+      - 'api-prorated-bot-entry.js'
+      - 'api-prorated-dashboard-entry.js'
+      - 'ecosystem.api-prorated.config.js'
+      - 'public/dashboard/reseller-api-admin.js'
+      - 'scripts/migrate-api-prorated-pricing.js'
+      - 'tests/api-prorated-pricing.test.js'
+      - '.github/workflows/deploy-api-prorated-pricing.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-api-prorated-pricing-production
+  cancel-in-progress: false
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source and pricing behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check api-prorated-pricing.js
+          node --check api-prorated-preload.js
+          node --check api-prorated-bot-entry.js
+          node --check api-prorated-dashboard-entry.js
+          node --check ecosystem.api-prorated.config.js
+          node --check public/dashboard/reseller-api-admin.js
+          node --check scripts/migrate-api-prorated-pricing.js
+          node --check tests/api-prorated-pricing.test.js
+          node tests/api-prorated-pricing.test.js
+          grep -Fq 'Monthly pricing basis (prorated billing)' public/dashboard/reseller-api-admin.js
+
+      - name: Prepare SSH
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production and verify
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== BEFORE ==='
+          git rev-parse --short HEAD
+
+          fetched=0
+          for attempt in 1 2 3 4 5 6; do
+            if git fetch origin main; then fetched=1; break; fi
+            sleep 3
+          done
+          test "$fetched" = 1
+          git checkout main
+          git merge --ff-only origin/main
+
+          echo '=== SOURCE VALIDATION ==='
+          node --check api-prorated-pricing.js
+          node --check api-prorated-preload.js
+          node --check api-prorated-bot-entry.js
+          node --check api-prorated-dashboard-entry.js
+          node --check ecosystem.api-prorated.config.js
+          node --check public/dashboard/reseller-api-admin.js
+          node --check scripts/migrate-api-prorated-pricing.js
+          node --check tests/api-prorated-pricing.test.js
+          node tests/api-prorated-pricing.test.js
+
+          echo '=== SAFE MIGRATION ==='
+          node scripts/migrate-api-prorated-pricing.js
+
+          echo '=== API CLIENT TOGGLE APPLICATION SMOKE ==='
+          node - <<'NODE'
+          const db = require('./db');
+          const pricing = require('./api-prorated-pricing');
+          (async () => {
+            pricing.installApiProratedPricing(db);
+            await db.apiProratedPricingReady;
+            const telegramId = `pricing-smoke-${Date.now()}`;
+            let client = null;
+            try {
+              client = await db.createApiClient({ telegramId, name: 'API pricing smoke', isActive: 0, maxServers: 1 });
+              if (Number(client.monthly_prorated_pricing || 0) !== 0) throw new Error('API_PRORATED_DEFAULT_NOT_FALSE');
+              client = await db.updateApiClient(client.id, { monthlyProratedPricing: 1 });
+              if (Number(client.monthly_prorated_pricing || 0) !== 1) throw new Error('API_PRORATED_TOGGLE_SMOKE_FAILED');
+              console.log('api-client pricing toggle smoke: ok');
+            } finally {
+              if (client?.id) await db.pool.execute('DELETE FROM api_clients WHERE id = ?', [client.id]).catch(() => {});
+              await db.pool.execute('DELETE FROM users WHERE telegram_id = ?', [telegramId]).catch(() => {});
+              await db.pool.end();
+            }
+          })().catch(error => { console.error(error); process.exitCode = 1; });
+          NODE
+
+          echo '=== PM2 RELOAD ==='
+          pm2 startOrReload ecosystem.api-prorated.config.js --update-env
+          pm2 save
+          sleep 5
+
+          echo '=== BOT ONLINE ==='
+          pm2 describe hamoonbot | grep -E 'status|script path|uptime|restarts' | head -n 20
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');if(!p||p.pm2_env?.status!=='online')process.exit(1);console.log('hamoonbot online:',p.pm2_env.pm_exec_path);})"
+
+          echo '=== DASHBOARD ONLINE ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='dashboard-server');if(!p||p.pm2_env?.status!=='online')process.exit(1);console.log('dashboard-server online:',p.pm2_env.pm_exec_path);})"
+          curl -fsS --max-time 8 http://127.0.0.1:3000/health
+          echo
+
+          echo '=== ADMIN TOGGLE STATIC VERIFICATION ==='
+          grep -F 'Monthly pricing basis (prorated billing)' public/dashboard/reseller-api-admin.js
+
+          echo '=== PUBLIC API ROUTE ==='
+          code="$(curl -ksS --max-time 10 -o /tmp/hamoon-api-prorated-response -w '%{http_code}' 'https://pay.hamooncloud.ir/api/v1/me' || true)"
+          echo "https://pay.hamooncloud.ir/api/v1/me -> HTTP ${code:-000}"
+          test "$code" = '401'
+          rm -f /tmp/hamoon-api-prorated-response
+
+          echo '=== RECENT ERRORS ==='
+          pm2 logs hamoonbot --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|API_PRORATED|ATOMIC_RENEWAL_FAILED' | tail -n 60 || true
+          pm2 logs dashboard-server --lines 120 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|API_PRORATED|CUSTOMER_API_ERROR|DASHBOARD_API_ERROR' | tail -n 60 || true
+
+          echo '=== AFTER ==='
+          git rev-parse --short HEAD
+          REMOTE
