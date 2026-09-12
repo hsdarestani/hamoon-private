@@ -1,0 +1,103 @@
+name: Apply Requested UDP Firewall Rule
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-requested-udp-rule.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  apply-rule:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Add narrowly scoped Hetzner rule
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const axios = require('axios');
+
+          const TARGET_IP = '91.107.144.130';
+          const SOURCE_CIDR = '185.235.196.74/32';
+          const PORT = '48232';
+          const token = process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN;
+          if (!token) throw new Error('HETZNER_TOKEN_MISSING');
+
+          const api = axios.create({
+            baseURL: 'https://api.hetzner.cloud/v1',
+            timeout: 30000,
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+          });
+
+          async function all(path, key) {
+            const out = [];
+            let page = 1;
+            while (true) {
+              const { data } = await api.get(path, { params: { per_page: 50, page } });
+              const items = data[key] || [];
+              out.push(...items);
+              if (items.length < 50) return out;
+              page += 1;
+            }
+          }
+
+          const servers = await all('/servers', 'servers');
+          const matches = servers.filter(s => s?.public_net?.ipv4?.ip === TARGET_IP);
+          if (matches.length !== 1) throw new Error(`TARGET_SERVER_MATCH_COUNT_${matches.length}`);
+          const server = matches[0];
+
+          const firewalls = await all('/firewalls', 'firewalls');
+          const attached = firewalls.filter(f => (f.applied_to || []).some(a => a?.type === 'server' && String(a?.server?.id) === String(server.id)));
+          if (attached.length !== 1) throw new Error(`ATTACHED_FIREWALL_COUNT_${attached.length}`);
+          const firewall = attached[0];
+
+          const exists = (firewall.rules || []).some(r =>
+            r.direction === 'in' &&
+            r.protocol === 'udp' &&
+            String(r.port) === PORT &&
+            (r.source_ips || []).includes(SOURCE_CIDR)
+          );
+          if (!exists) {
+            const rules = [...(firewall.rules || []), {
+              direction: 'in',
+              protocol: 'udp',
+              port: PORT,
+              source_ips: [SOURCE_CIDR],
+              description: 'Customer UDP access 48232'
+            }];
+            await api.put(`/firewalls/${firewall.id}/rules`, { rules });
+          }
+          console.log(JSON.stringify({
+            result: exists ? 'already_present' : 'rule_added',
+            server_id: server.id,
+            server_ip: TARGET_IP,
+            firewall_id: firewall.id,
+            protocol: 'udp',
+            port: PORT,
+            source: SOURCE_CIDR
+          }));
+          NODE
+          REMOTE
