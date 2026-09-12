@@ -36,6 +36,8 @@
           <label>ایمیج‌های مجاز<input id="editApiImages" value="${esc(textValue(client.allowed_images))}" placeholder="ubuntu-24.04"></label>
         </div>
         <label><input id="editApiActive" type="checkbox" ${client.is_active ? 'checked' : ''}> کلاینت API فعال باشد</label>
+        <label><input id="editApiMonthlyProrated" type="checkbox" ${Number(client.monthly_prorated_pricing || 0) === 1 ? 'checked' : ''}> Monthly pricing basis (prorated billing)</label>
+        <p class="hint">با فعال بودن این گزینه، قیمت ماهانه مبنا است و مبلغ ساعتی/روزانه/هفتگی از تقسیم قیمت ماهانه بر ۳۰ روز محاسبه می‌شود. این تنظیم فقط روی سرورهای API جدید این کاربر snapshot می‌شود.</p>
         <label>یادداشت<textarea id="editApiNotes" placeholder="یادداشت">${esc(textValue(client.notes))}</textarea></label>
         <p class="hint">الان ${fmt(activeServers)} سرور فعال برای این کلاینت ثبت شده است. تغییر Limit سرورهای فعلی را حذف نمی‌کند؛ فقط ساخت سرور جدید را کنترل می‌کند.</p>
         <p class="hint">خالی گذاشتن پلن، لوکیشن یا ایمیج یعنی محدودیت اختصاصی برای آن مورد اعمال نشود.</p>`;
@@ -50,6 +52,7 @@
           name: $('#editApiName')?.value?.trim() || client.name || `API Client ${id}`,
           notes: $('#editApiNotes')?.value || '',
           isActive: $('#editApiActive')?.checked ? 1 : 0,
+          monthlyProratedPricing: $('#editApiMonthlyProrated')?.checked ? 1 : 0,
           maxServers,
           minWalletBalance,
           maxMonthlySpend: nullablePositiveNumber('#editApiMonthly'),
@@ -90,6 +93,7 @@
           <span>مصرف ماهانه</span><b>${fmt(usage.monthly_spend)}</b>
           <span>سقف هزینه ماهانه</span><b>${client.max_monthly_spend == null ? 'بدون سقف' : fmt(client.max_monthly_spend)}</b>
           <span>سقف هزینه ساعتی</span><b>${client.max_hourly_spend == null ? 'بدون سقف' : fmt(client.max_hourly_spend)}</b>
+          <span>مبنای قیمت API</span><b>${Number(client.monthly_prorated_pricing || 0) === 1 ? 'Monthly pricing basis (prorated billing)' : 'Standard pricing'}</b>
           <span>دیتاسنتر مجاز</span><b class="mono">${esc(client.allowed_datacenters || 'همه')}</b>
           <span>پلن‌های مجاز</span><b class="mono">${esc(client.allowed_plans || 'همه')}</b>
           <span>لوکیشن‌های مجاز</span><b class="mono">${esc(client.allowed_locations || 'همه')}</b>
