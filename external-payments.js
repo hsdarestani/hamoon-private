@@ -31,6 +31,13 @@ function subscriptionReturnUrl(status, row) {
   if (row?.external_ref) u.searchParams.set('intent', row.external_ref);
   return u.toString();
 }
+function camcamReturnUrl(status, row) {
+  const u = new URL(process.env.CAMCAM_RETURN_URL || 'https://camcam.smarbiz.sbs/api/billing/payment-return');
+  u.searchParams.set('payment', status);
+  if (row?.receipt) u.searchParams.set('receipt', row.receipt);
+  if (row?.external_ref) u.searchParams.set('intent', row.external_ref);
+  return u.toString();
+}
 function marketReturnUrl(status, row) {
   const u = new URL(process.env.VESTALAND_MARKET_RETURN_URL || 'https://vestaland.smarbiz.sbs/');
   u.searchParams.set('market_payment', status);
@@ -179,6 +186,28 @@ function mountExternalPayments(app, { db, axios }) {
     }
     return res.redirect(302, target.toString());
   });
+
+  app.get('/payments/camcam/start', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!allowStart(req)) return res.status(429).send(errorPage('درخواست زیاد بود', 'چند دقیقه دیگه دوباره امتحان کن.'));
+    const intent = String(req.query.intent || '').trim();
+    if (!validIntent(intent)) return res.status(400).send(errorPage('لینک پرداخت معتبر نیست', 'لطفاً از داخل CamCam دوباره روی پرداخت بزن.'));
+    try {
+      const resolver = process.env.CAMCAM_PAYMENT_INTENT_URL || 'https://camcam.smarbiz.sbs/api/billing/payment-intent';
+      const answer = await axios.get(resolver, { params: { intent }, timeout: 15000, headers: { Accept:'application/json', 'User-Agent':'SharedPaymentCamCam/1.0' } });
+      const d = answer.data || {}, amountToman = Number(d.amount_toman || 0);
+      if (!d.ok || d.status !== 'pending' || d.intent !== intent || !Number.isSafeInteger(amountToman) || amountToman < 1000 || amountToman > 500000000) {
+        return res.status(409).send(errorPage('پرداخت قابل انجام نیست', 'درخواست منقضی یا نامعتبر است؛ از داخل CamCam دوباره تلاش کن.'));
+      }
+      const p = await createGatewayPayment({ db, axios, appName:'camcam', intent, plan:String(d.plan || 'premium_monthly'), amountToman, label:'اشتراک ماهانه CamCam Premium', orderPrefix:'cc', callbackPath:'/payments/camcam/verify' });
+      return res.redirect(302, `${PAYMENT_PUBLIC_ORIGIN}/payment/start/${encodeURIComponent(p.trackId)}`);
+    } catch (error) {
+      console.error('[CAMCAM_PAYMENT_START]', error.gatewayData || error.response?.data || error.code || error.message);
+      return res.status(502).send(errorPage('درگاه در دسترس نیست', 'شروع پرداخت انجام نشد. لطفاً دوباره امتحان کن.'));
+    }
+  });
+  app.get('/payments/camcam/verify', (req,res) => verifyCallback({ req,res,db,axios,appName:'camcam',returnUrl:camcamReturnUrl }));
+  app.get('/payments/camcam/status', (req,res) => paymentStatus(req,res,db,'camcam'));
 
   app.get('/payments/vestaland/start', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
