@@ -167,6 +167,19 @@ async function paymentStatus(req, res, db, appName) {
 }
 
 function mountExternalPayments(app, { db, axios }) {
+  // CamCam uses the shared Iranian payment origin because the Zibal merchant
+  // is domain-bound. Verification and subscription activation remain inside
+  // CamCam; this route only relays Zibal's signed callback parameters.
+  app.get('/payments/camcam/callback', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const target = new URL(process.env.CAMCAM_PAYMENT_CALLBACK_URL || 'https://camcam.smarbiz.sbs/api/billing/zibal/callback');
+    for (const key of ['trackId', 'track_id', 'success', 'status', 'orderId']) {
+      const value = String(req.query[key] || '').trim();
+      if (value && value.length <= 160) target.searchParams.set(key, value);
+    }
+    return res.redirect(302, target.toString());
+  });
+
   app.get('/payments/vestaland/start', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (!allowStart(req)) return res.status(429).send(errorPage('درخواست زیاد بود', 'چند دقیقه دیگه دوباره امتحان کن.'));
