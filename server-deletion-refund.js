@@ -1,6 +1,7 @@
 'use strict';
 
 const { ensureBillingSettlementSchema } = require('./billing-settlement');
+const { PRICING_MODE_MONTHLY_PRORATED, roundMoney, calculateUnusedCycleRefund } = require('./api-pricing');
 
 const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
 const INITIAL_API_PAID_LOG_TYPE = 'server_api_purchase';
@@ -12,22 +13,6 @@ function toDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function calculateUnusedCycleRefund({ amount, cycle, lastBilledAt, createdAt, now = new Date() }) {
-  const cycleHours = HOURS_IN_CYCLE[String(cycle || '').toLowerCase()] || 0;
-  const paidAmount = Math.max(0, Number(amount || 0));
-  const start = toDate(lastBilledAt) || toDate(createdAt);
-  const current = toDate(now);
-  if (!cycleHours || !(paidAmount > 0) || !start || !current) {
-    return { refundToman: 0, remainingMs: 0, cycleMs: cycleHours * 3600000, periodStart: start };
-  }
-
-  const cycleMs = cycleHours * 3600000;
-  const elapsedMs = Math.max(0, current.getTime() - start.getTime());
-  const remainingMs = Math.max(0, cycleMs - Math.min(cycleMs, elapsedMs));
-  const refundToman = Math.max(0, Math.floor((paidAmount * remainingMs) / cycleMs));
-  return { refundToman, remainingMs, cycleMs, periodStart: start };
-}
-
 function isInitialApiCycle(purchase) {
   if (String(purchase?.boot_method || '').toLowerCase() !== 'api') return false;
   const created = toDate(purchase?.created_at);
@@ -36,9 +21,9 @@ function isInitialApiCycle(purchase) {
   return Math.abs(billed.getTime() - created.getTime()) < 5 * 60 * 1000;
 }
 
-async function chargeApiInitialCycle({ db, telegramId, serverId, amount, reserve = 0 }) {
+async function chargeApiInitialCycle({ db, telegramId, serverId, amount, reserve = 0, pricingMode = 'legacy' }) {
   if (!db?.pool) throw new Error('DB_POOL_UNAVAILABLE');
-  const charge = Math.max(0, Math.round(Number(amount || 0)));
+  const charge = Math.max(0, pricingMode === PRICING_MODE_MONTHLY_PRORATED ? roundMoney(amount) : Math.round(Number(amount || 0)));
   const minimumReserve = Math.max(0, Math.round(Number(reserve || 0)));
   if (!(charge > 0)) return { status: 'invalid_amount', charged: 0 };
 
@@ -76,7 +61,7 @@ async function chargeApiInitialCycle({ db, telegramId, serverId, amount, reserve
     );
     await conn.execute(
       'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
-      [String(telegramId), -charge, `API server purchase ${serverId}`, INITIAL_API_PAID_LOG_TYPE]
+      [String(telegramId), -charge, `API server purchase ${serverId}; pricing_mode=${pricingMode}`, INITIAL_API_PAID_LOG_TYPE]
     );
     await conn.commit();
     return { status: 'charged', charged: charge, newWallet: balance - charge };
@@ -90,7 +75,7 @@ async function chargeApiInitialCycle({ db, telegramId, serverId, amount, reserve
 
 async function rollbackApiInitialCycle({ db, telegramId, serverId, amount }) {
   if (!db?.pool) throw new Error('DB_POOL_UNAVAILABLE');
-  const fallbackAmount = Math.max(0, Math.round(Number(amount || 0)));
+  const fallbackAmount = Math.max(0, roundMoney(amount));
   const conn = await db.pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -115,7 +100,7 @@ async function rollbackApiInitialCycle({ db, telegramId, serverId, amount }) {
       await conn.commit();
       return { status: 'nothing_to_rollback', refunded: 0 };
     }
-    const refund = Math.max(0, Math.round(Math.abs(Number(chargeRows[0].amount || fallbackAmount))));
+    const refund = Math.max(0, roundMoney(Math.abs(Number(chargeRows[0].amount || fallbackAmount))));
     if (!(refund > 0)) {
       await conn.commit();
       return { status: 'nothing_to_rollback', refunded: 0 };
@@ -147,7 +132,7 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
   try {
     await conn.beginTransaction();
     const [purchaseRows] = await conn.execute(
-      `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, boot_method,
+      `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, pricing_mode, monthly_basis_price, boot_method,
               status, created_at, last_billed_at
        FROM purchases
        WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
@@ -165,7 +150,9 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
       cycle: purchase.duration,
       lastBilledAt: purchase.last_billed_at,
       createdAt: purchase.created_at,
-      now
+      now,
+      pricingMode: purchase.pricing_mode || 'legacy',
+      monthlyBasisPrice: purchase.monthly_basis_price
     });
     const periodStart = calc.periodStart;
     if (!periodStart || !(calc.refundToman > 0)) {
@@ -245,6 +232,8 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
         JSON.stringify({
           cycle: purchase.duration,
           cycleAmount: Number(purchase.amount || 0),
+          pricingMode: purchase.pricing_mode || 'legacy',
+          monthlyBasisPrice: purchase.monthly_basis_price == null ? null : Number(purchase.monthly_basis_price),
           remainingMs: calc.remainingMs,
           cycleMs: calc.cycleMs,
           source: 'server_delete'

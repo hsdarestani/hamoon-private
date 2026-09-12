@@ -33,7 +33,14 @@ async function ensureColumn(connection, tableName, columnName, definition) {
         [tableName, columnName]
     );
     if (rows.length === 0) {
-        await connection.execute(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${definition}`);
+        try {
+            await connection.execute(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${definition}`);
+        } catch (error) {
+            // The bot and dashboard can start together during deployment. A
+            // concurrent initializer may add the same safe-default column
+            // between the INFORMATION_SCHEMA check and ALTER TABLE.
+            if (error?.code !== 'ER_DUP_FIELDNAME') throw error;
+        }
     }
 }
 
@@ -113,6 +120,8 @@ async function initializeDatabase() {
         await ensureColumn(connection, 'purchases', 'ip_quality_checked_at', 'DATETIME NULL');
         await ensureColumn(connection, 'purchases', 'ip_quality_summary', 'VARCHAR(255) NULL');
         await ensureColumn(connection, 'purchases', 'billing_amount_version', 'TINYINT NOT NULL DEFAULT 1');
+        await ensureColumn(connection, 'purchases', 'pricing_mode', "VARCHAR(32) NOT NULL DEFAULT 'legacy'");
+        await ensureColumn(connection, 'purchases', 'monthly_basis_price', 'DECIMAL(14, 6) NULL');
         await connection.execute('UPDATE purchases SET auto_renew = 1 WHERE auto_renew IS NULL').catch(err => {
             console.warn('Could not backfill purchases.auto_renew:', err.message);
         });
@@ -176,10 +185,12 @@ async function initializeDatabase() {
                 allowed_images TEXT NULL,
                 allowed_locations TEXT NULL,
                 min_wallet_balance DECIMAL(18,2) DEFAULT 0,
+                monthly_prorated_pricing TINYINT(1) NOT NULL DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
         `);
+        await ensureColumn(connection, 'api_clients', 'monthly_prorated_pricing', 'TINYINT(1) NOT NULL DEFAULT 0');
         await connection.execute(`
             CREATE TABLE IF NOT EXISTS api_keys (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -450,6 +461,8 @@ async function recordPurchase(
         const publicIp = lifecycle?.publicIp || null;
         const providerActionId = lifecycle?.providerActionId || null;
         const deliveredAt = lifecycle?.deliveredAt || null;
+        const pricingMode = lifecycle?.pricingMode || 'legacy';
+        const monthlyBasisPrice = lifecycle?.monthlyBasisPrice == null ? null : Number(lifecycle.monthlyBasisPrice);
 
         const values = [
             serverId,
@@ -474,7 +487,9 @@ async function recordPurchase(
             Number(billingAmountVersion || 1),
             publicIp,
             providerActionId,
-            deliveredAt
+            deliveredAt,
+            pricingMode,
+            monthlyBasisPrice
         ];
 
         await conn.execute(
@@ -502,13 +517,15 @@ async function recordPurchase(
                public_ip,
                provider_action_id,
                delivered_at,
+               pricing_mode,
+               monthly_basis_price,
                lifecycle_updated_at,
                created_at,
                last_billed_at
              )
              VALUES (
                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                CURRENT_TIMESTAMP,
                CURRENT_TIMESTAMP,
                CURRENT_TIMESTAMP
@@ -536,6 +553,8 @@ async function recordPurchase(
                public_ip = VALUES(public_ip),
                provider_action_id = VALUES(provider_action_id),
                delivered_at = VALUES(delivered_at),
+               pricing_mode = VALUES(pricing_mode),
+               monthly_basis_price = VALUES(monthly_basis_price),
                lifecycle_updated_at = CURRENT_TIMESTAMP,
                updated_at = CURRENT_TIMESTAMP`,
             values
@@ -638,19 +657,21 @@ async function getPurchaseForUserServer(telegramId, serverId, datacenter) {
     }
 }
 
-async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, amount) {
+async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, amount, pricingMode = null, monthlyBasisPrice = null) {
     const conn = await pool.getConnection();
     try {
         const [res] = await conn.execute(
             `UPDATE purchases
              SET flavor_id = ?,
                  amount = ?,
+                 pricing_mode = COALESCE(?, pricing_mode),
+                 monthly_basis_price = CASE WHEN ? IS NULL THEN monthly_basis_price ELSE ? END,
                  billing_amount_version = 2,
                  status = 'active',
                  lifecycle_updated_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP
              WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`,
-            [flavorId, amount, String(telegramId), String(serverId), datacenter]
+            [flavorId, amount, pricingMode, monthlyBasisPrice, monthlyBasisPrice, String(telegramId), String(serverId), datacenter]
         );
         return res.affectedRows > 0;
     } finally {
@@ -1523,9 +1544,9 @@ function parseCsvText(value) {
     if (Array.isArray(value)) return value.filter(Boolean).join(',');
     return value == null ? null : String(value);
 }
-async function createApiClient({ telegramId, name, notes = null, maxServers = 2, maxMonthlySpend = null, maxHourlySpend = null, allowedDatacenters = 'hetzner', allowedPlans = null, allowedImages = null, allowedLocations = null, minWalletBalance = 0, isActive = 1 }) {
+async function createApiClient({ telegramId, name, notes = null, maxServers = 2, maxMonthlySpend = null, maxHourlySpend = null, allowedDatacenters = 'hetzner', allowedPlans = null, allowedImages = null, allowedLocations = null, minWalletBalance = 0, isActive = 1, monthlyProratedPricing = 0 }) {
     await pool.execute(`INSERT IGNORE INTO users (telegram_id, wallet, step) VALUES (?, 0, 'READY')`, [String(telegramId)]);
-    const [r] = await pool.execute(`INSERT INTO api_clients (telegram_id,name,notes,is_active,max_servers,max_monthly_spend,max_hourly_spend,allowed_datacenters,allowed_plans,allowed_images,allowed_locations,min_wallet_balance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, [String(telegramId), String(name || telegramId), notes, isActive ? 1 : 0, Number(maxServers || 2), maxMonthlySpend, maxHourlySpend, parseCsvText(allowedDatacenters), parseCsvText(allowedPlans), parseCsvText(allowedImages), parseCsvText(allowedLocations), Number(minWalletBalance || 0)]);
+    const [r] = await pool.execute(`INSERT INTO api_clients (telegram_id,name,notes,is_active,max_servers,max_monthly_spend,max_hourly_spend,allowed_datacenters,allowed_plans,allowed_images,allowed_locations,min_wallet_balance,monthly_prorated_pricing) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, [String(telegramId), String(name || telegramId), notes, isActive ? 1 : 0, Number(maxServers || 2), maxMonthlySpend, maxHourlySpend, parseCsvText(allowedDatacenters), parseCsvText(allowedPlans), parseCsvText(allowedImages), parseCsvText(allowedLocations), Number(minWalletBalance || 0), monthlyProratedPricing ? 1 : 0]);
     return getApiClientById(r.insertId);
 }
 async function listApiClients() {
@@ -1567,7 +1588,7 @@ async function getApiClientById(clientId) {
     return rows[0] || null;
 }
 async function updateApiClient(clientId, fields = {}) {
-    const allowed = { name:'name', notes:'notes', isActive:'is_active', maxServers:'max_servers', maxMonthlySpend:'max_monthly_spend', maxHourlySpend:'max_hourly_spend', allowedDatacenters:'allowed_datacenters', allowedPlans:'allowed_plans', allowedImages:'allowed_images', allowedLocations:'allowed_locations', minWalletBalance:'min_wallet_balance' };
+    const allowed = { name:'name', notes:'notes', isActive:'is_active', maxServers:'max_servers', maxMonthlySpend:'max_monthly_spend', maxHourlySpend:'max_hourly_spend', allowedDatacenters:'allowed_datacenters', allowedPlans:'allowed_plans', allowedImages:'allowed_images', allowedLocations:'allowed_locations', minWalletBalance:'min_wallet_balance', monthlyProratedPricing:'monthly_prorated_pricing' };
     const sets=[]; const vals=[];
     for (const [k,col] of Object.entries(allowed)) if (fields[k] !== undefined) { sets.push(`${col}=?`); vals.push(k.startsWith('allowed') ? parseCsvText(fields[k]) : fields[k]); }
     if (sets.length) await pool.execute(`UPDATE api_clients SET ${sets.join(', ')} WHERE id=?`, [...vals, clientId]);
@@ -1597,6 +1618,7 @@ async function getApiClientMonthlySpend(clientId) {
     const [rows] = await pool.execute(
       `SELECT COALESCE(SUM(
          CASE
+           WHEN pricing_mode = 'monthly_prorated' THEN COALESCE(monthly_basis_price, amount * 720)
            WHEN COALESCE(billing_amount_version, 1) >= 2
              THEN amount
            ELSE amount * 720
@@ -1605,7 +1627,7 @@ async function getApiClientMonthlySpend(clientId) {
        FROM purchases
        WHERE telegram_id = ?
          AND datacenter IN (${hetznerDatacenterSqlList})
-         AND duration = 'monthly'
+         AND (duration = 'monthly' OR pricing_mode = 'monthly_prorated')
          AND status NOT IN ('deleted','deletion_pending','provider_missing','provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')`,
       [client.telegram_id]
     );
@@ -2013,4 +2035,3 @@ module.exports = {
     listApiClientLogs,
     recordServerUpgradeLog,
 };
-

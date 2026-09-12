@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 const mysql = require('mysql2/promise');
+const { PRICING_MODE_MONTHLY_PRORATED, resolvePurchaseCycleAmount, roundMoney } = require('./api-pricing');
 
 const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
 const HETZNER_TRAFFIC_BLOCK_BYTES = 100_000_000; // Hetzner bills overage in 100 MB blocks.
@@ -98,7 +99,7 @@ async function settleServerRenewalAtomic({
     await conn.beginTransaction();
 
     const [purchaseRows] = await conn.execute(
-      `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, status,
+      `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, pricing_mode, monthly_basis_price, status,
               auto_renew, last_billed_at, created_at, last_billed_traffic_gb
        FROM purchases
        WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
@@ -136,7 +137,8 @@ async function settleServerRenewalAtomic({
       return { status: 'auto_renew_disabled', charged: 0, dueAt };
     }
 
-    const renewal = Math.max(0, Math.round(Number(renewalAmount || 0)));
+    const resolvedRenewal = resolvePurchaseCycleAmount(purchase, renewalAmount);
+    const renewal = Math.max(0, purchase.pricing_mode === PRICING_MODE_MONTHLY_PRORATED ? roundMoney(resolvedRenewal) : Math.round(resolvedRenewal));
     const traffic = Math.max(0, Math.round(Number(trafficCost || 0)));
     const total = renewal + traffic;
     if (!(renewal > 0) || !(total > 0)) {
@@ -208,7 +210,7 @@ async function settleServerRenewalAtomic({
         total,
         mysqlDate(base),
         mysqlDate(nowDate),
-        JSON.stringify({ cycle, renewalAmount: renewal, trafficCost: traffic })
+        JSON.stringify({ cycle, renewalAmount: renewal, trafficCost: traffic, pricingMode: purchase.pricing_mode || 'legacy', monthlyBasisPrice: purchase.monthly_basis_price == null ? null : Number(purchase.monthly_basis_price) })
       ]
     );
 

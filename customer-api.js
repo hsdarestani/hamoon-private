@@ -7,6 +7,7 @@ const datacenters = require('./datacenters');
 const lifecycle = require('./services/hetzner-lifecycle');
 const { changeHetznerPublicIp, userMessageForError: changeIpUserMessage } = require('./services/hetzner-change-ip');
 const { getHetznerSellablePlans, createOrGetSshKey, hetznerRequest } = require('./Hetzner/hetzner-api');
+const { createApiPricingSnapshot, isMonthlyProrated } = require('./api-pricing');
 const {
   normalizeServerDisplayName,
   getServerDisplayName,
@@ -140,6 +141,7 @@ function createCustomerApiRouter() {
       min_wallet_balance: req.apiClient.min_wallet_balance,
       max_monthly_spend: req.apiClient.max_monthly_spend,
       max_hourly_spend: req.apiClient.max_hourly_spend
+      ,monthly_prorated_pricing: !!req.apiClient.monthly_prorated_pricing
     }
   }));
 
@@ -201,7 +203,12 @@ function createCustomerApiRouter() {
       createdDc = dc;
       if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');
 
-      const duration = ['hourly', 'monthly'].includes(String(input.duration || '').toLowerCase()) ? String(input.duration).toLowerCase() : 'hourly';
+      const requestedDuration = String(input.duration || 'hourly').toLowerCase();
+      const allowedDurations = isMonthlyProrated(client.monthly_prorated_pricing)
+        ? ['hourly', 'daily', 'weekly', 'monthly']
+        : ['hourly', 'monthly'];
+      if (!allowedDurations.includes(requestedDuration)) return apiError(res, 400, 'INVALID_DURATION', 'دوره صورتحساب انتخاب‌شده معتبر نیست.');
+      const duration = requestedDuration;
       const plans = await getHetznerSellablePlans(dc);
       const requestedType = String(input.server_type || '').trim().toLowerCase();
       const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);
@@ -212,7 +219,8 @@ function createCustomerApiRouter() {
       if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
         return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
       }
-      const price = Number(duration === 'monthly' ? plan.amount_monthly : plan.amount_hourly);
+      const pricing = createApiPricingSnapshot(client, plan, duration);
+      const price = pricing.amount;
       if (!Number.isFinite(price) || price <= 0) return apiError(res, 503, 'PRICE_UNAVAILABLE', 'قیمت این پلن در حال حاضر در دسترس نیست.');
       const wallet = Number(await db.getUserWallet(client.telegram_id) || 0);
       const reserve = Math.max(0, Number(client.min_wallet_balance || 0));
@@ -221,7 +229,8 @@ function createCustomerApiRouter() {
       const maxMonthlySpend = finitePositive(client.max_monthly_spend);
       if (maxMonthlySpend) {
         const currentSpend = Number(await db.getApiClientMonthlySpend(client.id) || 0);
-        if (currentSpend + price > maxMonthlySpend) return apiError(res, 403, 'MONTHLY_SPEND_LIMIT_REACHED', 'سقف هزینه ماهانه این حساب API پر شده است.');
+        const addedMonthlySpend = pricing.monthlyBasisPrice || price;
+        if (currentSpend + addedMonthlySpend > maxMonthlySpend) return apiError(res, 403, 'MONTHLY_SPEND_LIMIT_REACHED', 'سقف هزینه ماهانه این حساب API پر شده است.');
       }
       const maxHourlySpend = finitePositive(client.max_hourly_spend);
       if (duration === 'hourly' && maxHourlySpend && price > maxHourlySpend) return apiError(res, 403, 'HOURLY_SPEND_LIMIT_REACHED', 'هزینه این پلن از سقف ساعتی حساب API بیشتر است.');
@@ -280,14 +289,15 @@ function createCustomerApiRouter() {
         telegramId: client.telegram_id,
         serverId,
         amount: price,
-        reserve
+        reserve,
+        pricingMode: pricing.pricingMode
       });
       if (!['charged', 'already_charged'].includes(initialCharge.status)) {
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی کیف پول هم‌زمان تغییر کرده و برای ساخت سرور کافی نیست.');
       }
       try {
-        await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning');
+        await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning', pricing.pricingMode === 'monthly_prorated' ? 2 : 1, { pricingMode: pricing.pricingMode, monthlyBasisPrice: pricing.monthlyBasisPrice });
         if (ip && db.updatePublicIp) await db.updatePublicIp(client.telegram_id, serverId, dcKey, ip).catch(() => {});
       } catch (recordError) {
         await deletionRefunds.rollbackApiInitialCycle({
@@ -299,7 +309,7 @@ function createCustomerApiRouter() {
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         throw recordError;
       }
-      res.status(202).json({ ok: true, operation: 'provisioning', server: { id: serverId, name: createdServer.name || name, status: 'provisioning', public_ip: ip, server_type: plan.id, image, location, duration, price } });
+      res.status(202).json({ ok: true, operation: 'provisioning', server: { id: serverId, name: createdServer.name || name, status: 'provisioning', public_ip: ip, server_type: plan.id, image, location, duration, price, pricing_mode: pricing.pricingMode, monthly_basis_price: pricing.monthlyBasisPrice } });
     } catch (e) {
       if (createdServer && createdDc && e?.code === 'HETZNER_PLACEMENT_UNAVAILABLE') await cloud.deleteServer(createdDc, null, createdServer.id).catch(() => {});
       next(e);
@@ -421,7 +431,12 @@ function createCustomerApiRouter() {
       if (!target || target.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن هدف معتبر نیست.');
       if (!isAllowed(req.apiClient.allowed_plans, target.id)) return apiError(res, 403, 'NOT_ALLOWED', 'پلن هدف برای این کلاینت مجاز نیست.');
       await cloud.changeHetznerServerType(dc, req.params.id, target.hetzner_type, String(input.upgrade_disk || '').toLowerCase() === 'true' || input.upgrade_disk === true);
-      await db.updatePurchasePlan(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter, target.id, target.amount_monthly);
+      const pricing = createApiPricingSnapshot(
+        { monthly_prorated_pricing: req.purchase.pricing_mode === 'monthly_prorated' },
+        target,
+        req.purchase.duration
+      );
+      await db.updatePurchasePlan(req.apiClient.telegram_id, req.params.id, req.purchase.datacenter, target.id, pricing.amount, pricing.pricingMode, pricing.monthlyBasisPrice);
       res.json({ ok: true, status: 'upgraded', server_type: target.id });
     } catch (e) { next(e); }
   });
