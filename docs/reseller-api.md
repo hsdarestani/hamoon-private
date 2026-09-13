@@ -175,7 +175,7 @@ Powers on the server.
 
 ### Additional IPv4 addresses
 
-Additional addresses use Hetzner Floating IPv4 resources. The API verifies that the server belongs to the authenticated account. The default limit is five additional IPv4 addresses per server and can be configured with `HETZNER_MAX_ADDITIONAL_IPV4`.
+Additional addresses use Hetzner Floating IPv4 resources. The API verifies that the server belongs to the authenticated account. The default limit is five additional IPv4 addresses per server and can be configured with `HETZNER_MAX_ADDITIONAL_IPV4`. Each address costs **750,000 toman per 30 days**, calculated only for this product as Hetzner's €3 monthly Floating IPv4 price × 250,000 toman. This dedicated conversion rate does not affect server or other provider pricing.
 
 - `GET /servers/{id}/additional-ips` lists the server's additional IPv4 addresses.
 - `POST /servers/{id}/additional-ips` creates and assigns a new Floating IPv4. An optional `description` string can be sent in the JSON body.
@@ -188,7 +188,7 @@ curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/additional-ips \
   -d '{"description":"Proxy address 2"}'
 ```
 
-A successful create returns HTTP `201` with `additional_ip`. Hetzner routes the address to the server, but the Floating IP must also be configured inside the guest operating system before applications can bind to it.
+A successful create returns HTTP `201` with `additional_ip` and `pricing`. The wallet is charged atomically; insufficient balance returns HTTP `402`. Billing renews every 30 days, and an address is removed if renewal cannot be paid. Hetzner routes the address to the server, but the Floating IP must also be configured inside the guest operating system before applications can bind to it.
 
 ### `POST /servers/{id}/change-ip`
 Replaces the current Hetzner Primary IPv4 with a newly allocated IPv4. The operation can temporarily power the server off and back on.
