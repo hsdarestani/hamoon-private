@@ -17,6 +17,7 @@ const { hasCapability, getCapabilityLabel } = require('./provider-capabilities')
 const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
 const { generateStrongPassword } = require('./services/passwords');
 const { resetLinuxRootPasswordOverSsh } = require('./services/ssh-reset-password');
+const { syncHetznerProviderStatuses } = require('./services/hetzner-status-sync');
 
 // Importing datacenter configurations
 //const datacenters = require('./datacenters');
@@ -3675,6 +3676,19 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
+
+// Refresh the lightweight provider-state snapshot used by the DB-first management list.
+async function refreshHetznerProviderStatusSnapshot() {
+  try {
+    const result = await syncHetznerProviderStatuses();
+    console.log('[HETZNER_STATUS_SYNC]', result);
+  } catch (error) {
+    console.error('[HETZNER_STATUS_SYNC_FAILED]', error?.message || error);
+  }
+}
+
+cron.schedule('*/30 * * * *', refreshHetznerProviderStatusSnapshot);
+setTimeout(refreshHetznerProviderStatusSnapshot, 10000);
 
 // Hetzner delivery reconciler: never deliver credentials before SSH + Iran/global reachability pass.
 cron.schedule('* * * * *', async () => {

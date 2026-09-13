@@ -1,0 +1,96 @@
+name: Deploy Provider Status Snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-provider-status-snapshot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-production-billing-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate-deploy-sync:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate snapshot implementation
+        run: |
+          set -euo pipefail
+          node --check services/hetzner-status-sync.js
+          node --check provider-visibility-bootstrap.js
+          node --check db.js
+          node --check index-core.js
+          node scripts/validate-provider-status-sync.js
+          node scripts/validate-hetzner-management-buttons.js
+
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy, sync now, and verify
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+
+          node --check services/hetzner-status-sync.js
+          node --check provider-visibility-bootstrap.js
+          node --check db.js
+          node --check index-core.js
+          node scripts/validate-provider-status-sync.js
+          node scripts/validate-hetzner-management-buttons.js
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 6
+          test "$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")" = "online"
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const { syncHetznerProviderStatuses } = require('./services/hetzner-status-sync');
+          (async () => {
+            try {
+              const result = await syncHetznerProviderStatuses();
+              console.log('STATUS_SYNC_RESULT=' + JSON.stringify(result));
+              const [rows] = await db.pool.query(
+                "SELECT provider_status, COUNT(*) count FROM purchases WHERE provider_status IS NOT NULL GROUP BY provider_status ORDER BY provider_status"
+              );
+              console.log('STATUS_SNAPSHOT_GROUPS=' + JSON.stringify(rows));
+              if (!result.updated) throw new Error('NO_PROVIDER_STATUS_ROWS_UPDATED');
+            } finally {
+              await db.pool.end().catch(() => {});
+            }
+          })().catch(error => {
+            console.error('STATUS_SYNC_VERIFY_FAILED=' + (error.code || error.message));
+            process.exit(1);
+          });
+          NODE
+          REMOTE
