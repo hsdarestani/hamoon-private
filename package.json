@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "npm run test:api-monthly-prorated && npm run validate:syntax && npm run validate:db-exports && npm run validate:provider-visibility && npm run validate:server-display-names && npm run validate:hetzner-console && npm run validate:hetzner-traffic && npm run validate:novnc-console && npm run validate:provider-capabilities && npm run validate:hetzner-purchase-architecture && npm run validate:production-patch && npm run validate:hetzner-lifecycle && npm run validate:clean-ip-runtime && npm run validate:hetzner-pricing",
+    "test": "npm run test:api-monthly-prorated && npm run validate:hetzner-additional-ips && npm run validate:syntax && npm run validate:db-exports && npm run validate:provider-visibility && npm run validate:server-display-names && npm run validate:hetzner-console && npm run validate:hetzner-traffic && npm run validate:novnc-console && npm run validate:provider-capabilities && npm run validate:hetzner-purchase-architecture && npm run validate:production-patch && npm run validate:hetzner-lifecycle && npm run validate:clean-ip-runtime && npm run validate:hetzner-pricing",
     "start": "node index.js",
     "test:api-monthly-prorated": "node scripts/test-api-monthly-prorated-pricing.js",
     "validate:afracloud-pricing": "node scripts/validate-afracloud-pricing.js",
@@ -26,7 +26,8 @@
     "validate:clean-ip-runtime": "node scripts/validate-clean-ip-runtime.js",
     "ci": "npm test",
     "validate:hetzner-pricing": "node scripts/validate-hetzner-pricing.js",
-    "validate:db-exports": "node scripts/validate-db-exports.js"
+    "validate:db-exports": "node scripts/validate-db-exports.js",
+    "validate:hetzner-additional-ips": "node scripts/validate-hetzner-additional-ips.js"
   },
   "keywords": [],
   "author": "",

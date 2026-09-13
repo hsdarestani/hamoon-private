@@ -173,6 +173,23 @@ Powers off the server.
 ### `POST /servers/{id}/poweron`
 Powers on the server.
 
+### Additional IPv4 addresses
+
+Additional addresses use Hetzner Floating IPv4 resources. The API verifies that the server belongs to the authenticated account. The default limit is five additional IPv4 addresses per server and can be configured with `HETZNER_MAX_ADDITIONAL_IPV4`.
+
+- `GET /servers/{id}/additional-ips` lists the server's additional IPv4 addresses.
+- `POST /servers/{id}/additional-ips` creates and assigns a new Floating IPv4. An optional `description` string can be sent in the JSON body.
+- `DELETE /servers/{id}/additional-ips/{floatingIpId}` deletes an additional IPv4 only when it belongs to this server.
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/additional-ips \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"description":"Proxy address 2"}'
+```
+
+A successful create returns HTTP `201` with `additional_ip`. Hetzner routes the address to the server, but the Floating IP must also be configured inside the guest operating system before applications can bind to it.
+
 ### `POST /servers/{id}/change-ip`
 Replaces the current Hetzner Primary IPv4 with a newly allocated IPv4. The operation can temporarily power the server off and back on.
 
@@ -210,6 +227,9 @@ Direct reboot is not advertised in v1 and currently returns `501 UNSUPPORTED_ACT
 | Traffic usage | `GET` | `/servers/{id}/traffic` |
 | Power on | `POST` | `/servers/{id}/poweron` |
 | Power off | `POST` | `/servers/{id}/poweroff` |
+| List additional IPv4s | `GET` | `/servers/{id}/additional-ips` |
+| Add an IPv4 | `POST` | `/servers/{id}/additional-ips` |
+| Delete an additional IPv4 | `DELETE` | `/servers/{id}/additional-ips/{floatingIpId}` |
 | Change IPv4 | `POST` | `/servers/{id}/change-ip` |
 | Delete server | `DELETE` | `/servers/{id}` |
 

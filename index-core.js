@@ -18,6 +18,7 @@ const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar
 const { generateStrongPassword } = require('./services/passwords');
 const { resetLinuxRootPasswordOverSsh } = require('./services/ssh-reset-password');
 const { syncHetznerProviderStatuses } = require('./services/hetzner-status-sync');
+const additionalIps = require('./services/hetzner-additional-ips');
 
 // Importing datacenter configurations
 //const datacenters = require('./datacenters');
@@ -1459,6 +1460,17 @@ case 'GET_TRAFFIC_RAW': {
         return handleServerManagement(effectiveChatId, effectiveUserId, serverId, manageDcConfig);
       }
 
+      case 'HAIP': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
+        if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleHetznerAdditionalIpMenu(effectiveChatId, effectiveUserId, payload.serverId, dc);
+      }
+      case 'HAIPC': {
+        const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
+        if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
+        return handleHetznerAdditionalIpCreate(effectiveChatId, effectiveUserId, payload.serverId, dc);
+      }
+
       case 'HU': {
         const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey] || baseDatacenters.hetzner;
         if (!isHetznerDc(dc)) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
@@ -2862,6 +2874,50 @@ async function handlePurchaseAutoRenewEnable(chatId, userId, serverId, dcConfig)
   return handleServerManagement(chatId, userId, serverId, dcConfig);
 }
 
+async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig) {
+  try {
+    const purchase = await getPurchaseForUserServer(userId, serverId, dcConfig.key);
+    if (!purchase) return sendMessage(chatId, '❌ سرور پیدا نشد.');
+    const ips = await additionalIps.listAdditionalIps({ dc: dcConfig, serverId });
+    const lines = ips.length
+      ? ips.map((item, index) => `${index + 1}. ${item.ip}`).join('\n')
+      : 'هنوز IP اضافه‌ای برای این سرور ثبت نشده است.';
+    const keyboard = [
+      [{ text: '➕ افزودن IPv4 جدید', callback_data: makeShortCb(userId, { action: 'HAIPC', dcKey: dcConfig.key, serverId }) }],
+      [{ text: '🔙 بازگشت', callback_data: makeShortCb(userId, { action: 'M', dcKey: dcConfig.key, serverId }) }]
+    ];
+    return sendMessage(chatId, `🌐 IPهای اضافه سرور:\n${lines}\n\nIP جدید از نوع Floating IPv4 است و پس از ساخت باید داخل سیستم‌عامل سرور نیز پیکربندی شود.`, {
+      reply_markup: { inline_keyboard: keyboard }
+    });
+  } catch (error) {
+    console.error('[HETZNER_ADDITIONAL_IP_LIST]', error.code || error.message);
+    return sendMessage(chatId, '❌ دریافت IPهای اضافه از Hetzner انجام نشد.');
+  }
+}
+
+async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfig) {
+  try {
+    const purchase = await getPurchaseForUserServer(userId, serverId, dcConfig.key);
+    if (!purchase) return sendMessage(chatId, '❌ سرور پیدا نشد.');
+    const status = String(purchase.status || '').toLowerCase();
+    if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) {
+      return sendMessage(chatId, '❌ وضعیت فعلی سرور اجازه افزودن IP را نمی‌دهد.');
+    }
+    const result = await additionalIps.addAdditionalIpv4({
+      dc: dcConfig,
+      serverId,
+      description: `HamoonCloud user ${userId} server ${serverId}`
+    });
+    return sendMessage(chatId, `✅ IPv4 اضافه با موفقیت ساخته و به سرور متصل شد:\n${result.ip.ip}\n\n⚠️ برای قابل استفاده شدن، این Floating IP را داخل سیستم‌عامل سرور هم پیکربندی کنید.`);
+  } catch (error) {
+    console.error('[HETZNER_ADDITIONAL_IP_CREATE]', error.code || error.message);
+    if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {
+      return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);
+    }
+    return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');
+  }
+}
+
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
     ensureUserState(userId);
@@ -2950,6 +3006,9 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
     }
     if (hasCapability(dcConfig, 'resumeServer') && ['shutoff', 'stopped', 'suspended'].some(x => stateText.includes(x))) {
       keyboard.push([{ text: '▶️ روشن کردن', callback_data: short('RESUME') }]);
+    }
+    if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId)) {
+      keyboard.push([{ text: '🌐 مدیریت IPهای اضافه', callback_data: short('HAIP') }]);
     }
     if (isHetznerDc(dcConfig) && purchase && String(purchase.telegram_id) === String(userId) && !HETZNER_UPGRADE_BLOCKED_STATUSES.has(String(purchase.status || '').toLowerCase())) {
       keyboard.push([{ text: '⬆️ ارتقای سرور', callback_data: makeShortCb(userId, { action: 'HU', serverId: srv.id, dcKey: dcConfig.key }) }]);
