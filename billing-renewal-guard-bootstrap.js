@@ -212,12 +212,49 @@ async function resumePurchaseWithBillingGuard(userId, purchase, dcConfig) {
 
 async function handleStartMySuspendedServers(chatId, userId) {
   try {
-    const purchases = await getUserRestartablePurchases(userId);
-    if (!purchases || purchases.length === 0) {
+    const userDCs = getUserEffectiveDCs(String(userId)) || {};
+    const storedRestartable = await getUserRestartablePurchases(userId);
+    const restartableById = new Map(
+      (storedRestartable || []).map(purchase => [String(purchase.server_id), purchase])
+    );
+
+    // The provider can be off while the DB still says active (for example after
+    // a provider-side shutdown). Reconcile only this user's Hetzner purchases
+    // before deciding that there is nothing to start.
+    const activePurchases = await getUserActivePurchases(userId);
+    await Promise.all((activePurchases || []).map(async purchase => {
+      const serverId = String(purchase.server_id || '');
+      if (!serverId || restartableById.has(serverId)) return;
+      const dcConfig = userDCs[String(purchase.datacenter || '').trim()];
+      if (!dcConfig || !isHetznerDc(dcConfig)) return;
+      try {
+        const providerServer = await openstackApi.getServer(dcConfig, null, serverId);
+        const providerStatus = String(providerServer?.status || providerServer?.state || '').toLowerCase();
+        if (!['off', 'stopped', 'shutoff', 'suspended'].includes(providerStatus)) return;
+        restartableById.set(serverId, purchase);
+        await updatePurchaseStatus(serverId, 'suspended').catch(() => {});
+        await updatePurchaseSuspendReason(serverId, 'provider_state_drift').catch(() => {});
+        console.log('[START_MY_SERVERS] reconciled provider-off purchase', {
+          userId,
+          server_id: serverId,
+          dcKey: purchase.datacenter,
+          provider_status: providerStatus
+        });
+      } catch (error) {
+        console.warn('[START_MY_SERVERS] provider state lookup failed', {
+          userId,
+          server_id: serverId,
+          dcKey: purchase.datacenter,
+          status: error?.status || error?.response?.status || null,
+          message: error?.message || String(error)
+        });
+      }
+    }));
+
+    const purchases = [...restartableById.values()];
+    if (purchases.length === 0) {
       return sendMessage(chatId, 'در حال حاضر سرور خاموش/معلق قابل روشن‌کردن برای حساب شما پیدا نشد.');
     }
-
-    const userDCs = getUserEffectiveDCs(String(userId)) || {};
     const results = [];
     await sendMessage(chatId, 'در حال بررسی وضعیت صورتحساب و روشن‌کردن ' + purchases.length + ' سرور...');
 

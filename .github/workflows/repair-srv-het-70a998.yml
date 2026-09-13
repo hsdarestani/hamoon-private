@@ -1,0 +1,129 @@
+name: Repair Srv-HET-70a998
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-srv-het-70a998.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-production-billing-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-and-recover:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_NAME: Srv-HET-70a998
+      TARGET_IP: 5.75.203.49
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate state-sync fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check hetzner-management-scope-bootstrap.js
+          node --check billing-renewal-guard-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy fix and recover exact server
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          TARGET_NAME_B64="$(printf '%s' "$TARGET_NAME" | base64 -w0)"
+          TARGET_IP_B64="$(printf '%s' "$TARGET_IP" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_NAME_B64='$TARGET_NAME_B64' TARGET_IP_B64='$TARGET_IP_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          TARGET_NAME="$(printf '%s' "$TARGET_NAME_B64" | base64 -d)"
+          TARGET_IP="$(printf '%s' "$TARGET_IP_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+
+          node --check hetzner-management-scope-bootstrap.js
+          node --check billing-renewal-guard-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          test "$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")" = "online"
+
+          TARGET_NAME="$TARGET_NAME" TARGET_IP="$TARGET_IP" node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          (async () => {
+            try {
+              const [rows] = await db.pool.execute(
+                'SELECT server_id, public_ip FROM purchases WHERE server_name = ? ORDER BY updated_at DESC, created_at DESC LIMIT 2',
+                [process.env.TARGET_NAME]
+              );
+              if (rows.length !== 1) throw new Error('TARGET_NOT_UNIQUE');
+              if (String(rows[0].public_ip || '') !== String(process.env.TARGET_IP)) throw new Error('TARGET_IP_MISMATCH');
+              console.log('TARGET_IDENTITY_VERIFIED=yes');
+            } finally {
+              await db.pool.end().catch(() => {});
+            }
+          })().catch(error => {
+            console.error('TARGET_IDENTITY_VERIFIED=no:' + (error.code || error.message));
+            process.exit(1);
+          });
+          NODE
+
+          node scripts/recover-suspended-server.js "$TARGET_NAME" --no-notify
+
+          TARGET_NAME="$TARGET_NAME" node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const cloud = require('./cloud-api');
+          const datacenters = require('./datacenters');
+          (async () => {
+            try {
+              const [rows] = await db.pool.execute(
+                'SELECT server_id, datacenter, status FROM purchases WHERE server_name = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1',
+                [process.env.TARGET_NAME]
+              );
+              const row = rows[0];
+              if (!row) throw new Error('TARGET_MISSING_AFTER_RECOVERY');
+              const server = await cloud.getServer(datacenters[row.datacenter], null, row.server_id);
+              const providerStatus = String(server?.status || server?.state || '').toLowerCase();
+              console.log('TARGET_DB_STATUS=' + String(row.status || 'unknown').replace(/[^a-z0-9_-]/gi, ''));
+              console.log('TARGET_PROVIDER_STATUS=' + providerStatus.replace(/[^a-z0-9_-]/g, ''));
+              if (String(row.status).toLowerCase() !== 'active') throw new Error('DB_NOT_ACTIVE');
+              if (!['running', 'active'].includes(providerStatus)) throw new Error('PROVIDER_NOT_RUNNING');
+            } finally {
+              await db.pool.end().catch(() => {});
+            }
+          })().catch(error => {
+            console.error('TARGET_FINAL_VERIFY=failed:' + (error.code || error.message));
+            process.exit(1);
+          });
+          NODE
+          REMOTE
