@@ -2397,7 +2397,7 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
       let bootMethod = 'volume';
       if (isAfra || isTebyan) {
         generatedRootPassword = generateStrongPassword();
-        serverMeta.passwordManagedByBot = true;
+        serverMeta.passwordManagedByBot = 'true';
       }
       if (isAfra) serverMeta.rootPassword = generatedRootPassword;
       if (isTebyan) {

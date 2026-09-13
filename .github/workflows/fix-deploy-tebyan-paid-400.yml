@@ -1,0 +1,131 @@
+name: Fix and Deploy Tebyan Paid 400
+
+on:
+  push:
+    branches:
+      - fix-tebyan-paid-400
+      - main
+    paths:
+      - '.github/workflows/fix-deploy-tebyan-paid-400.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.ref_name == 'fix-tebyan-paid-400'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-tebyan-paid-400
+          fetch-depth: 0
+
+      - name: Patch Tebyan paid metadata type
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index-core.js')
+          s = p.read_text()
+          old = "serverMeta.passwordManagedByBot = true;"
+          new = "serverMeta.passwordManagedByBot = 'true';"
+          count = s.count(old)
+          if count != 1:
+              raise SystemExit(f'expected exactly one Tebyan metadata assignment, found {count}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          node --check index-core.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = fs.readFileSync('index-core.js', 'utf8');
+          if (!s.includes("serverMeta.passwordManagedByBot = 'true';")) throw new Error('string metadata fix missing');
+          if (s.includes('serverMeta.passwordManagedByBot = true;')) throw new Error('boolean metadata assignment still present');
+          if (!s.includes("const isTebyan = effectiveDc.key === 'tebyan'")) throw new Error('Tebyan paid path missing');
+          console.log('OK Tebyan paid metadata is Nova-compatible string');
+          NODE
+
+      - name: Commit bugfix to branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index-core.js
+          git diff --cached --check
+          git commit -m 'Fix Tebyan paid provisioning metadata type'
+          git push origin HEAD:fix-tebyan-paid-400
+
+  deploy:
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Tebyan paid fix
+        run: |
+          set -euo pipefail
+          node --check index-core.js
+          node --check provider-visibility-bootstrap.js
+          node scripts/validate-provider-visibility.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = fs.readFileSync('index-core.js', 'utf8');
+          if (!s.includes("serverMeta.passwordManagedByBot = 'true';")) throw new Error('Tebyan string metadata fix missing');
+          if (s.includes('serverMeta.passwordManagedByBot = true;')) throw new Error('invalid boolean metadata still present');
+          console.log('OK Tebyan paid metadata is a string');
+          NODE
+
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== BEFORE ==='
+          git rev-parse --short HEAD
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          echo '=== VALIDATE ==='
+          node --check index-core.js
+          node --check provider-visibility-bootstrap.js
+          node scripts/validate-provider-visibility.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const s = fs.readFileSync('index-core.js', 'utf8');
+          if (!s.includes("serverMeta.passwordManagedByBot = 'true';")) throw new Error('production Tebyan metadata fix missing');
+          if (s.includes('serverMeta.passwordManagedByBot = true;')) throw new Error('production still has invalid boolean metadata');
+          console.log('OK production Tebyan paid metadata is a string');
+          NODE
+          echo '=== RESTART ==='
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$STATUS"
+          test "$STATUS" = "online"
+          echo '=== AFTER ==='
+          git rev-parse --short HEAD
+          REMOTE
