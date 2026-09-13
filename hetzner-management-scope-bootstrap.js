@@ -19,11 +19,35 @@ function applyHetznerManagementScopePatch(source) {
   return '⚪';
 }
 
+const HETZNER_MANAGEMENT_CACHE_MS = Math.max(5000, Number(process.env.HETZNER_MANAGEMENT_CACHE_MS || 30000));
+let hetznerManagementServerCache = null;
+let hetznerManagementServerListInFlight = null;
+
 async function listServersForManagement(dcConfig, token) {
   const isHetznerProvider = dcConfig?.provider === 'hetzner' || dcConfig?.apiType === 'hetzner';
   if (!isHetznerProvider) return openstackApi.listServers(dcConfig, token);
+
+  const now = Date.now();
+  if (hetznerManagementServerCache?.expiresAt > now) {
+    return hetznerManagementServerCache.servers;
+  }
+  if (hetznerManagementServerListInFlight) return hetznerManagementServerListInFlight;
+
   const { listAllHetznerServers } = require('./services/hetzner-list-all-servers');
-  return listAllHetznerServers(dcConfig);
+  hetznerManagementServerListInFlight = listAllHetznerServers(dcConfig)
+    .then(servers => {
+      const normalized = Array.isArray(servers) ? servers : [];
+      hetznerManagementServerCache = {
+        servers: normalized,
+        expiresAt: Date.now() + HETZNER_MANAGEMENT_CACHE_MS
+      };
+      return normalized;
+    })
+    .finally(() => {
+      hetznerManagementServerListInFlight = null;
+    });
+
+  return hetznerManagementServerListInFlight;
 }
 
 ${helperMarker}`;
@@ -71,6 +95,8 @@ ${helperMarker}`;
       !patched.includes('if (isAfra || isHetzner) return idMatch;') ||
       !patched.includes('function compactServerStatusIcon(status)') ||
       !patched.includes('async function listServersForManagement(dcConfig, token)') ||
+      !patched.includes('hetznerManagementServerListInFlight') ||
+      !patched.includes('HETZNER_MANAGEMENT_CACHE_MS') ||
       !patched.includes("require('./services/hetzner-list-all-servers')") ||
       !patched.includes('return listServersForManagement(dcConfig, tok);') ||
       !patched.includes('${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}')) {
