@@ -158,6 +158,42 @@ paths:
       responses:
         '200': { description: Server stopped }
         '404': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/additional-ips:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+    get:
+      summary: List additional Hetzner Floating IPv4 addresses
+      responses:
+        '200': { description: Additional IPv4 list }
+        '404': { $ref: '#/components/responses/ApiError' }
+    post:
+      summary: Create and assign an additional Floating IPv4
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string, maxLength: 100 }
+      responses:
+        '201': { description: Additional IPv4 created; guest OS configuration is still required }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
+        '502': { $ref: '#/components/responses/ApiError' }
+  /servers/{id}/additional-ips/{floatingIpId}:
+    parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - name: floatingIpId
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      summary: Delete an additional Floating IPv4 belonging to this server
+      responses:
+        '200': { description: Additional IPv4 deleted }
+        '404': { $ref: '#/components/responses/ApiError' }
+        '409': { $ref: '#/components/responses/ApiError' }
   /servers/{id}/change-ip:
     parameters:
       - $ref: '#/components/parameters/ServerId'
