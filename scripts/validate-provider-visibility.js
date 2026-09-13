@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const datacenters = require('../datacenters');
 const { appendSharedNonOpenStackProviders } = require('../provider-visibility');
 const { applyProviderVisibilityPatches } = require('../provider-visibility-bootstrap');
 const { applyPatches: applyRuntimePatches } = require('../runtime-bootstrap');
@@ -46,6 +47,16 @@ assert('management list falls back to owned purchases', visibilityPatched.includ
 assert('purchase fallback preserves purchase object', visibilityPatched.includes('purchase: p'));
 assert('purchase fallback only uses effective datacenters', visibilityPatched.includes('!userDCs[dcKey]'));
 assert('purchase fallback deduplicates provider results', visibilityPatched.includes('managedServerKeys.has(managedKey)'));
+assert('Tebyan buy menu is hidden from non-support users', visibilityPatched.includes("isTebyanForBuy && String(userId) !== String(SUPPORT_ID)"));
+assert('stale Tebyan BUY callbacks are blocked for non-support users', visibilityPatched.includes("isTebyanBuy && String(effectiveUserId) !== String(SUPPORT_ID)"));
+assert('final Tebyan provisioning is blocked for non-support users', visibilityPatched.includes("isTebyan && String(userId) !== String(SUPPORT_ID)"));
+assert('Afracloud remains hard-disabled for purchases', visibilityPatched.includes("actionPrefix === 'DC_BUY' && (dcs[key]?.provider === 'afracloud' || dcs[key]?.apiType === 'afracloud')"));
+assert('Hetzner is not included in the Tebyan support-only gate', !visibilityPatched.includes('isHetzner && String(userId) !== String(SUPPORT_ID)'));
+
+assert('Tebyan traffic billing remains enabled', datacenters.tebyan?.BILL_TRAFFIC === true);
+assert('Tebyan retains its dedicated traffic API', !!datacenters.tebyan?.TRAFFIC_API_BASE_URL);
+assert('Hetzner traffic billing remains disabled in datacenter config', datacenters.hetzner?.BILL_TRAFFIC === false);
+assert('Hetzner does not inherit Tebyan traffic API', !datacenters.hetzner?.TRAFFIC_API_BASE_URL);
 
 try {
   const fullyPatched = applyRuntimePatches(core);
@@ -55,6 +66,7 @@ try {
   assert('Hetzner console patches remain active', fullyPatched.includes("case 'HCONSOLE':"));
   assert('provider visibility patch remains active', fullyPatched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
   assert('DB purchase fallback remains active', fullyPatched.includes('provider list missed owned server; using purchase fallback'));
+  assert('Tebyan support-only purchase gate survives full runtime patching', fullyPatched.includes("isTebyan && String(userId) !== String(SUPPORT_ID)"));
 } catch (error) {
   console.error('FAIL full runtime patches', error.message);
   process.exitCode = 1;

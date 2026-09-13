@@ -129,8 +129,11 @@ function applyProviderVisibilityPatches(coreSource) {
   ].join('\n');
   const buyMenuReplacement = [
     ' const keys = Object.keys(dcs).filter(key => {',
-    '   // Afracloud/Afranet and Tebyan are temporarily unavailable for new purchases.',
-    "   if (actionPrefix === 'DC_BUY' && (dcs[key]?.provider === 'afracloud' || dcs[key]?.apiType === 'afracloud' || dcs[key]?.key === 'tebyan' || key === 'tebyan')) return false;",
+    '   // Afracloud/Afranet remains unavailable for all new purchases.',
+    "   if (actionPrefix === 'DC_BUY' && (dcs[key]?.provider === 'afracloud' || dcs[key]?.apiType === 'afracloud')) return false;",
+    '   // Tebyan is temporarily exposed only to the support/admin account for production testing.',
+    "   const isTebyanForBuy = dcs[key]?.key === 'tebyan' || dcs[key]?.__baseKey === 'tebyan' || key === 'tebyan';",
+    "   if (actionPrefix === 'DC_BUY' && isTebyanForBuy && String(userId) !== String(SUPPORT_ID)) return false;",
     '   // فقط موقع تست، فیلتر کن',
     "   if (actionPrefix !== 'DC_TEST') return true;"
   ].join('\n');
@@ -139,7 +142,7 @@ function applyProviderVisibilityPatches(coreSource) {
     source,
     buyMenuNeedle,
     buyMenuReplacement,
-    'hide unavailable providers from the buy datacenter menu'
+    'limit Tebyan buy datacenter menu to support admin'
   );
 
   const buyCallbackNeedle = [
@@ -151,8 +154,9 @@ function applyProviderVisibilityPatches(coreSource) {
     "      if (dcConfig?.provider === 'afracloud' || dcConfig?.apiType === 'afracloud') {",
     "        return sendMessage(effectiveChatId, '⛔️ فروش سرویس افرانت/افراکلود متوقف شده و امکان خرید جدید وجود ندارد.');",
     '      }',
-    "      if (dcConfig?.key === 'tebyan') {",
-    "        return sendMessage(effectiveChatId, '⛔️ فروش سرویس تبیان فعلاً متوقف شده و امکان خرید جدید وجود ندارد.');",
+    "      const isTebyanBuy = dcConfig?.key === 'tebyan' || dcConfig?.__baseKey === 'tebyan';",
+    "      if (isTebyanBuy && String(effectiveUserId) !== String(SUPPORT_ID)) {",
+    "        return sendMessage(effectiveChatId, '⛔️ فروش سرویس تبیان فعلاً در حالت تست داخلی است.');",
     '      }',
     '      const dbUser = await getUser(effectiveUserId);'
   ].join('\n');
@@ -161,7 +165,7 @@ function applyProviderVisibilityPatches(coreSource) {
     source,
     buyCallbackNeedle,
     buyCallbackReplacement,
-    'block stale unavailable-provider buy callbacks'
+    'block non-admin stale Tebyan buy callbacks'
   );
 
   const finalPurchaseNeedle = [
@@ -172,12 +176,12 @@ function applyProviderVisibilityPatches(coreSource) {
   const finalPurchaseReplacement = [
     '    const isHetzner = isHetznerDc(effectiveDc);',
     "    const isAfra = effectiveDc.provider === 'afracloud' || effectiveDc.apiType === 'afracloud';",
-    "    const isTebyan = effectiveDc.key === 'tebyan';",
+    "    const isTebyan = effectiveDc.key === 'tebyan' || effectiveDc.__baseKey === 'tebyan';",
     '',
-    '    // Hard stop for any already-open or deep-linked unavailable-provider purchase flow.',
-    '    if (isAfra || isTebyan) {',
+    '    // Keep Afracloud hard-disabled; allow Tebyan only for the support/admin account during testing.',
+    '    if (isAfra || (isTebyan && String(userId) !== String(SUPPORT_ID))) {',
     "      const unavailableName = isTebyan ? 'تبیان' : 'افرانت/افراکلود';",
-    "      return sendMessage(chatId, `⛔️ فروش سرویس ${unavailableName} فعلاً متوقف شده و امکان خرید جدید وجود ندارد.`, mainMenu);",
+    "      return sendMessage(chatId, `⛔️ فروش سرویس ${unavailableName} فعلاً برای این حساب در دسترس نیست.`, mainMenu);",
     '    }'
   ].join('\n');
 
@@ -185,7 +189,7 @@ function applyProviderVisibilityPatches(coreSource) {
     source,
     finalPurchaseNeedle,
     finalPurchaseReplacement,
-    'hard-block unavailable providers before server creation'
+    'hard-block non-admin Tebyan purchases before server creation'
   );
 
   return source;
