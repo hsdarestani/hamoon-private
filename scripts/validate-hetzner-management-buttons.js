@@ -31,6 +31,7 @@ const required = [
   'function compactServerStatusIcon(status)',
   'async function listServersForManagement(dcConfig, token)',
   'HETZNER_MANAGEMENT_CACHE_MS',
+  'const datacenterKeys = []; // MANAGE_DB_FIRST',
   'hetznerManagementServerListInFlight',
   "restartableById = new Map(",
   "provider_state_drift",
@@ -68,6 +69,7 @@ const statusHelperIndex = composed.indexOf('function compactServerStatusIcon(sta
 const statusLabelIndex = composed.indexOf(statusLabelMarker);
 assert(statusHelperIndex >= 0, 'compact status helper must exist');
 assert(statusLabelIndex > statusHelperIndex, 'management list must use live provider status icon');
+assert(composed.includes('const datacenterKeys = []; // MANAGE_DB_FIRST'), 'management index must not wait for provider list calls');
 
 new vm.Script(composed, { filename: 'index-core.composed.js' });
 new vm.Script(paginatedListSource, { filename: 'hetzner-list-all-servers.js' });
