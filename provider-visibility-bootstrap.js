@@ -97,6 +97,7 @@ function applyProviderVisibilityPatches(coreSource) {
     '                id: serverId,',
     '                uuid: serverId,',
     '                name: p.server_name || serverId,',
+    '                status: p.provider_status || p.status,',
     '                datacenter: dcKey,',
     '                purchase: p,',
     '                providerUnavailable: true',
