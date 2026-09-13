@@ -1,0 +1,45 @@
+name: Diagnose Tebyan Paid 400
+
+on:
+  push:
+    branches: [diagnose-tebyan-paid-400]
+    paths:
+      - '.github/workflows/diagnose-tebyan-paid-400.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Read recent Tebyan purchase errors
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '=== PM2 recent relevant lines ==='
+          pm2 logs hamoonbot --nostream --lines 800 2>&1 \
+            | grep -E -A8 -B8 'Error in createServer|Purchase Error|SECURITY_GROUP|Final server body|OpenStack API Error Details|Request failed with status code 400' \
+            | tail -n 240 \
+            | sed -E 's/(X-Auth-Token|Authorization|password|OS_PASSWORD|TRAFFIC_API_KEY)([=:][[:space:]]*)[^ ,}\"]+/\1\2[redacted]/Ig' \
+            || true
+          REMOTE
