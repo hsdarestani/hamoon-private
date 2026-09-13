@@ -53,6 +53,10 @@ async function listServersForManagement(dcConfig, token) {
 ${helperMarker}`;
   const listServersMarker = 'return openstackApi.listServers(dcConfig, tok);';
   const listServersReplacement = 'return listServersForManagement(dcConfig, tok);';
+  const datacenterKeysMarker = ' const datacenterKeys = Object.keys(userDCs);';
+  // The management list is a DB index. Live provider state is fetched only
+  // after the user opens one server, where handleServerManagement calls getServer.
+  const datacenterKeysReplacement = " const datacenterKeys = []; // MANAGE_DB_FIRST";
   const buttonTextMarker = 'text: `${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
   const buttonTextReplacement = 'text: `${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}';
 
@@ -76,6 +80,11 @@ ${helperMarker}`;
     err.code = 'HETZNER_MANAGEMENT_LIST_SERVERS_MARKER_MISSING';
     throw err;
   }
+  if (!source.includes(datacenterKeysMarker)) {
+    const err = new Error('HETZNER_MANAGEMENT_DB_FIRST_MARKER_MISSING');
+    err.code = 'HETZNER_MANAGEMENT_DB_FIRST_MARKER_MISSING';
+    throw err;
+  }
   if (!source.includes(buttonTextMarker)) {
     const err = new Error('HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING');
     err.code = 'HETZNER_MANAGEMENT_STATUS_BUTTON_MARKER_MISSING';
@@ -84,6 +93,7 @@ ${helperMarker}`;
 
   const patched = source
     .replace(helperMarker, helperReplacement)
+    .replace(datacenterKeysMarker, datacenterKeysReplacement)
     .replace(listServersMarker, listServersReplacement)
     .replace(providerMarker, providerReplacement)
     .replace(ownershipMarker, ownershipReplacement)
@@ -97,6 +107,7 @@ ${helperMarker}`;
       !patched.includes('async function listServersForManagement(dcConfig, token)') ||
       !patched.includes('hetznerManagementServerListInFlight') ||
       !patched.includes('HETZNER_MANAGEMENT_CACHE_MS') ||
+      !patched.includes('const datacenterKeys = []; // MANAGE_DB_FIRST') ||
       !patched.includes("require('./services/hetzner-list-all-servers')") ||
       !patched.includes('return listServersForManagement(dcConfig, tok);') ||
       !patched.includes('${compactServerStatusIcon(s.status)} ${getServerDisplayNameFromMap(serverDisplayNames, s.datacenter, s.id) || s.purchase?.server_name || s.name}')) {

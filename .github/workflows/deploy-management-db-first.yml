@@ -1,0 +1,86 @@
+name: Deploy Management DB First
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-management-db-first.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-production-billing-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate DB-first management runtime
+        run: |
+          set -euo pipefail
+          node --check hetzner-management-scope-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const runtime = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) {
+            throw new Error('MANAGE_DB_FIRST_NOT_COMPOSED');
+          }
+          new Function(runtime);
+          console.log('MANAGE_DB_FIRST_COMPOSED=yes');
+          NODE
+
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PORT"
+          test -n "$SSH_KEY"
+          test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+
+          node --check hetzner-management-scope-bootstrap.js
+          node scripts/validate-hetzner-management-buttons.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const { applyPatches } = require('./runtime-bootstrap');
+          const runtime = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
+          if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) process.exit(1);
+          new Function(runtime);
+          console.log('PRODUCTION_MANAGE_DB_FIRST=yes');
+          NODE
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "PM2_STATUS=$STATUS"
+          test "$STATUS" = "online"
+          REMOTE
