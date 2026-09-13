@@ -1,0 +1,60 @@
+name: Sync Provider Status Now
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-provider-status-now.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run bounded snapshot sync
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          timeout 180s ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          grep -q 'provider_status_checked_at' db.js
+          grep -q 'status: p.provider_status || p.status' provider-visibility-bootstrap.js
+          timeout 120s node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const { syncHetznerProviderStatuses } = require('./services/hetzner-status-sync');
+          (async () => {
+            const result = await syncHetznerProviderStatuses();
+            const [rows] = await db.pool.query(
+              "SELECT provider_status, COUNT(*) count FROM purchases WHERE provider_status IS NOT NULL GROUP BY provider_status ORDER BY provider_status"
+            );
+            console.log('STATUS_SYNC_RESULT=' + JSON.stringify(result));
+            console.log('STATUS_SNAPSHOT_GROUPS=' + JSON.stringify(rows));
+            if (!result.updated || !rows.length) throw new Error('EMPTY_STATUS_SNAPSHOT');
+            process.exit(0);
+          })().catch(error => {
+            console.error('STATUS_SYNC_FAILED=' + (error.code || error.message));
+            process.exit(1);
+          });
+          NODE
+          REMOTE
