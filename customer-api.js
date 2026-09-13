@@ -6,6 +6,7 @@ const cloud = require('./cloud-api');
 const datacenters = require('./datacenters');
 const lifecycle = require('./services/hetzner-lifecycle');
 const { changeHetznerPublicIp, userMessageForError: changeIpUserMessage } = require('./services/hetzner-change-ip');
+const additionalIps = require('./services/hetzner-additional-ips');
 const { getHetznerSellablePlans, createOrGetSshKey, hetznerRequest } = require('./Hetzner/hetzner-api');
 const { createApiPricingSnapshot, isMonthlyProrated } = require('./api-pricing');
 const {
@@ -412,6 +413,48 @@ function createCustomerApiRouter() {
     } catch (e) { next(e); }
   });
 
+  router.get('/servers/:id/additional-ips', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const ips = await additionalIps.listAdditionalIps({ dc, serverId: req.params.id });
+      return res.json({ ok: true, additional_ips: ips });
+    } catch (e) { next(e); }
+  });
+
+  router.post('/servers/:id/additional-ips', userPurchase, async (req, res, next) => {
+    try {
+      const status = String(req.purchase.status || '').toLowerCase();
+      if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) return apiError(res, 409, 'SERVER_STATE_CONFLICT', 'وضعیت فعلی سرور اجازه افزودن IP را نمی‌دهد.');
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const input = requestInput(req);
+      const result = await additionalIps.addAdditionalIpv4({
+        dc,
+        serverId: req.params.id,
+        description: input.description,
+        maxIps: process.env.HETZNER_MAX_ADDITIONAL_IPV4
+      });
+      return res.status(201).json({
+        ok: true,
+        status: 'additional_ip_created',
+        additional_ip: result.ip,
+        configuration_required: true,
+        configuration_note: 'Floating IP باید داخل سیستم‌عامل سرور نیز پیکربندی شود.'
+      });
+    } catch (e) { next(e); }
+  });
+
+  router.delete('/servers/:id/additional-ips/:floatingIpId', userPurchase, async (req, res, next) => {
+    try {
+      const dc = ensureHetznerDc(res, req.purchase); if (!dc) return;
+      const deleted = await additionalIps.deleteAdditionalIp({
+        dc,
+        serverId: req.params.id,
+        floatingIpId: req.params.floatingIpId
+      });
+      return res.json({ ok: true, status: 'additional_ip_deleted', additional_ip: deleted });
+    } catch (e) { next(e); }
+  });
+
   router.post('/servers/:id/change-ip', userPurchase, async (req, res, next) => {
     try {
       const status = String(req.purchase.status || '').toLowerCase();
@@ -446,6 +489,10 @@ function createCustomerApiRouter() {
     const providerStatus = Number(err?.status || err?.response?.status || 0);
     const providerCode = String(err?.data?.error?.code || err?.response?.data?.error?.code || '').toUpperCase();
     const providerMessage = String(err?.data?.error?.message || err?.response?.data?.error?.message || '').trim();
+    if (err.code === 'ADDITIONAL_IP_LIMIT_REACHED') return apiError(res, 409, 'ADDITIONAL_IP_LIMIT_REACHED', 'سقف IP اضافه برای این سرور پر شده است.', { limit: err.limit });
+    if (err.code === 'ADDITIONAL_IP_NOT_FOUND') return apiError(res, 404, 'ADDITIONAL_IP_NOT_FOUND', 'IP اضافه برای این سرور پیدا نشد.');
+    if (err.code === 'ADDITIONAL_IP_DELETE_PROTECTED') return apiError(res, 409, 'ADDITIONAL_IP_DELETE_PROTECTED', 'محافظت حذف این IP در Hetzner فعال است.');
+    if (err.code === 'FLOATING_IP_CREATE_FAILED') return apiError(res, 502, 'FLOATING_IP_CREATE_FAILED', 'Hetzner اطلاعات IP جدید را برنگرداند.');
     if (err.code === 'DISPLAY_NAME_TOO_LONG') return apiError(res, 400, 'NAME_TOO_LONG', err.message);
     if (err.code === 'HETZNER_PLACEMENT_UNAVAILABLE') return apiError(res, 409, 'HETZNER_PLACEMENT_UNAVAILABLE', lifecycle.safeProviderMessage(err));
     if (err.code === 'NOT_FOUND' || providerStatus === 404) return apiError(res, 404, 'SERVER_NOT_FOUND', 'سرور یا منبع موردنظر پیدا نشد.');
