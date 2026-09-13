@@ -1,8 +1,11 @@
 'use strict';
 const assert = require('assert');
 const service = require('../services/hetzner-additional-ips');
+const billing = require('../services/hetzner-additional-ip-billing');
 
 async function run() {
+  assert.deepStrictEqual(billing.quote(), { amount: 750000, currency: 'TOMAN', cycle: 'monthly', cycle_hours: 720, provider_price_eur: 3, eur_rate_toman: 250000 });
+  assert.strictEqual(billing.MONTHLY_PRICE_TOMAN, 750000);
   const calls = [];
   const request = async (_dc, method, path, body) => {
     calls.push({ method, path, body });

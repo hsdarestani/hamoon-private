@@ -19,6 +19,7 @@ const { generateStrongPassword } = require('./services/passwords');
 const { resetLinuxRootPasswordOverSsh } = require('./services/ssh-reset-password');
 const { syncHetznerProviderStatuses } = require('./services/hetzner-status-sync');
 const additionalIps = require('./services/hetzner-additional-ips');
+const additionalIpBilling = require('./services/hetzner-additional-ip-billing');
 
 // Importing datacenter configurations
 //const datacenters = require('./datacenters');
@@ -2882,11 +2883,12 @@ async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig)
     const lines = ips.length
       ? ips.map((item, index) => `${index + 1}. ${item.ip}`).join('\n')
       : 'هنوز IP اضافه‌ای برای این سرور ثبت نشده است.';
+    const pricing = additionalIpBilling.quote();
     const keyboard = [
-      [{ text: '➕ افزودن IPv4 جدید', callback_data: makeShortCb(userId, { action: 'HAIPC', dcKey: dcConfig.key, serverId }) }],
+      [{ text: `✅ تأیید و پرداخت ${pricing.amount.toLocaleString('fa-IR')} تومان`, callback_data: makeShortCb(userId, { action: 'HAIPC', dcKey: dcConfig.key, serverId }) }],
       [{ text: '🔙 بازگشت', callback_data: makeShortCb(userId, { action: 'M', dcKey: dcConfig.key, serverId }) }]
     ];
-    return sendMessage(chatId, `🌐 IPهای اضافه سرور:\n${lines}\n\nIP جدید از نوع Floating IPv4 است و پس از ساخت باید داخل سیستم‌عامل سرور نیز پیکربندی شود.`, {
+    return sendMessage(chatId, `🌐 IPهای اضافه سرور:\n${lines}\n\n💳 هزینه هر IPv4 اضافه: ${pricing.amount.toLocaleString('fa-IR')} تومان برای ۳۰ روز\nمبنای اختصاصی IP اضافه: ۳ یورو × ۲۵۰٬۰۰۰ تومان. مبلغ پس از تأیید از کیف پول کسر و هر ۳۰ روز تمدید می‌شود.\n\nIP جدید از نوع Floating IPv4 است و پس از ساخت باید داخل سیستم‌عامل سرور نیز پیکربندی شود.`, {
       reply_markup: { inline_keyboard: keyboard }
     });
   } catch (error) {
@@ -2903,20 +2905,65 @@ async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfi
     if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) {
       return sendMessage(chatId, '❌ وضعیت فعلی سرور اجازه افزودن IP را نمی‌دهد.');
     }
+    const database = require('./db');
+    await additionalIpBilling.assertAffordable(database, userId);
     const result = await additionalIps.addAdditionalIpv4({
       dc: dcConfig,
       serverId,
       description: `HamoonCloud user ${userId} server ${serverId}`
     });
-    return sendMessage(chatId, `✅ IPv4 اضافه با موفقیت ساخته و به سرور متصل شد:\n${result.ip.ip}\n\n⚠️ برای قابل استفاده شدن، این Floating IP را داخل سیستم‌عامل سرور هم پیکربندی کنید.`);
+    let pricing;
+    try {
+      pricing = await additionalIpBilling.activate({
+        db: database,
+        telegramId: userId,
+        serverId,
+        datacenter: dcConfig.key,
+        floatingIp: result.ip
+      });
+    } catch (billingError) {
+      await additionalIps.deleteAdditionalIp({ dc: dcConfig, serverId, floatingIpId: result.ip.id }).catch(() => {});
+      throw billingError;
+    }
+    return sendMessage(chatId, `✅ IPv4 اضافه با موفقیت ساخته و به سرور متصل شد:\n${result.ip.ip}\n💳 مبلغ ${pricing.amount.toLocaleString('fa-IR')} تومان از کیف پول کسر شد (اعتبار ۳۰ روز).\n\n⚠️ برای قابل استفاده شدن، این Floating IP را داخل سیستم‌عامل سرور هم پیکربندی کنید.`);
   } catch (error) {
     console.error('[HETZNER_ADDITIONAL_IP_CREATE]', error.code || error.message);
+    if (error.code === 'INSUFFICIENT_WALLET') {
+      return sendMessage(chatId, `❌ موجودی کیف پول کافی نیست. هزینه IP اضافه ${Number(error.required || additionalIpBilling.MONTHLY_PRICE_TOMAN).toLocaleString('fa-IR')} تومان است.`);
+    }
     if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {
       return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);
     }
     return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');
   }
 }
+
+let additionalIpRenewalRunning = false;
+async function renewHetznerAdditionalIps() {
+  if (additionalIpRenewalRunning) return;
+  additionalIpRenewalRunning = true;
+  const database = require('./db');
+  try {
+    for (const row of await additionalIpBilling.listDue(database)) {
+      const result = await additionalIpBilling.renew({ db: database, floatingIpId: row.floating_ip_id });
+      if (result.status !== 'insufficient') continue;
+      const dc = getUserEffectiveDCs(String(row.telegram_id))[row.datacenter] || baseDatacenters[row.datacenter];
+      if (!dc || !isHetznerDc(dc)) continue;
+      try {
+        await additionalIps.deleteAdditionalIp({ dc, serverId: row.server_id, floatingIpId: row.floating_ip_id });
+        await additionalIpBilling.cancel({ db: database, floatingIpId: row.floating_ip_id });
+        await sendMessage(row.telegram_id, `⚠️ به‌دلیل کافی نبودن موجودی برای تمدید ماهانه IP اضافه ${row.floating_ip}، این IP از سرور حذف شد.`);
+      } catch (error) {
+        console.error('[HETZNER_ADDITIONAL_IP_EXPIRE]', { floating_ip_id: row.floating_ip_id, error: error.code || error.message });
+      }
+    }
+  } catch (error) {
+    console.error('[HETZNER_ADDITIONAL_IP_RENEWAL]', error.code || error.message);
+  } finally {
+    additionalIpRenewalRunning = false;
+  }
+}
+cron.schedule('17 * * * *', renewHetznerAdditionalIps);
 
 async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
