@@ -122,6 +122,8 @@ async function initializeDatabase() {
         await ensureColumn(connection, 'purchases', 'billing_amount_version', 'TINYINT NOT NULL DEFAULT 1');
         await ensureColumn(connection, 'purchases', 'pricing_mode', "VARCHAR(32) NOT NULL DEFAULT 'legacy'");
         await ensureColumn(connection, 'purchases', 'monthly_basis_price', 'DECIMAL(14, 6) NULL');
+        await ensureColumn(connection, 'purchases', 'provider_status', 'VARCHAR(32) NULL');
+        await ensureColumn(connection, 'purchases', 'provider_status_checked_at', 'DATETIME NULL');
         await connection.execute('UPDATE purchases SET auto_renew = 1 WHERE auto_renew IS NULL').catch(err => {
             console.warn('Could not backfill purchases.auto_renew:', err.message);
         });
