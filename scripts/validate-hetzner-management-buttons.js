@@ -32,6 +32,7 @@ const required = [
   'async function listServersForManagement(dcConfig, token)',
   'HETZNER_MANAGEMENT_CACHE_MS',
   'const datacenterKeys = []; // MANAGE_DB_FIRST',
+  'status: p.provider_status || p.status,',
   'hetznerManagementServerListInFlight',
   "restartableById = new Map(",
   "provider_state_drift",
