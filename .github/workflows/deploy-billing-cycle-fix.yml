@@ -44,7 +44,7 @@ permissions:
 
 concurrency:
   group: hamoon-production-billing-deploy
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate-and-deploy:
