@@ -1,0 +1,67 @@
+name: Diagnose live Hetzner IP pool
+
+on:
+  push:
+    branches: [diag/live-ip-pool-20260914]
+    paths:
+      - '.github/workflows/diag-live-ip-pool.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect production IP failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== HEAD ==='
+          git rev-parse HEAD
+          echo '=== PM2 ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot'); console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time,uptime:p?.pm2_env?.pm_uptime},null,2));})"
+          echo '=== RECENT PURCHASES (4h) ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            const [rows]=await c.query(`SELECT id,telegram_id,server_id,server_name,datacenter,status,public_ip,ip_quality_attempts,ip_quality_summary,lifecycle_error_code,delivered_at,created_at,updated_at FROM purchases WHERE LOWER(datacenter) LIKE 'hetzner%' AND updated_at >= DATE_SUB(NOW(), INTERVAL 4 HOUR) ORDER BY updated_at DESC LIMIT 120`);
+            console.log(JSON.stringify(rows,null,2));
+            console.log('=== STATUS COUNTS ===');
+            const [counts]=await c.query(`SELECT status,COUNT(*) n FROM purchases WHERE LOWER(datacenter) LIKE 'hetzner%' AND updated_at >= DATE_SUB(NOW(), INTERVAL 4 HOUR) GROUP BY status ORDER BY n DESC`);
+            console.log(JSON.stringify(counts,null,2));
+            console.log('=== IP HISTORY (4h) ===');
+            const [hist]=await c.query(`SELECT telegram_id,server_id,ip_address,last_event,seen_count,last_seen_at FROM server_ip_history WHERE last_seen_at >= DATE_SUB(NOW(), INTERVAL 4 HOUR) ORDER BY last_seen_at DESC LIMIT 250`).catch(()=>[[]]);
+            console.log(JSON.stringify(hist,null,2));
+            await c.end();
+          })().catch(e=>{console.error('DB_DIAG_FAILED='+e.message);process.exitCode=1});
+          NODE
+          echo '=== RECENT HETZNER EVENTS ==='
+          pm2 logs hamoonbot --nostream --lines 5000 2>&1 | grep -E 'HETZNER_(LOCATION_FALLBACK|CHANGE_IP|IP_QUALITY|PROVISION|DELIVER)|manual_review|fsn_location_fallback_exhausted|ip_quality_exhausted' | tail -n 1200 || true
+          echo '=== CHECK-HOST IR NODES ==='
+          curl -fsSL -H 'Accept: application/json' https://check-host.net/nodes/hosts | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const a=Object.entries(j.nodes||{}).filter(([,v])=>String(v.location?.[0]||'').toLowerCase()==='ir');console.log('IR_NODE_COUNT='+a.length); console.log(a.map(([k,v])=>k+' '+(v.location||[]).join('/')).join('\n'));})"
+          REMOTE
