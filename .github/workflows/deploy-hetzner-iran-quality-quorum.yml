@@ -5,8 +5,11 @@ on:
     branches: [main]
     paths:
       - 'runtime-bootstrap.js'
+      - 'services/hetzner-reconcile-policy.js'
+      - 'services/hetzner-location-fallback.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-hetzner-lifecycle.js'
+      - 'scripts/validate-hetzner-location-fallback.js'
       - '.github/workflows/deploy-hetzner-iran-quality-quorum.yml'
   workflow_dispatch:
 
@@ -39,6 +42,9 @@ jobs:
         run: |
           set -euo pipefail
           node -c runtime-bootstrap.js
+          node -c services/hetzner-reconcile-policy.js
+          node -c services/hetzner-location-fallback.js
+          node scripts/validate-hetzner-location-fallback.js
           npm run validate:clean-ip-runtime
           npm run validate:hetzner-lifecycle
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
@@ -64,6 +70,9 @@ jobs:
           git pull --ff-only
           node scripts/restore-server-secret-key.js .env >/dev/null
           node -c runtime-bootstrap.js
+          node -c services/hetzner-reconcile-policy.js
+          node -c services/hetzner-location-fallback.js
+          node scripts/validate-hetzner-location-fallback.js
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
           npm run validate:clean-ip-runtime
           npm run validate:hetzner-lifecycle
@@ -73,4 +82,5 @@ jobs:
           echo "PM2_STATUS=$PM2_STATUS"
           test "$PM2_STATUS" = 'online'
           echo 'PRODUCTION_QUORUM_FIX=verified'
+          echo 'PRODUCTION_FSN_FALLBACK=verified'
           REMOTE
