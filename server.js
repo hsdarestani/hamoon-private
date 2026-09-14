@@ -6,6 +6,7 @@ const axios = require('axios');
 const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
 const { createCustomerApiRouter } = require('./customer-api');
+const { createResellerApiExtensionsRouter } = require('./reseller-api-extensions');
 const { consumeConsoleSession } = require('./console-session');
 const { mountExternalPayments } = require('./external-payments');
 const app = express();
@@ -32,6 +33,7 @@ app.get('/health', async (_req, res) => {
 });
 app.get('/admin', (_req, res) => res.redirect(302, '/dashboard'));
 app.use('/dashboard/api', createDashboardApiRouter());
+app.use('/api/v1', createResellerApiExtensionsRouter());
 app.use('/api/v1', createCustomerApiRouter());
 mountExternalPayments(app, { db, axios });
 
