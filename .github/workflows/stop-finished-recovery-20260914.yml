@@ -1,0 +1,63 @@
+name: Stop finished hanging recovery process
+
+on:
+  push:
+    branches: [diag/live-ip-pool-20260914]
+    paths:
+      - '.github/workflows/stop-finished-recovery-20260914.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Stop recovery only after database is fully settled
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          COUNTS="$(node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            try {
+              const [[o]]=await c.query(`SELECT COUNT(*) n FROM purchases WHERE LOWER(datacenter) LIKE 'hetzner%' AND delivered_at IS NULL AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review','provider_missing') AND updated_at>=DATE_SUB(NOW(),INTERVAL 3 DAY)`);
+              const [[u]]=await c.query(`SELECT COUNT(*) n FROM (SELECT p.server_id,MAX(CASE WHEN h.last_event IN ('clean_ip_rejected_rolled_back','clean_ip_unverified_rolled_back') THEN h.last_seen_at END) f,MAX(CASE WHEN h.last_event='clean_ip_verified' THEN h.last_seen_at END) s FROM purchases p JOIN server_ip_history h ON h.server_id=p.server_id AND h.datacenter=p.datacenter WHERE p.delivered_at IS NOT NULL AND LOWER(p.datacenter) LIKE 'hetzner%' AND LOWER(p.status) IN ('active','running','suspended','stopped','shutoff') AND h.last_seen_at>=DATE_SUB(NOW(),INTERVAL 12 HOUR) GROUP BY p.server_id HAVING f IS NOT NULL AND (s IS NULL OR s<f)) x`);
+              process.stdout.write(`${o.n}:${u.n}`);
+            } finally { await c.end(); }
+          })().catch(e=>{console.error(e.message);process.exit(1)});
+          NODE
+          )"
+          echo "RECOVERY_SETTLED_COUNTS=$COUNTS"
+          test "$COUNTS" = '0:0'
+          PIDS="$(pgrep -f '^node scripts/recover-failed-change-ip.js$' || true)"
+          if [ -n "$PIDS" ]; then
+            echo "STOPPING_FINISHED_RECOVERY_PIDS=$PIDS"
+            kill -TERM $PIDS
+          else
+            echo 'NO_HANGING_RECOVERY_PROCESS'
+          fi
+          REMOTE
