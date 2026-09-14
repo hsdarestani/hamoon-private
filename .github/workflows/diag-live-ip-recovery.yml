@@ -40,8 +40,7 @@ jobs:
           cd "$APP_PATH"
           echo '=== PRODUCTION ==='
           git rev-parse HEAD
-          PM2_JSON="$(pm2 jlist)"
-          printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time},null,2))})"
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time},null,2))})"
           echo '=== RECOVERY PROCESS ==='
           ps -eo pid,etimes,args | grep -E 'recover-failed-change-ip|requeue-fsn-exhausted' | grep -v grep || true
           node - <<'NODE'
@@ -50,21 +49,15 @@ jobs:
           (async()=>{
             const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
             try {
-              const [open]=await c.query(`SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,flavor_id,os_label,boot_method,amount,duration,pricing_mode,monthly_basis_price,ip_quality_attempts,ip_quality_summary,lifecycle_error_code,delivered_at,created_at,updated_at FROM purchases WHERE LOWER(datacenter) LIKE 'hetzner%' AND delivered_at IS NULL AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review','provider_missing') AND updated_at>=DATE_SUB(NOW(),INTERVAL 3 DAY) ORDER BY updated_at DESC`);
+              const [open]=await c.query(`SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,ip_quality_attempts,ip_quality_summary,lifecycle_error_code,delivered_at,created_at,updated_at FROM purchases WHERE LOWER(datacenter) LIKE 'hetzner%' AND delivered_at IS NULL AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review','provider_missing') AND updated_at>=DATE_SUB(NOW(),INTERVAL 3 DAY) ORDER BY updated_at DESC`);
               console.log('OPEN_DELIVERY_COUNT='+open.length);
               console.log('OPEN_DELIVERY_ROWS='+JSON.stringify(open));
-              const [p705]=await c.query(`SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,flavor_id,os_label,boot_method,amount,duration,pricing_mode,monthly_basis_price,delivered_at,created_at,updated_at FROM purchases WHERE telegram_id='7054970886' AND created_at>=DATE_SUB(NOW(),INTERVAL 6 HOUR) ORDER BY created_at ASC`);
-              console.log('USER_705_RECENT_PURCHASES='+JSON.stringify(p705));
-              const [w705]=await c.query(`SELECT amount,description,type,timestamp FROM wallet_logs WHERE telegram_id='7054970886' AND timestamp>=DATE_SUB(NOW(),INTERVAL 6 HOUR) ORDER BY timestamp ASC`);
-              console.log('USER_705_WALLET_LOGS='+JSON.stringify(w705));
               const [change]=await c.query(`SELECT p.telegram_id,p.server_id,p.datacenter,p.status,p.public_ip,MAX(CASE WHEN h.last_event IN ('clean_ip_rejected_rolled_back','clean_ip_unverified_rolled_back') THEN h.last_seen_at END) last_failure_at,MAX(CASE WHEN h.last_event='clean_ip_verified' THEN h.last_seen_at END) last_success_at FROM purchases p JOIN server_ip_history h ON h.server_id=p.server_id AND h.datacenter=p.datacenter WHERE p.delivered_at IS NOT NULL AND LOWER(p.datacenter) LIKE 'hetzner%' AND LOWER(p.status) IN ('active','running','suspended','stopped','shutoff') AND h.last_seen_at>=DATE_SUB(NOW(),INTERVAL 12 HOUR) GROUP BY p.telegram_id,p.server_id,p.datacenter,p.status,p.public_ip HAVING last_failure_at IS NOT NULL AND (last_success_at IS NULL OR last_success_at < last_failure_at) ORDER BY last_failure_at DESC`);
               console.log('ACTIVE_CHANGE_IP_UNRESOLVED='+change.length);
               console.log('ACTIVE_CHANGE_IP_ROWS='+JSON.stringify(change));
+              const [hist]=await c.query(`SELECT ip_address,last_event,seen_count,first_seen_at,last_seen_at FROM server_ip_history WHERE server_id='165669861' ORDER BY last_seen_at DESC LIMIT 40`);
+              console.log('SERVER_165669861_HISTORY='+JSON.stringify(hist));
             } finally { await c.end(); }
           })().catch(e=>{console.error('DIAG_FAILED='+e.message);process.exit(1)});
           NODE
-          echo '=== BOT DELIVERY FAILURES ==='
-          OUT_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_out_log_path||'')})")"
-          ERR_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_err_log_path||'')})")"
-          { [ -n "$OUT_LOG" ] && tail -n 6000 "$OUT_LOG" || true; [ -n "$ERR_LOG" ] && tail -n 6000 "$ERR_LOG" || true; } | grep -E 'HETZNER_DELIVERY_NOTIFY_FAILED|HETZNER_CHANGE_IP_CLEAN_SUCCESS' | tail -n 300 || true
           REMOTE
