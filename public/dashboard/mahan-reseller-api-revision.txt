@@ -1,1 +1,1 @@
-Mahan reseller lifecycle API revision: billing-cycle, safe-upgrade, traffic-addons, rebuild-images.
+Mahan reseller lifecycle API revision 2: isolated billing-cycle, safe-upgrade, traffic-addons, rebuild-images routes.
