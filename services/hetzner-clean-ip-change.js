@@ -39,8 +39,6 @@ async function probeSshReachability(ip, options = {}) {
   const port = clampInt(options.port ?? process.env.HETZNER_CHANGE_IP_SSH_PORT, 22, 1, 65535);
   let last = null;
 
-  // Hetzner can report the server running with the new Primary IPv4 before the guest
-  // network stack/sshd has fully settled after the power cycle. Give it a short grace period.
   if (settleMs > 0) await sleep(settleMs);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -52,9 +50,14 @@ async function probeSshReachability(ip, options = {}) {
 }
 
 async function probeIranQuality(ip) {
-  // Keep one Check-Host request alive long enough for Iranian TCP probes to
-  // complete. Restarting a short request repeatedly only resets its timer and
-  // can produce permanent "insufficient_results" while global probes are 6/6.
+  // A Primary IPv4 swap includes a power cycle. Give the guest network a short
+  // fixed settle window before asking external probes; otherwise an IP can look
+  // globally dead for a few seconds simply because the OS has not brought the
+  // interface up yet.
+  const settleMs = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_SETTLE_MS, 6000, 0, 30000);
+  if (settleMs > 0) await sleep(settleMs);
+
+  // Keep one Check-Host request alive long enough for Iranian probes to complete.
   const probeAttempts = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, 1, 1, 3);
   const polls = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLLS, 15, 6, 24);
   const pollDelayMs = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS, 1500, 750, 4000);
@@ -84,8 +87,10 @@ async function verifyCleanCandidate(ip, args = {}) {
     };
   }
 
-  const sshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : probeSshReachability;
-  const ssh = await sshProbe(ip);
+  const customSshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : null;
+  const ssh = customSshProbe
+    ? await customSshProbe(ip)
+    : await probeSshReachability(ip, { settleMs: 0 });
   if (!ssh?.ok) {
     return {
       ok: false,
