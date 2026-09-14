@@ -38,7 +38,7 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
-          echo "PM2_STATUS=$(pm2 jlist | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})\")"
+          pm2 show hamoonbot --no-color | grep -E 'status|pid' | head -n 4 || true
 
           node - <<'NODE'
           require('dotenv').config();
