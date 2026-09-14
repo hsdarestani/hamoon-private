@@ -1,0 +1,35 @@
+name: Validate admin free test
+
+on:
+  pull_request:
+    paths:
+      - 'admin-free-test-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-admin-free-test.js'
+      - '.github/workflows/validate-admin-free-test.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'admin-free-test-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'scripts/validate-admin-free-test.js'
+      - '.github/workflows/validate-admin-free-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node -c admin-free-test-bootstrap.js
+      - run: node -c runtime-bootstrap.js
+      - run: node scripts/validate-admin-free-test.js
+      - run: npm run validate:clean-ip-runtime
+      - run: npm run validate:hetzner-lifecycle
