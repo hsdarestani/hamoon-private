@@ -16,6 +16,7 @@ on:
       - 'scripts/report-hetzner-ip-recovery.js'
       - 'scripts/validate-admin-free-test.js'
       - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-quality-readiness.js'
       - 'scripts/validate-manual-change-ip-cap.js'
       - 'scripts/validate-hetzner-lifecycle.js'
       - 'scripts/validate-hetzner-location-fallback.js'
@@ -60,9 +61,11 @@ jobs:
           node -c scripts/requeue-fsn-exhausted.js
           node -c scripts/recover-failed-change-ip.js
           node -c scripts/report-hetzner-ip-recovery.js
+          node -c scripts/validate-quality-readiness.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
+          node scripts/validate-quality-readiness.js
           npm run validate:clean-ip-runtime
           npm run validate:hetzner-lifecycle
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
@@ -84,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=40 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -100,9 +103,11 @@ jobs:
           node -c scripts/requeue-fsn-exhausted.js
           node -c scripts/recover-failed-change-ip.js
           node -c scripts/report-hetzner-ip-recovery.js
+          node -c scripts/validate-quality-readiness.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
+          node scripts/validate-quality-readiness.js
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2'" runtime-bootstrap.js
@@ -117,19 +122,18 @@ jobs:
 
           # Recover every recent undelivered Hetzner purchase that reached the
           # IP-quality stage and still has a stored root password. The running bot
-          # reconciler will validate a clean IP and send the normal delivery message.
+          # reconciler validates a clean IP and sends the normal delivery message.
           node scripts/requeue-fsn-exhausted.js
 
-          # Recover unresolved customer-initiated Change-IP incidents from the
-          # current incident window. Success is sent directly to the customer by
-          # the bot token; failed candidates are rolled back to the previous IP.
+          # Recover unresolved customer-initiated Change-IP incidents. Success is
+          # sent directly to the customer by the bot; failed candidates roll back.
           timeout 1200 node scripts/recover-failed-change-ip.js
 
           echo '=== RECOVERY STATE IMMEDIATE ==='
           node scripts/report-hetzner-ip-recovery.js
 
-          # Give the production reconcile cron time to process requeued purchases
-          # and send normal delivery credentials through the bot.
+          # Give the production reconcile cron enough time to process requeued
+          # purchases and send normal delivery credentials through Telegram.
           sleep 180
           echo '=== RECOVERY STATE AFTER 180S ==='
           node scripts/report-hetzner-ip-recovery.js
@@ -138,6 +142,7 @@ jobs:
           echo 'PRODUCTION_FSN_FALLBACK=verified'
           echo 'PRODUCTION_FAST_CLEAN_IP_SEARCH=verified'
           echo 'PRODUCTION_MANUAL_CHANGE_IP_CAP=verified'
+          echo 'PRODUCTION_QUALITY_READINESS_RECHECK=verified'
           echo 'PRODUCTION_IP_INCIDENT_RECOVERY=executed'
           echo 'PRODUCTION_ADMIN_FREE_TEST_UNLIMITED=verified'
           REMOTE
