@@ -22,6 +22,7 @@ const { applyHetznerUpgradeSafetyPatches } = require('./hetzner-upgrade-safety-b
 const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
 const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
 const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmation-safety-bootstrap');
+const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
@@ -175,7 +176,8 @@ function applyPatches(coreSource) {
       )
     )
   );
-  return applyBillingRenewalTickPatches(applyResumeTransactionalPatches(baseline));
+  const patched = applyBillingRenewalTickPatches(applyResumeTransactionalPatches(baseline));
+  return applyAdminUnlimitedFreeTestPatches(patched);
 }
 
 function run() {
