@@ -1,0 +1,127 @@
+name: Apply Reseller Global Hetzner Locations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-reseller-global-hetzner-locations.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open configured Hetzner locations to every reseller API client
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('customer-api.js')
+          text = path.read_text()
+
+          old_dc = """      const dcKey = String(input.datacenter || 'hetzner').trim().toLowerCase();
+      const dc = datacenters[dcKey];
+      createdDc = dc;
+      if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');"""
+
+          new_dc = """      // All reseller API clients may use every configured Hetzner location.
+      // When callers only send `location` (the documented/default flow), resolve the
+      // matching location-specific datacenter first so availability/pricing is read
+      // from the correct regional Hetzner catalog.
+      const requestedDcKey = String(input.datacenter || '').trim().toLowerCase();
+      const requestedLocation = String(input.location || '').trim().toLowerCase();
+      const locationDcKey = requestedLocation
+        ? hetznerDcKeys().find(key => {
+            const cfg = datacenters[key] || {};
+            const locations = [cfg.HETZNER_LOCATION, cfg.HETZNER_LOCATION_FALLBACKS]
+              .flatMap(value => String(value || '').split(','))
+              .map(value => value.trim().toLowerCase())
+              .filter(Boolean);
+            return locations.includes(requestedLocation);
+          })
+        : null;
+      if (requestedLocation && !locationDcKey) {
+        return apiError(res, 400, 'INVALID_LOCATION', 'لوکیشن انتخاب‌شده در Hetzner پشتیبانی نمی‌شود.');
+      }
+      if (requestedDcKey && locationDcKey && requestedDcKey !== locationDcKey) {
+        return apiError(res, 400, 'LOCATION_DATACENTER_MISMATCH', 'لوکیشن با دیتاسنتر انتخاب‌شده مطابقت ندارد.');
+      }
+      const dcKey = requestedDcKey || locationDcKey || 'hetzner';
+      const dc = datacenters[dcKey];
+      createdDc = dc;
+      if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر هتزنر فعال نیست.');"""
+
+          if old_dc in text:
+              text = text.replace(old_dc, new_dc, 1)
+          elif new_dc not in text:
+              raise SystemExit('customer-api datacenter selection block not found')
+
+          old_access = """      const image = String(input.image || 'ubuntu-24.04').trim();
+      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();
+      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
+        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
+      }"""
+
+          new_access = """      const image = String(input.image || 'ubuntu-24.04').trim();
+      const location = requestedLocation || String(dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();
+      // Temporary global-location policy: per-client datacenter/location allowlists
+      // are intentionally ignored. Plan and image restrictions remain enforced.
+      if (!isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image)) {
+        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن یا ایمیج برای این کلاینت مجاز نیست.');
+      }"""
+
+          if old_access in text:
+              text = text.replace(old_access, new_access, 1)
+          elif new_access not in text:
+              raise SystemExit('customer-api allowlist block not found')
+
+          path.write_text(text)
+
+          docs = Path('docs/reseller-api.md')
+          doc = docs.read_text()
+          marker = "Supported creation fields: `server_type` (required), `name`, `image`, `location`, `duration`, `datacenter`, and `ssh_key`."
+          addition = marker + "\n\nAll configured Hetzner locations are currently available to every reseller API client. Sending `location` alone automatically selects the matching regional Hetzner datacenter; per-client location/datacenter allowlists are not enforced while this policy is active. Plan and image allowlists are still enforced."
+          if addition not in doc:
+              if marker not in doc:
+                  raise SystemExit('reseller API docs marker not found')
+              doc = doc.replace(marker, addition, 1)
+              docs.write_text(doc)
+          PY
+
+      - name: Validate source and policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check customer-api.js
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('customer-api.js').read_text()
+          assert 'const requestedLocation' in text
+          assert "'INVALID_LOCATION'" in text
+          assert 'client.allowed_datacenters, dcKey' not in text
+          assert 'client.allowed_locations, location' not in text
+          assert 'client.allowed_plans, plan.id' in text
+          assert 'client.allowed_images, image' in text
+          print('global Hetzner reseller location policy validated')
+          PY
+
+      - name: Commit policy change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add customer-api.js docs/reseller-api.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(api): allow every reseller client all Hetzner locations'
+            git push origin HEAD:main
+          fi
