@@ -38,55 +38,45 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
-
-          node - <<'NODE'
+          DB_AUTO_INIT=false node - <<'NODE'
           require('dotenv').config();
-          const db = require('./db');
-          const dcs = require('./datacenters');
-          const hetzner = require('./Hetzner/hetzner-api');
-          const target = '165810574';
+          const mysql = require('mysql2/promise');
           (async () => {
-            const [purchaseRows] = await db.pool.query(`
-              SELECT telegram_id, server_id, server_name, datacenter, status, public_ip,
-                     ip_quality_attempts, ip_quality_checked_at, ip_quality_summary,
-                     created_at, updated_at, lifecycle_updated_at, delivered_at
-              FROM purchases WHERE server_id = ? LIMIT 1
-            `, [target]);
-            console.log('TARGET_PURCHASE=' + JSON.stringify(purchaseRows[0] || null));
-
-            const [historyRows] = await db.pool.query(`
-              SELECT ip_address, first_seen_at, last_seen_at, seen_count, last_event
-              FROM server_ip_history
-              WHERE server_id = ?
-              ORDER BY last_seen_at ASC
-            `, [target]);
-            console.log('TARGET_IP_HISTORY=' + JSON.stringify(historyRows));
-
-            const purchase = purchaseRows[0];
-            if (purchase) {
-              try {
-                const raw = await hetzner.getHetznerServer(dcs[purchase.datacenter], target);
-                console.log('TARGET_PROVIDER=' + JSON.stringify({
-                  id: String(raw?.id || ''),
-                  name: raw?.name || null,
-                  status: raw?.status || null,
-                  ip: raw?.public_net?.ipv4?.ip || null,
-                  ipv4_id: raw?.public_net?.ipv4?.id || null,
-                  datacenter: raw?.datacenter?.name || null,
-                  location: raw?.datacenter?.location?.name || raw?.location?.name || null
-                }));
-              } catch (e) {
-                console.log('TARGET_PROVIDER_ERROR=' + String(e?.code || e?.message || e));
-              }
-            }
-            await db.pool.end();
-          })().catch(async err => {
-            console.error('DIAG_ERROR=' + String(err?.stack || err));
-            try { await db.pool.end(); } catch (_) {}
-            process.exit(1);
-          });
+            const pool = mysql.createPool({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db',
+              connectionLimit: 2
+            });
+            const [columns] = await pool.query(`
+              SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY
+              FROM INFORMATION_SCHEMA.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'server_id'
+              ORDER BY TABLE_NAME
+            `);
+            console.log('SERVER_ID_COLUMNS=' + JSON.stringify(columns));
+            const [fks] = await pool.query(`
+              SELECT TABLE_NAME, COLUMN_NAME, CONSTRAINT_NAME,
+                     REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+              FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND (COLUMN_NAME = 'server_id' OR REFERENCED_COLUMN_NAME = 'server_id')
+                AND REFERENCED_TABLE_NAME IS NOT NULL
+              ORDER BY TABLE_NAME, CONSTRAINT_NAME
+            `);
+            console.log('SERVER_ID_FKS=' + JSON.stringify(fks));
+            const [pending] = await pool.query(`
+              SELECT telegram_id, server_id, server_name, datacenter, status, flavor_id, os_label,
+                     ssh_key_id, public_ip, ip_quality_attempts, delivered_at, created_at
+              FROM purchases
+              WHERE datacenter = 'hetzner'
+                AND delivered_at IS NULL
+                AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')
+              ORDER BY created_at ASC
+            `);
+            console.log('PENDING_GERMANY=' + JSON.stringify(pending));
+            await pool.end();
+          })().catch(err => { console.error(err); process.exit(1); });
           NODE
-
-          echo '=== TARGET RECONCILE CONTEXT ==='
-          pm2 logs hamoonbot --nostream --lines 1800 2>/dev/null | grep -B 8 -A 12 -E '165810574|Srv-HET-d89ec4' | tail -n 260 || true
           REMOTE
