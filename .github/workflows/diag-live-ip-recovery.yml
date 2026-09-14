@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -57,6 +57,8 @@ jobs:
               console.log('ACTIVE_CHANGE_IP_ROWS='+JSON.stringify(change));
               const [hist]=await c.query(`SELECT ip_address,last_event,seen_count,first_seen_at,last_seen_at FROM server_ip_history WHERE server_id='165669861' ORDER BY last_seen_at DESC LIMIT 40`);
               console.log('SERVER_165669861_HISTORY='+JSON.stringify(hist));
+              const [recent]=await c.query(`SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,ip_quality_summary,delivered_at,updated_at FROM purchases WHERE delivered_at>=DATE_SUB(NOW(),INTERVAL 2 HOUR) AND LOWER(datacenter) LIKE 'hetzner%' ORDER BY delivered_at DESC`);
+              console.log('RECENT_DELIVERED='+JSON.stringify(recent));
             } finally { await c.end(); }
           })().catch(e=>{console.error('DIAG_FAILED='+e.message);process.exit(1)});
           NODE
