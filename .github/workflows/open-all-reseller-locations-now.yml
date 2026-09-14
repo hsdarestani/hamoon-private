@@ -1,0 +1,71 @@
+name: Open All Reseller Locations Now
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/open-all-reseller-locations-now.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Remove reseller datacenter and location restrictions
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          const db = require('./db');
+
+          (async () => {
+            const [before] = await db.pool.execute(
+              'SELECT id, telegram_id, name, allowed_datacenters, allowed_locations FROM api_clients ORDER BY id'
+            );
+            console.log('CLIENTS_BEFORE=' + before.length);
+
+            const [result] = await db.pool.execute(
+              'UPDATE api_clients SET allowed_datacenters = NULL, allowed_locations = NULL'
+            );
+            console.log('UPDATED_ROWS=' + Number(result.affectedRows || 0));
+
+            const [after] = await db.pool.execute(
+              'SELECT id, telegram_id, name, allowed_datacenters, allowed_locations FROM api_clients ORDER BY id'
+            );
+            const stillRestricted = after.filter(row => row.allowed_datacenters || row.allowed_locations);
+            console.log('CLIENTS_AFTER=' + after.length);
+            console.log('STILL_LOCATION_RESTRICTED=' + stillRestricted.length);
+            if (stillRestricted.length) process.exitCode = 2;
+          })()
+            .catch(error => {
+              console.error('OPEN_ALL_RESELLER_LOCATIONS_FAILED', error.code || error.message);
+              process.exitCode = 1;
+            })
+            .finally(async () => {
+              await db.pool.end().catch(() => {});
+            });
+          NODE
+          REMOTE
