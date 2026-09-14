@@ -38,23 +38,47 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
-          pm2 show hamoonbot --no-color | grep -E 'status|pid' | head -n 4 || true
 
           node - <<'NODE'
           require('dotenv').config();
           const db = require('./db');
+          const dcs = require('./datacenters');
+          const hetzner = require('./Hetzner/hetzner-api');
+          const target = '165810574';
           (async () => {
-            const [rows] = await db.pool.query(`
-              SELECT telegram_id, server_id, server_name, datacenter, status,
-                     public_ip, provider_status, provider_status_checked_at,
+            const [purchaseRows] = await db.pool.query(`
+              SELECT telegram_id, server_id, server_name, datacenter, status, public_ip,
                      ip_quality_attempts, ip_quality_checked_at, ip_quality_summary,
                      created_at, updated_at, lifecycle_updated_at, delivered_at
-              FROM purchases
-              WHERE datacenter LIKE 'hetzner%'
-              ORDER BY created_at DESC
-              LIMIT 12
-            `);
-            console.log('LATEST_HETZNER_PURCHASES=' + JSON.stringify(rows));
+              FROM purchases WHERE server_id = ? LIMIT 1
+            `, [target]);
+            console.log('TARGET_PURCHASE=' + JSON.stringify(purchaseRows[0] || null));
+
+            const [historyRows] = await db.pool.query(`
+              SELECT ip_address, first_seen_at, last_seen_at, seen_count, last_event
+              FROM server_ip_history
+              WHERE server_id = ?
+              ORDER BY last_seen_at ASC
+            `, [target]);
+            console.log('TARGET_IP_HISTORY=' + JSON.stringify(historyRows));
+
+            const purchase = purchaseRows[0];
+            if (purchase) {
+              try {
+                const raw = await hetzner.getHetznerServer(dcs[purchase.datacenter], target);
+                console.log('TARGET_PROVIDER=' + JSON.stringify({
+                  id: String(raw?.id || ''),
+                  name: raw?.name || null,
+                  status: raw?.status || null,
+                  ip: raw?.public_net?.ipv4?.ip || null,
+                  ipv4_id: raw?.public_net?.ipv4?.id || null,
+                  datacenter: raw?.datacenter?.name || null,
+                  location: raw?.datacenter?.location?.name || raw?.location?.name || null
+                }));
+              } catch (e) {
+                console.log('TARGET_PROVIDER_ERROR=' + String(e?.code || e?.message || e));
+              }
+            }
             await db.pool.end();
           })().catch(async err => {
             console.error('DIAG_ERROR=' + String(err?.stack || err));
@@ -63,6 +87,6 @@ jobs:
           });
           NODE
 
-          echo '=== RECENT HETZNER RECONCILE LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 900 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|pending_ip_quality|ip_quality|manual_review' | tail -n 220 || true
+          echo '=== TARGET RECONCILE CONTEXT ==='
+          pm2 logs hamoonbot --nostream --lines 1800 2>/dev/null | grep -B 8 -A 12 -E '165810574|Srv-HET-d89ec4' | tail -n 260 || true
           REMOTE
