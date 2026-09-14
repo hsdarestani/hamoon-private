@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths:
       - 'runtime-bootstrap.js'
+      - 'admin-free-test-bootstrap.js'
       - 'services/hetzner-clean-ip-change.js'
       - 'services/hetzner-reconcile-policy.js'
       - 'services/hetzner-location-fallback.js'
+      - 'scripts/validate-admin-free-test.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-manual-change-ip-cap.js'
       - 'scripts/validate-hetzner-lifecycle.js'
@@ -44,9 +46,11 @@ jobs:
         run: |
           set -euo pipefail
           node -c runtime-bootstrap.js
+          node -c admin-free-test-bootstrap.js
           node -c services/hetzner-clean-ip-change.js
           node -c services/hetzner-reconcile-policy.js
           node -c services/hetzner-location-fallback.js
+          node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
           npm run validate:clean-ip-runtime
@@ -76,9 +80,11 @@ jobs:
           git pull --ff-only
           node scripts/restore-server-secret-key.js .env >/dev/null
           node -c runtime-bootstrap.js
+          node -c admin-free-test-bootstrap.js
           node -c services/hetzner-clean-ip-change.js
           node -c services/hetzner-reconcile-policy.js
           node -c services/hetzner-location-fallback.js
+          node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
@@ -94,4 +100,5 @@ jobs:
           echo 'PRODUCTION_QUORUM_FIX=verified'
           echo 'PRODUCTION_FSN_FALLBACK=verified'
           echo 'PRODUCTION_MANUAL_CHANGE_IP_CAP=verified'
+          echo 'PRODUCTION_ADMIN_FREE_TEST_UNLIMITED=verified'
           REMOTE
