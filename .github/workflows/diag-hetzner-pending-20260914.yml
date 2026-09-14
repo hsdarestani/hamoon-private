@@ -38,6 +38,7 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
+          echo "RECHECK=final"
           pm2 show hamoonbot --no-color | grep -E 'status|pid' | head -n 4 || true
           DB_AUTO_INIT=false node - <<'NODE'
           require('dotenv').config();
@@ -90,5 +91,5 @@ jobs:
           NODE
 
           echo '=== DELIVERY / FALLBACK LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 2200 2>/dev/null | grep -E 'HETZNER_LOCATION_FALLBACK|HETZNER_PROVISIONING_RECONCILE|HETZNER_DELIVERY_NOTIFY_FAILED|165810574|Srv-HET-d89ec4|pending Hetzner delivery redacted' | tail -n 520 || true
+          pm2 logs hamoonbot --nostream --lines 2600 2>/dev/null | grep -E 'HETZNER_LOCATION_FALLBACK|HETZNER_PROVISIONING_RECONCILE|HETZNER_DELIVERY_NOTIFY_FAILED|165809400|165811947|165810574|pending Hetzner delivery redacted' | tail -n 650 || true
           REMOTE
