@@ -12,6 +12,8 @@ on:
       - 'services/hetzner-location-fallback.js'
       - 'services/hetzner-location-fallback-fast-bootstrap.js'
       - 'scripts/requeue-fsn-exhausted.js'
+      - 'scripts/recover-failed-change-ip.js'
+      - 'scripts/report-hetzner-ip-recovery.js'
       - 'scripts/validate-admin-free-test.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-manual-change-ip-cap.js'
@@ -26,7 +28,7 @@ permissions:
 jobs:
   validate-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
@@ -56,6 +58,8 @@ jobs:
           node -c services/hetzner-location-fallback.js
           node -c services/hetzner-location-fallback-fast-bootstrap.js
           node -c scripts/requeue-fsn-exhausted.js
+          node -c scripts/recover-failed-change-ip.js
+          node -c scripts/report-hetzner-ip-recovery.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
@@ -75,7 +79,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy and verify production
+      - name: Deploy, recover incidents and verify production
         shell: bash
         run: |
           set -euo pipefail
@@ -94,6 +98,8 @@ jobs:
           node -c services/hetzner-location-fallback.js
           node -c services/hetzner-location-fallback-fast-bootstrap.js
           node -c scripts/requeue-fsn-exhausted.js
+          node -c scripts/recover-failed-change-ip.js
+          node -c scripts/report-hetzner-ip-recovery.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
@@ -109,15 +115,29 @@ jobs:
           echo "PM2_STATUS=$PM2_STATUS"
           test "$PM2_STATUS" = 'online'
 
-          # Requeue only the currently known FSN-exhausted incident rows, and only
-          # if they are still undelivered/manual-review. Already-delivered rows are
-          # untouched, so this step is safe to re-run on later deployments.
-          node scripts/requeue-fsn-exhausted.js \
-            165811947 165819462 165827429 165832501 165832551 165834574
+          # Recover every recent undelivered Hetzner purchase that reached the
+          # IP-quality stage and still has a stored root password. The running bot
+          # reconciler will validate a clean IP and send the normal delivery message.
+          node scripts/requeue-fsn-exhausted.js
+
+          # Recover unresolved customer-initiated Change-IP incidents from the
+          # current incident window. Success is sent directly to the customer by
+          # the bot token; failed candidates are rolled back to the previous IP.
+          timeout 1200 node scripts/recover-failed-change-ip.js
+
+          echo '=== RECOVERY STATE IMMEDIATE ==='
+          node scripts/report-hetzner-ip-recovery.js
+
+          # Give the production reconcile cron time to process requeued purchases
+          # and send normal delivery credentials through the bot.
+          sleep 180
+          echo '=== RECOVERY STATE AFTER 180S ==='
+          node scripts/report-hetzner-ip-recovery.js
 
           echo 'PRODUCTION_QUORUM_FIX=verified'
           echo 'PRODUCTION_FSN_FALLBACK=verified'
           echo 'PRODUCTION_FAST_CLEAN_IP_SEARCH=verified'
           echo 'PRODUCTION_MANUAL_CHANGE_IP_CAP=verified'
+          echo 'PRODUCTION_IP_INCIDENT_RECOVERY=executed'
           echo 'PRODUCTION_ADMIN_FREE_TEST_UNLIMITED=verified'
           REMOTE
