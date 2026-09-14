@@ -89,6 +89,6 @@ jobs:
           })().catch(err => { console.error(err); process.exit(1); });
           NODE
 
-          echo '=== FSN FALLBACK LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 1400 2>/dev/null | grep -E 'HETZNER_LOCATION_FALLBACK|HETZNER_PROVISIONING_RECONCILE|pending Hetzner delivery redacted' | tail -n 320 || true
+          echo '=== DELIVERY / FALLBACK LOGS ==='
+          pm2 logs hamoonbot --nostream --lines 2200 2>/dev/null | grep -E 'HETZNER_LOCATION_FALLBACK|HETZNER_PROVISIONING_RECONCILE|HETZNER_DELIVERY_NOTIFY_FAILED|165810574|Srv-HET-d89ec4|pending Hetzner delivery redacted' | tail -n 520 || true
           REMOTE
