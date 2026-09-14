@@ -42,74 +42,19 @@ jobs:
 
           node - <<'NODE'
           require('dotenv').config();
-          const runtime = require('./runtime-bootstrap');
-          const strict = require('./services/check-host-strict-fetch');
-          runtime.applyRuntimeSafetyDefaults();
-          strict.installStrictCheckHostFetch();
           const db = require('./db');
-          const dcs = require('./datacenters');
-          const cloud = require('./cloud-api');
-          const lifecycle = require('./services/hetzner-lifecycle');
-
           (async () => {
             const [rows] = await db.pool.query(`
               SELECT telegram_id, server_id, server_name, datacenter, status,
-                     public_ip, ip_quality_attempts, ip_quality_summary,
-                     created_at, lifecycle_updated_at, delivered_at
+                     public_ip, provider_status, provider_status_checked_at,
+                     ip_quality_attempts, ip_quality_checked_at, ip_quality_summary,
+                     created_at, updated_at, lifecycle_updated_at, delivered_at
               FROM purchases
               WHERE datacenter LIKE 'hetzner%'
               ORDER BY created_at DESC
-              LIMIT 8
+              LIMIT 12
             `);
             console.log('LATEST_HETZNER_PURCHASES=' + JSON.stringify(rows));
-
-            const pending = rows.filter(r => ['provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review'].includes(String(r.status || '').toLowerCase()));
-            for (const row of pending.slice(0, 4)) {
-              const dc = dcs[row.datacenter];
-              const result = {
-                server_id: String(row.server_id),
-                server_name: row.server_name,
-                datacenter: row.datacenter,
-                db_status: row.status,
-                db_ip: row.public_ip,
-                quality_attempts: Number(row.ip_quality_attempts || 0),
-                quality_summary: row.ip_quality_summary || null,
-                created_at: row.created_at,
-                lifecycle_updated_at: row.lifecycle_updated_at
-              };
-              try {
-                const server = await cloud.getServer(dc, null, row.server_id);
-                result.provider_status = server?.status || server?.state || null;
-                result.provider_ip = lifecycle.publicIpv4(server) || server?.public_ip || null;
-              } catch (e) {
-                result.provider_error = String(e?.code || e?.message || e).slice(0, 120);
-              }
-              const ip = result.provider_ip || row.public_ip;
-              if (ip) {
-                try {
-                  const q = await lifecycle.checkIpQuality(ip, {
-                    iranCount: 6,
-                    iranMin: 3,
-                    globalCount: 6,
-                    globalRatio: 0.67,
-                    polls: 15,
-                    pollDelayMs: 1500
-                  });
-                  result.live_quality = {
-                    ok: !!q?.ok,
-                    checked: !!q?.checked,
-                    definitive: !!q?.definitive,
-                    reason: q?.reason || null,
-                    iran: q?.iran || null,
-                    global: q?.global || null
-                  };
-                } catch (e) {
-                  result.live_quality_error = String(e?.message || e).slice(0, 120);
-                }
-              }
-              console.log('PENDING_DIAG=' + JSON.stringify(result));
-            }
-
             await db.pool.end();
           })().catch(async err => {
             console.error('DIAG_ERROR=' + String(err?.stack || err));
@@ -119,5 +64,5 @@ jobs:
           NODE
 
           echo '=== RECENT HETZNER RECONCILE LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 700 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|manual review|pending_ip_quality' | tail -n 160 || true
+          pm2 logs hamoonbot --nostream --lines 900 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|pending_ip_quality|ip_quality|manual_review' | tail -n 220 || true
           REMOTE
