@@ -1,0 +1,56 @@
+name: Diagnose live IP recovery
+
+on:
+  push:
+    branches: [diag/live-ip-pool-20260914]
+    paths:
+      - '.github/workflows/diag-live-ip-recovery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect production recovery state
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== PRODUCTION HEAD ==='
+          git rev-parse HEAD
+          echo '=== PM2 ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time,uptime:p?.pm2_env?.pm_uptime},null,2))})"
+          echo '=== RECOVERY REPORT ==='
+          if [ -f scripts/report-hetzner-ip-recovery.js ]; then
+            node scripts/report-hetzner-ip-recovery.js
+          else
+            echo 'REPORT_SCRIPT_NOT_DEPLOYED_YET'
+          fi
+          echo '=== RECENT RECOVERY EVENTS ==='
+          PM2_JSON="$(pm2 jlist)"
+          OUT_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_out_log_path||'')})")"
+          ERR_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_err_log_path||'')})")"
+          { [ -n "$OUT_LOG" ] && tail -n 3000 "$OUT_LOG" || true; [ -n "$ERR_LOG" ] && tail -n 3000 "$ERR_LOG" || true; } | grep -E 'HETZNER_(LOCATION_FALLBACK|PROVISIONING|DELIVERY|CHANGE_IP|IP_POOL)|fsn_location_fallback_exhausted|manual_review' | tail -n 600 || true
+          REMOTE
