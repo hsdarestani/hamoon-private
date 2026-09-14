@@ -38,9 +38,12 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
+          pm2 show hamoonbot --no-color | grep -E 'status|pid' | head -n 4 || true
           DB_AUTO_INIT=false node - <<'NODE'
           require('dotenv').config();
           const mysql = require('mysql2/promise');
+          const dcs = require('./datacenters');
+          const hetzner = require('./Hetzner/hetzner-api');
           (async () => {
             const pool = mysql.createPool({
               host: process.env.DB_HOST || 'localhost',
@@ -49,34 +52,43 @@ jobs:
               database: process.env.DB_NAME || 'hamooncloud_db',
               connectionLimit: 2
             });
-            const [columns] = await pool.query(`
-              SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY
-              FROM INFORMATION_SCHEMA.COLUMNS
-              WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'server_id'
-              ORDER BY TABLE_NAME
-            `);
-            console.log('SERVER_ID_COLUMNS=' + JSON.stringify(columns));
-            const [fks] = await pool.query(`
-              SELECT TABLE_NAME, COLUMN_NAME, CONSTRAINT_NAME,
-                     REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-              FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-              WHERE TABLE_SCHEMA = DATABASE()
-                AND (COLUMN_NAME = 'server_id' OR REFERENCED_COLUMN_NAME = 'server_id')
-                AND REFERENCED_TABLE_NAME IS NOT NULL
-              ORDER BY TABLE_NAME, CONSTRAINT_NAME
-            `);
-            console.log('SERVER_ID_FKS=' + JSON.stringify(fks));
-            const [pending] = await pool.query(`
-              SELECT telegram_id, server_id, server_name, datacenter, status, flavor_id, os_label,
-                     ssh_key_id, public_ip, ip_quality_attempts, delivered_at, created_at
+            const [rows] = await pool.query(`
+              SELECT telegram_id, server_id, server_name, datacenter, status,
+                     public_ip, ip_quality_attempts, ip_quality_summary,
+                     created_at, updated_at, delivered_at
               FROM purchases
               WHERE datacenter = 'hetzner'
-                AND delivered_at IS NULL
-                AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review')
+                AND created_at >= '2026-09-14 10:30:00'
               ORDER BY created_at ASC
             `);
-            console.log('PENDING_GERMANY=' + JSON.stringify(pending));
+            console.log('RECENT_GERMANY=' + JSON.stringify(rows));
+            for (const row of rows) {
+              try {
+                const raw = await hetzner.getHetznerServer(dcs[row.datacenter], row.server_id);
+                console.log('PROVIDER=' + JSON.stringify({
+                  telegram_id: row.telegram_id,
+                  server_id: row.server_id,
+                  server_name: row.server_name,
+                  status: row.status,
+                  delivered_at: row.delivered_at,
+                  ip: raw?.public_net?.ipv4?.ip || null,
+                  provider_status: raw?.status || null,
+                  location: raw?.datacenter?.location?.name || raw?.location?.name || null
+                }));
+              } catch (error) {
+                console.log('PROVIDER=' + JSON.stringify({
+                  telegram_id: row.telegram_id,
+                  server_id: row.server_id,
+                  status: row.status,
+                  delivered_at: row.delivered_at,
+                  provider_error: String(error?.code || error?.message || error).slice(0, 100)
+                }));
+              }
+            }
             await pool.end();
           })().catch(err => { console.error(err); process.exit(1); });
           NODE
+
+          echo '=== FSN FALLBACK LOGS ==='
+          pm2 logs hamoonbot --nostream --lines 1400 2>/dev/null | grep -E 'HETZNER_LOCATION_FALLBACK|HETZNER_PROVISIONING_RECONCILE|pending Hetzner delivery redacted' | tail -n 320 || true
           REMOTE
