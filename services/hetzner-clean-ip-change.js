@@ -92,16 +92,17 @@ async function verifyCleanCandidate(ip, args = {}) {
 }
 
 async function changeHetznerPublicIp(args) {
-  const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 20, 1, 30);
-  // A Check-Host round can occasionally return no conclusive Iranian probes while
-  // all global probes are healthy. Provisioning already tolerates this by rotating
-  // to another candidate; manual Change-IP must behave the same way instead of
-  // aborting after the first inconclusive candidate.
+  // Manual Change-IP operates on an already-delivered VM. Unlike initial
+  // provisioning, it cannot safely rebuild the customer's machine in another
+  // Hetzner location just to obtain a different address. Bound the number of
+  // full power-cycle + SSH + Iran-quality candidate rounds so the request cannot
+  // spend tens of minutes cycling through a dirty local IP pool.
+  const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 8);
   const maxInconclusiveCandidates = clampInt(
     process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
-    4,
+    2,
     1,
-    10
+    4
   );
   let firstOldIp = null;
   let lastCandidateIp = null;
@@ -207,6 +208,7 @@ async function changeHetznerPublicIp(args) {
   error.currentIp = firstOldIp || null;
   error.lastCandidateIp = lastCandidateIp;
   error.verification = lastVerification;
+  error.attempts = maxAttempts;
   throw error;
 }
 
@@ -218,7 +220,7 @@ function userMessageForError(error) {
   }
   if (code === 'NO_CLEAN_IPV4_AVAILABLE') {
     const suffix = error?.currentIp ? `\nIP قبلی حفظ شد: ${error.currentIp}` : '';
-    return `چندین IP جدید بررسی شد اما هیچ‌کدام هم‌زمان SSH و معیار دسترسی از ایران را پاس نکردند. هیچ IP تأییدنشده‌ای روی سرور نهایی نشد.${suffix}`;
+    return `چند IP جدید بررسی شد اما فعلاً هیچ IP سالمی در لوکیشن فعلی پیدا نشد. عملیات متوقف شد و هیچ IP تأییدنشده‌ای روی سرور نهایی نشد.${suffix}`;
   }
   if (code === 'IP_CHANGE_ROLLBACK_FAILED') {
     return 'IP جدید تأیید نشد و بازگردانی خودکار کامل نشد. برای جلوگیری از تغییر بیشتر، عملیات متوقف شد؛ لطفاً با پشتیبانی تماس بگیرید.';
