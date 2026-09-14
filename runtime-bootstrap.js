@@ -25,6 +25,12 @@ const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmat
 const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
+const { installFastLocationFallbackModule } = require('./services/hetzner-location-fallback-fast-bootstrap');
+
+// Reconcile policy imports the location-fallback module at module load time. Install
+// the accelerated version first so every reconcile cycle uses the same temporary
+// FSN VM while searching multiple clean IPv4 candidates.
+installFastLocationFallbackModule();
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
 const DELIVERED_STATUS_REPAIR_MARK = Symbol.for('hamoon.deliveredStatusRepairInstalled');
@@ -73,8 +79,10 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '1',
     HETZNER_CHANGE_IP_QUALITY_POLLS: '15',
     HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS: '1500',
+    HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000',
     HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
     HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
+    HETZNER_PROVISIONING_QUALITY_SETTLE_MS: '6000',
     HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000',
     HETZNER_PENDING_RECOVERY_READY_TIMEOUT_MS: '90000'
   };
@@ -203,5 +211,6 @@ module.exports = {
   installCleanIpChangeModule,
   installDeliveredStatusRepair,
   installSafeLifecycleModule,
+  installFastLocationFallbackModule,
   run
 };
