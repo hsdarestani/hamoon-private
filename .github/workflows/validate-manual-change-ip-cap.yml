@@ -6,8 +6,10 @@ on:
     paths:
       - 'runtime-bootstrap.js'
       - 'services/hetzner-clean-ip-change.js'
+      - 'services/hetzner-lifecycle-safe-bootstrap.js'
       - 'scripts/validate-manual-change-ip-cap.js'
       - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-quality-readiness.js'
       - '.github/workflows/deploy-hetzner-iran-quality-quorum.yml'
       - '.github/workflows/validate-manual-change-ip-cap.yml'
 
@@ -27,6 +29,9 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node -c runtime-bootstrap.js
       - run: node -c services/hetzner-clean-ip-change.js
+      - run: node -c services/hetzner-lifecycle-safe-bootstrap.js
+      - run: node -c scripts/validate-quality-readiness.js
       - run: node scripts/validate-manual-change-ip-cap.js
+      - run: node scripts/validate-quality-readiness.js
       - run: npm run validate:clean-ip-runtime
       - run: npm run validate:hetzner-lifecycle
