@@ -1,0 +1,68 @@
+name: Repair stale replaced provider-missing purchase
+
+on:
+  push:
+    branches: [diag/live-ip-pool-20260914]
+    paths:
+      - '.github/workflows/repair-stale-provider-missing-20260914.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Repair only the proven replaced stale row
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const TARGET_SERVER='165832551';
+          const TARGET_USER='7054970886';
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'localhost',user:process.env.DB_USER||'root',password:process.env.DB_PASSWORD||'',database:process.env.DB_NAME||'hamooncloud_db'});
+            try {
+              await c.beginTransaction();
+              const [targets]=await c.query(`SELECT * FROM purchases WHERE server_id=? AND telegram_id=? FOR UPDATE`,[TARGET_SERVER,TARGET_USER]);
+              const target=targets[0];
+              if (!target) throw new Error('TARGET_NOT_FOUND');
+              if (String(target.status)!=='provider_missing' || target.delivered_at) throw new Error('TARGET_NOT_STALE_PROVIDER_MISSING');
+              const [replacements]=await c.query(`SELECT server_id,status,delivered_at,public_ip,ip_quality_summary,created_at FROM purchases WHERE telegram_id=? AND server_id<>? AND created_at>? AND delivered_at IS NOT NULL AND LOWER(status)='active' AND ip_quality_summary LIKE '%reason=ok%' ORDER BY created_at ASC`,[TARGET_USER,TARGET_SERVER,target.created_at]);
+              if (!replacements.length) throw new Error('NO_CONFIRMED_CLEAN_REPLACEMENT');
+              const [refunds]=await c.query(`SELECT amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? AND type='server_deletion_refund' AND description LIKE ? AND timestamp>=? ORDER BY timestamp ASC`,[TARGET_USER,`%${target.server_name}%`,target.created_at]);
+              if (!refunds.length) throw new Error('NO_OLD_PURCHASE_REFUND_PROOF');
+              const replacement=replacements[0];
+              await c.query(`UPDATE purchases SET status='deleted', deleted_at=COALESCE(deleted_at,NOW()), lifecycle_error_code='replaced_clean_delivery', lifecycle_updated_at=NOW(), updated_at=NOW() WHERE server_id=? AND telegram_id=? AND status='provider_missing' AND delivered_at IS NULL`,[TARGET_SERVER,TARGET_USER]);
+              await c.commit();
+              console.log('STALE_PROVIDER_MISSING_REPAIRED='+JSON.stringify({old_server_id:TARGET_SERVER,replacement_server_id:replacement.server_id,replacement_ip:replacement.public_ip,replacement_quality:replacement.ip_quality_summary,refund_type:refunds[0].type}));
+            } catch(e) {
+              await c.rollback().catch(()=>{});
+              throw e;
+            } finally { await c.end(); }
+          })().catch(e=>{console.error('STALE_PROVIDER_MISSING_REPAIR_FAILED='+e.message);process.exit(1)});
+          NODE
+          REMOTE
