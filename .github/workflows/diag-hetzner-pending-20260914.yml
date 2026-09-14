@@ -1,0 +1,121 @@
+name: Diagnose latest pending Hetzner deliveries
+
+on:
+  push:
+    branches: [diag/hetzner-pending-20260914]
+    paths:
+      - '.github/workflows/diag-hetzner-pending-20260914.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_diag_key
+          chmod 600 ~/.ssh/hamoon_diag_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Read-only production diagnosis
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_diag_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo "PROD_HEAD=$(git rev-parse HEAD)"
+          echo "PM2_STATUS=$(pm2 jlist | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})\")"
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const runtime = require('./runtime-bootstrap');
+          const strict = require('./services/check-host-strict-fetch');
+          runtime.applyRuntimeSafetyDefaults();
+          strict.installStrictCheckHostFetch();
+          const db = require('./db');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const lifecycle = require('./services/hetzner-lifecycle');
+
+          (async () => {
+            const [rows] = await db.pool.query(`
+              SELECT id, telegram_id, server_id, server_name, datacenter, status,
+                     public_ip, ip_quality_attempts, ip_quality_summary,
+                     created_at, lifecycle_updated_at, delivered_at
+              FROM purchases
+              WHERE datacenter LIKE 'hetzner%'
+              ORDER BY id DESC
+              LIMIT 8
+            `);
+            console.log('LATEST_HETZNER_PURCHASES=' + JSON.stringify(rows));
+
+            const pending = rows.filter(r => ['provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review'].includes(String(r.status || '').toLowerCase()));
+            for (const row of pending.slice(0, 4)) {
+              const dc = dcs[row.datacenter];
+              const result = {
+                server_id: String(row.server_id),
+                server_name: row.server_name,
+                datacenter: row.datacenter,
+                db_status: row.status,
+                db_ip: row.public_ip,
+                quality_attempts: Number(row.ip_quality_attempts || 0),
+                quality_summary: row.ip_quality_summary || null
+              };
+              try {
+                const server = await cloud.getServer(dc, null, row.server_id);
+                result.provider_status = server?.status || server?.state || null;
+                result.provider_ip = lifecycle.publicIpv4(server) || server?.public_ip || null;
+              } catch (e) {
+                result.provider_error = String(e?.code || e?.message || e).slice(0, 120);
+              }
+              const ip = result.provider_ip || row.public_ip;
+              if (ip) {
+                try {
+                  const q = await lifecycle.checkIpQuality(ip, {
+                    iranCount: 6,
+                    iranMin: 3,
+                    globalCount: 6,
+                    globalRatio: 0.67,
+                    polls: 15,
+                    pollDelayMs: 1500
+                  });
+                  result.live_quality = {
+                    ok: !!q?.ok,
+                    checked: !!q?.checked,
+                    definitive: !!q?.definitive,
+                    reason: q?.reason || null,
+                    iran: q?.iran || null,
+                    global: q?.global || null
+                  };
+                } catch (e) {
+                  result.live_quality_error = String(e?.message || e).slice(0, 120);
+                }
+              }
+              console.log('PENDING_DIAG=' + JSON.stringify(result));
+            }
+
+            await db.pool.end();
+          })().catch(async err => {
+            console.error('DIAG_ERROR=' + String(err?.stack || err));
+            try { await db.pool.end(); } catch (_) {}
+            process.exit(1);
+          });
+          NODE
+
+          echo '=== RECENT HETZNER RECONCILE LOGS ==='
+          pm2 logs hamoonbot --nostream --lines 500 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|manual review|pending_ip_quality' | tail -n 120 || true
+          REMOTE
