@@ -53,12 +53,12 @@ jobs:
 
           (async () => {
             const [rows] = await db.pool.query(`
-              SELECT id, telegram_id, server_id, server_name, datacenter, status,
+              SELECT telegram_id, server_id, server_name, datacenter, status,
                      public_ip, ip_quality_attempts, ip_quality_summary,
                      created_at, lifecycle_updated_at, delivered_at
               FROM purchases
               WHERE datacenter LIKE 'hetzner%'
-              ORDER BY id DESC
+              ORDER BY created_at DESC
               LIMIT 8
             `);
             console.log('LATEST_HETZNER_PURCHASES=' + JSON.stringify(rows));
@@ -73,7 +73,9 @@ jobs:
                 db_status: row.status,
                 db_ip: row.public_ip,
                 quality_attempts: Number(row.ip_quality_attempts || 0),
-                quality_summary: row.ip_quality_summary || null
+                quality_summary: row.ip_quality_summary || null,
+                created_at: row.created_at,
+                lifecycle_updated_at: row.lifecycle_updated_at
               };
               try {
                 const server = await cloud.getServer(dc, null, row.server_id);
@@ -117,5 +119,5 @@ jobs:
           NODE
 
           echo '=== RECENT HETZNER RECONCILE LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 500 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|manual review|pending_ip_quality' | tail -n 120 || true
+          pm2 logs hamoonbot --nostream --lines 700 2>/dev/null | grep -E 'HETZNER_PROVISIONING_RECONCILE|HETZNER_PROVISIONING_IP_|hetzner_delivery_pending|manual review|pending_ip_quality' | tail -n 160 || true
           REMOTE
