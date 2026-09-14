@@ -1,0 +1,32 @@
+name: Validate manual Hetzner Change-IP cap
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime-bootstrap.js'
+      - 'services/hetzner-clean-ip-change.js'
+      - 'scripts/validate-manual-change-ip-cap.js'
+      - 'scripts/validate-clean-ip-runtime.js'
+      - '.github/workflows/deploy-hetzner-iran-quality-quorum.yml'
+      - '.github/workflows/validate-manual-change-ip-cap.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node -c runtime-bootstrap.js
+      - run: node -c services/hetzner-clean-ip-change.js
+      - run: node scripts/validate-manual-change-ip-cap.js
+      - run: npm run validate:clean-ip-runtime
+      - run: npm run validate:hetzner-lifecycle
