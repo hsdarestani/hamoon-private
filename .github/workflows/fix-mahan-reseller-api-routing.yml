@@ -1,0 +1,46 @@
+name: Fix Mahan reseller extension routing
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-mahan-reseller-api-routing.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch isolated extension auth
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('reseller-api-extensions.js')
+          s=p.read_text()
+          s=s.replace("    req.apiClient = client;\n    next();", "    req.apiClient = client;\n    if (!res.hasHeader('X-Request-Id')) res.setHeader('X-Request-Id', crypto.randomUUID());\n    next();", 1)
+          s=s.replace("  router.use(auth);\n", "")
+          replacements={
+            "router.post('/servers/:id/billing-cycle', ownedPurchase,": "router.post('/servers/:id/billing-cycle', auth, ownedPurchase,",
+            "router.get('/servers/:id/rebuild-images', ownedPurchase,": "router.get('/servers/:id/rebuild-images', auth, ownedPurchase,",
+            "router.post('/servers/:id/traffic-addons', ownedPurchase,": "router.post('/servers/:id/traffic-addons', auth, ownedPurchase,",
+            "router.post('/servers/:id/upgrade-safe', ownedPurchase,": "router.post('/servers/:id/upgrade-safe', auth, ownedPurchase,",
+          }
+          for old,new in replacements.items():
+              if new not in s:
+                  if old not in s: raise SystemExit(f'marker missing: {old}')
+                  s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          node -c reseller-api-extensions.js
+          git diff --check
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add reseller-api-extensions.js
+          git commit -m 'Isolate Mahan reseller extension routes'
+          git push origin HEAD:main
