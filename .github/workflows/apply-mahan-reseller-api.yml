@@ -1,0 +1,51 @@
+name: Apply Mahan reseller API mount
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-mahan-reseller-api.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mount reseller extension router
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('server.js')
+          s = p.read_text()
+          import_line = "const { createCustomerApiRouter } = require('./customer-api');"
+          import_ext = "const { createResellerApiExtensionsRouter } = require('./reseller-api-extensions');"
+          if import_ext not in s:
+              if import_line not in s:
+                  raise SystemExit('customer-api import marker not found')
+              s = s.replace(import_line, import_line + '\n' + import_ext, 1)
+          mount_line = "app.use('/api/v1', createCustomerApiRouter());"
+          mount_ext = "app.use('/api/v1', createResellerApiExtensionsRouter());"
+          if mount_ext not in s:
+              if mount_line not in s:
+                  raise SystemExit('customer-api mount marker not found')
+              s = s.replace(mount_line, mount_ext + '\n' + mount_line, 1)
+          p.write_text(s)
+          PY
+          node -c reseller-api-extensions.js
+          node -c server.js
+          git diff --check
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then
+            echo 'Already mounted.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server.js
+          git commit -m 'Mount Mahan reseller lifecycle API extensions'
+          git push origin HEAD:main
