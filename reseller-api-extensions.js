@@ -82,6 +82,7 @@ async function auth(req, res, next) {
       return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
     }
     req.apiClient = client;
+    if (!res.hasHeader('X-Request-Id')) res.setHeader('X-Request-Id', crypto.randomUUID());
     next();
   } catch (error) {
     next(error);
@@ -116,9 +117,8 @@ async function waitAction(dc, action) {
 function createResellerApiExtensionsRouter() {
   const router = express.Router();
   router.use(express.json({ limit: '64kb' }));
-  router.use(auth);
 
-  router.post('/servers/:id/billing-cycle', ownedPurchase, async (req, res, next) => {
+  router.post('/servers/:id/billing-cycle', auth, ownedPurchase, async (req, res, next) => {
     try {
       const duration = String(requestInput(req).duration || '').trim().toLowerCase();
       if (!['hourly', 'monthly'].includes(duration)) return apiError(res, 400, 'INVALID_DURATION', 'دوره پرداخت معتبر نیست.');
@@ -142,7 +142,7 @@ function createResellerApiExtensionsRouter() {
     } catch (error) { next(error); }
   });
 
-  router.get('/servers/:id/rebuild-images', ownedPurchase, async (req, res, next) => {
+  router.get('/servers/:id/rebuild-images', auth, ownedPurchase, async (req, res, next) => {
     try {
       const images = await listCompatibleImages(req.dc, req.purchase.flavor_id);
       const allowed = images.filter(image => isAllowed(req.apiClient.allowed_images, image.id) || isAllowed(req.apiClient.allowed_images, image.name));
@@ -150,7 +150,7 @@ function createResellerApiExtensionsRouter() {
     } catch (error) { next(error); }
   });
 
-  router.post('/servers/:id/traffic-addons', ownedPurchase, async (req, res, next) => {
+  router.post('/servers/:id/traffic-addons', auth, ownedPurchase, async (req, res, next) => {
     try {
       const input = requestInput(req);
       const packageTb = Number(input.package_tb || input.packageTb || 0);
@@ -193,7 +193,7 @@ function createResellerApiExtensionsRouter() {
     } catch (error) { next(error); }
   });
 
-  router.post('/servers/:id/upgrade-safe', ownedPurchase, async (req, res, next) => {
+  router.post('/servers/:id/upgrade-safe', auth, ownedPurchase, async (req, res, next) => {
     let poweredOff = false;
     let wasRunning = false;
     try {
