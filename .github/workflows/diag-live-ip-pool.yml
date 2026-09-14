@@ -13,7 +13,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
@@ -35,14 +35,17 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' timeout 180 bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo '=== HEAD ==='
           git rev-parse HEAD
           echo '=== PM2 ==='
-          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot'); console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time,uptime:p?.pm2_env?.pm_uptime},null,2));})"
+          PM2_JSON="$(pm2 jlist)"
+          printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot'); console.log(JSON.stringify({status:p?.pm2_env?.status,restarts:p?.pm2_env?.restart_time,uptime:p?.pm2_env?.pm_uptime,out:p?.pm2_env?.pm_out_log_path,err:p?.pm2_env?.pm_err_log_path},null,2));})"
+          OUT_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_out_log_path||'')})")"
+          ERR_LOG="$(printf '%s' "$PM2_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const p=JSON.parse(s).find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.pm_err_log_path||'')})")"
           echo '=== RECENT PURCHASES (4h) ==='
           node - <<'NODE'
           require('dotenv').config();
@@ -61,7 +64,7 @@ jobs:
           })().catch(e=>{console.error('DB_DIAG_FAILED='+e.message);process.exitCode=1});
           NODE
           echo '=== RECENT HETZNER EVENTS ==='
-          pm2 logs hamoonbot --nostream --lines 5000 2>&1 | grep -E 'HETZNER_(LOCATION_FALLBACK|CHANGE_IP|IP_QUALITY|PROVISION|DELIVER)|manual_review|fsn_location_fallback_exhausted|ip_quality_exhausted' | tail -n 1200 || true
+          { [ -n "$OUT_LOG" ] && tail -n 3500 "$OUT_LOG" || true; [ -n "$ERR_LOG" ] && tail -n 3500 "$ERR_LOG" || true; } | grep -E 'HETZNER_(LOCATION_FALLBACK|CHANGE_IP|IP_QUALITY|PROVISION|DELIVER)|manual_review|fsn_location_fallback_exhausted|ip_quality_exhausted' | tail -n 1200 || true
           echo '=== CHECK-HOST IR NODES ==='
-          curl -fsSL -H 'Accept: application/json' https://check-host.net/nodes/hosts | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const a=Object.entries(j.nodes||{}).filter(([,v])=>String(v.location?.[0]||'').toLowerCase()==='ir');console.log('IR_NODE_COUNT='+a.length); console.log(a.map(([k,v])=>k+' '+(v.location||[]).join('/')).join('\n'));})"
+          curl --max-time 15 -fsSL -H 'Accept: application/json' https://check-host.net/nodes/hosts | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const a=Object.entries(j.nodes||{}).filter(([,v])=>String(v.location?.[0]||'').toLowerCase()==='ir');console.log('IR_NODE_COUNT='+a.length); console.log(a.map(([k,v])=>k+' '+(v.location||[]).join('/')).join('\n'));})" || true
           REMOTE
