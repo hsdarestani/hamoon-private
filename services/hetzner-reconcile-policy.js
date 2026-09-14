@@ -1,5 +1,10 @@
 'use strict';
 
+const {
+  shouldRelocateToFsn,
+  relocatePendingPurchase
+} = require('./hetzner-location-fallback');
+
 const INSTALL_MARK = Symbol.for('hamoon.hetznerReconcilePolicyInstalled');
 const inconclusiveCounts = new Map();
 let reconcileRunning = false;
@@ -45,12 +50,71 @@ function installHetznerReconcilePolicy() {
         2,
         Number(process.env.HETZNER_IP_QUALITY_INCONCLUSIVE_ROTATE_PROBES || 2)
       );
+      const locationFallbackEnabled = process.env.HETZNER_GERMANY_LOCATION_FALLBACK_ENABLED !== 'false';
+      const locationFallbackThreshold = Math.max(
+        1,
+        Number(process.env.HETZNER_GERMANY_LOCATION_FALLBACK_AFTER_ATTEMPTS || 2)
+      );
 
       const output = [];
       for (const result of results || []) {
         if (!result?.server_id) {
           output.push(result);
           continue;
+        }
+
+        // Once a still-undelivered Germany/NBG purchase has burned through a few
+        // dirty candidates, stop cycling inside the same NBG pool. Build a fresh
+        // FSN VM, validate SSH + Iran/global reachability, atomically switch the
+        // purchase to it and let the existing delivery notifier send credentials.
+        if (locationFallbackEnabled && result.ready !== true && db?.getPurchaseForOwner) {
+          const purchase = await db.getPurchaseForOwner(
+            result.telegram_id,
+            result.server_id,
+            result.datacenter
+          ).catch(() => null);
+
+          if (shouldRelocateToFsn({
+            result,
+            purchase,
+            threshold: locationFallbackThreshold
+          })) {
+            const dc = resolveDatacenter?.(result.datacenter, purchase || result);
+            if (dc) {
+              try {
+                const relocated = await relocatePendingPurchase({
+                  db,
+                  dc,
+                  lifecycle,
+                  purchase,
+                  targetLocation: process.env.HETZNER_GERMANY_LOCATION_FALLBACK_TARGET || 'fsn1',
+                  maxCandidates: Number(process.env.HETZNER_FSN_LOCATION_FALLBACK_CANDIDATES || 3),
+                  timeoutMs: Number(process.env.HETZNER_LOCATION_FALLBACK_READY_TIMEOUT_MS || 150000)
+                });
+
+                if (!relocated?.skipped) {
+                  clearServer(result.server_id);
+                  if (relocated?.server_id) clearServer(relocated.server_id);
+                  output.push({ ...result, ...relocated });
+                  continue;
+                }
+              } catch (error) {
+                console.warn('[HETZNER_LOCATION_FALLBACK_FAILED]', {
+                  server_id: String(result.server_id),
+                  user_id: String(result.telegram_id || ''),
+                  code: error?.code || null,
+                  message: String(error?.message || error).slice(0, 120)
+                });
+                output.push({
+                  ...result,
+                  ready: false,
+                  reason: 'location_fallback_failed',
+                  error: String(error?.message || error).slice(0, 120)
+                });
+                continue;
+              }
+            }
+          }
         }
 
         if (result.ready || result.ip_rotated || result.status !== 'pending_ip_quality') {

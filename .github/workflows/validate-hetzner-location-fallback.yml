@@ -1,0 +1,37 @@
+name: Validate Hetzner location fallback
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/hetzner-reconcile-policy.js'
+      - 'services/hetzner-location-fallback.js'
+      - 'scripts/validate-hetzner-location-fallback.js'
+      - '.github/workflows/validate-hetzner-location-fallback.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/hetzner-reconcile-policy.js'
+      - 'services/hetzner-location-fallback.js'
+      - 'scripts/validate-hetzner-location-fallback.js'
+      - '.github/workflows/validate-hetzner-location-fallback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node -c services/hetzner-location-fallback.js
+      - run: node -c services/hetzner-reconcile-policy.js
+      - run: node scripts/validate-hetzner-location-fallback.js
+      - run: npm run validate:clean-ip-runtime
+      - run: npm run validate:hetzner-lifecycle
