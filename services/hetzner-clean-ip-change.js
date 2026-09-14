@@ -14,6 +14,14 @@ function clampInt(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function qualityGlobalReady(quality) {
+  const selected = Number(quality?.global?.selected || 0);
+  const success = Number(quality?.global?.success || 0);
+  const configuredRatio = Math.min(1, Math.max(0.5, Number(process.env.HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO || 0.67)));
+  const required = Number(quality?.global?.required || Math.max(1, Math.ceil(selected * configuredRatio)));
+  return selected > 0 && success >= required;
+}
+
 function tcpProbeOnce(ip, port, timeoutMs) {
   return new Promise(resolve => {
     const socket = net.createConnection({ host: ip, port });
@@ -51,13 +59,10 @@ async function probeSshReachability(ip, options = {}) {
 
 async function probeIranQuality(ip) {
   // A Primary IPv4 swap includes a power cycle. Give the guest network a short
-  // fixed settle window before asking external probes; otherwise an IP can look
-  // globally dead for a few seconds simply because the OS has not brought the
-  // interface up yet.
+  // fixed settle window before asking external probes.
   const settleMs = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_SETTLE_MS, 6000, 0, 30000);
   if (settleMs > 0) await sleep(settleMs);
 
-  // Keep one Check-Host request alive long enough for Iranian probes to complete.
   const probeAttempts = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS, 1, 1, 3);
   const polls = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLLS, 15, 6, 24);
   const pollDelayMs = clampInt(process.env.HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS, 1500, 750, 4000);
@@ -71,13 +76,18 @@ async function probeIranQuality(ip) {
 }
 
 async function verifyCleanCandidate(ip, args = {}) {
-  // Reject a dirty Iran IP before spending up to tens of seconds waiting for SSH.
-  // SSH is only a delivery-health gate after the IP itself has passed the strict
-  // Iran/global quorum. This keeps the same fail-closed policy but makes bad
-  // candidates much cheaper to discard.
+  // Quality-first remains the fast path: when the global quorum can already see
+  // the address but Iran cannot, the IP is definitively dirty and we reject it
+  // without burning time on SSH. When *global and Iran are both dead* directly
+  // after the Hetzner power-cycle, however, that is a guest/network-readiness
+  // signal, not evidence that the IP is filtered in Iran. Wait briefly for the
+  // guest, then re-run the quality probe before deciding.
   const qualityProbe = typeof args.qualityProbe === 'function' ? args.qualityProbe : probeIranQuality;
-  const quality = await qualityProbe(ip);
-  if (!quality?.ok) {
+  const customSshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : null;
+  let quality = await qualityProbe(ip);
+  let ssh = null;
+
+  if (!quality?.ok && qualityGlobalReady(quality)) {
     return {
       ok: false,
       definitive: Boolean(quality?.definitive),
@@ -87,10 +97,52 @@ async function verifyCleanCandidate(ip, args = {}) {
     };
   }
 
-  const customSshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : null;
-  const ssh = customSshProbe
-    ? await customSshProbe(ip)
-    : await probeSshReachability(ip, { settleMs: 0 });
+  if (!quality?.ok) {
+    ssh = customSshProbe
+      ? await customSshProbe(ip)
+      : await probeSshReachability(ip, {
+          settleMs: 0,
+          attempts: clampInt(process.env.HETZNER_CHANGE_IP_READINESS_SSH_ATTEMPTS, 5, 1, 8),
+          timeoutMs: clampInt(process.env.HETZNER_CHANGE_IP_READINESS_SSH_TIMEOUT_MS, 4000, 1000, 10000),
+          retryDelayMs: clampInt(process.env.HETZNER_CHANGE_IP_READINESS_SSH_RETRY_DELAY_MS, 3000, 500, 10000)
+        });
+
+    if (!ssh?.ok) {
+      return {
+        ok: false,
+        definitive: false,
+        reason: 'network_not_ready',
+        ssh,
+        quality
+      };
+    }
+
+    const rechecks = clampInt(args.readinessRechecks ?? process.env.HETZNER_CHANGE_IP_READINESS_RECHECKS, 2, 1, 3);
+    const recheckDelayMs = clampInt(args.readinessRecheckDelayMs ?? process.env.HETZNER_CHANGE_IP_READINESS_RECHECK_DELAY_MS, 2500, 500, 10000);
+    for (let i = 0; i < rechecks; i += 1) {
+      if (recheckDelayMs > 0) await sleep(recheckDelayMs);
+      quality = await qualityProbe(ip);
+      if (quality?.ok || qualityGlobalReady(quality)) break;
+    }
+
+    if (!quality?.ok) {
+      return {
+        ok: false,
+        definitive: Boolean(quality?.definitive && qualityGlobalReady(quality)),
+        reason: qualityGlobalReady(quality)
+          ? (quality?.reason || 'failed_threshold')
+          : 'quality_after_network_inconclusive',
+        ssh,
+        quality
+      };
+    }
+  }
+
+  if (!ssh) {
+    ssh = customSshProbe
+      ? await customSshProbe(ip)
+      : await probeSshReachability(ip, { settleMs: 0 });
+  }
   if (!ssh?.ok) {
     return {
       ok: false,
@@ -114,8 +166,7 @@ async function changeHetznerPublicIp(args) {
   // Manual Change-IP operates on an already-delivered VM. Unlike initial
   // provisioning, it cannot safely rebuild the customer's machine in another
   // Hetzner location just to obtain a different address. Bound the number of
-  // full power-cycle + SSH + Iran-quality candidate rounds so the request cannot
-  // spend tens of minutes cycling through a dirty local IP pool.
+  // full candidate rounds so the request cannot spin for tens of minutes.
   const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 8);
   const maxInconclusiveCandidates = clampInt(
     process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
@@ -249,6 +300,7 @@ function userMessageForError(error) {
 
 module.exports = {
   ...base,
+  qualityGlobalReady,
   probeSshReachability,
   probeIranQuality,
   verifyCleanCandidate,
