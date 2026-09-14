@@ -145,6 +145,14 @@ async function telegramSend(chatId, text) {
   }
 
   console.log('HETZNER_CHANGE_IP_RECOVERY_RESULTS=' + JSON.stringify(results));
+
+  // db.js owns a long-lived MySQL pool for the bot process. In this standalone
+  // one-shot recovery command that pool keeps Node's event loop alive after all
+  // recovery work and Telegram notifications are already complete. Exit only
+  // after the full results line has been written so the deploy can continue to
+  // its post-recovery verification instead of waiting for the outer timeout.
+  await new Promise(resolve => process.stdout.write('', resolve));
+  process.exit(0);
 })().catch(error => {
   console.error('HETZNER_CHANGE_IP_RECOVERY_FAILED=' + String(error?.message || error));
   process.exit(1);
