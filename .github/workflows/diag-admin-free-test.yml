@@ -1,0 +1,24 @@
+name: Diagnose admin free test limit
+
+on:
+  push:
+    branches: [fix/admin-unlimited-free-test]
+    paths:
+      - '.github/workflows/diag-admin-free-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate free test logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== MATCHES ==='
+          grep -R -n -E 'تست رایگان|free.?test|trial|test_server|test server|رایگان' . \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude='*.log' \
+            | head -n 500 || true
