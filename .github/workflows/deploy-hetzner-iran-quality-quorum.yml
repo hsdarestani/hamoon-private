@@ -7,8 +7,11 @@ on:
       - 'runtime-bootstrap.js'
       - 'admin-free-test-bootstrap.js'
       - 'services/hetzner-clean-ip-change.js'
+      - 'services/hetzner-lifecycle-safe-bootstrap.js'
       - 'services/hetzner-reconcile-policy.js'
       - 'services/hetzner-location-fallback.js'
+      - 'services/hetzner-location-fallback-fast-bootstrap.js'
+      - 'scripts/requeue-fsn-exhausted.js'
       - 'scripts/validate-admin-free-test.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-manual-change-ip-cap.js'
@@ -48,8 +51,11 @@ jobs:
           node -c runtime-bootstrap.js
           node -c admin-free-test-bootstrap.js
           node -c services/hetzner-clean-ip-change.js
+          node -c services/hetzner-lifecycle-safe-bootstrap.js
           node -c services/hetzner-reconcile-policy.js
           node -c services/hetzner-location-fallback.js
+          node -c services/hetzner-location-fallback-fast-bootstrap.js
+          node -c scripts/requeue-fsn-exhausted.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
@@ -58,6 +64,7 @@ jobs:
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2'" runtime-bootstrap.js
+          grep -q "HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000'" runtime-bootstrap.js
 
       - name: Prepare SSH
         shell: bash
@@ -82,14 +89,18 @@ jobs:
           node -c runtime-bootstrap.js
           node -c admin-free-test-bootstrap.js
           node -c services/hetzner-clean-ip-change.js
+          node -c services/hetzner-lifecycle-safe-bootstrap.js
           node -c services/hetzner-reconcile-policy.js
           node -c services/hetzner-location-fallback.js
+          node -c services/hetzner-location-fallback-fast-bootstrap.js
+          node -c scripts/requeue-fsn-exhausted.js
           node scripts/validate-admin-free-test.js
           node scripts/validate-manual-change-ip-cap.js
           node scripts/validate-hetzner-location-fallback.js
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2'" runtime-bootstrap.js
+          grep -q "HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000'" runtime-bootstrap.js
           npm run validate:clean-ip-runtime
           npm run validate:hetzner-lifecycle
           pm2 restart hamoonbot --update-env >/dev/null
@@ -97,8 +108,16 @@ jobs:
           PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
           echo "PM2_STATUS=$PM2_STATUS"
           test "$PM2_STATUS" = 'online'
+
+          # Requeue only the currently known FSN-exhausted incident rows, and only
+          # if they are still undelivered/manual-review. Already-delivered rows are
+          # untouched, so this step is safe to re-run on later deployments.
+          node scripts/requeue-fsn-exhausted.js \
+            165811947 165819462 165827429 165832501 165832551 165834574
+
           echo 'PRODUCTION_QUORUM_FIX=verified'
           echo 'PRODUCTION_FSN_FALLBACK=verified'
+          echo 'PRODUCTION_FAST_CLEAN_IP_SEARCH=verified'
           echo 'PRODUCTION_MANUAL_CHANGE_IP_CAP=verified'
           echo 'PRODUCTION_ADMIN_FREE_TEST_UNLIMITED=verified'
           REMOTE
