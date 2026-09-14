@@ -52,6 +52,12 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
     HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0',
+    // Manual Change-IP runs against an already-delivered server and therefore must
+    // never rebuild/move the VM across locations. Keep the operation bounded: try
+    // only a few verified candidates, then preserve the previous IP and return a
+    // clear failure instead of spinning through the pool for tens of minutes.
+    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4',
+    HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2',
     HETZNER_TRAFFIC_EUR_TO_TOMAN: '250000',
     LOYALTY_SILVER_CASHBACK: '2',
     LOYALTY_GOLD_CASHBACK: '4',
@@ -61,8 +67,6 @@ function applyRuntimeSafetyDefaults() {
 
   const defaults = {
     HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS: '20',
-    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '20',
-    HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '4',
     // One longer Check-Host request is more reliable than repeatedly restarting
     // short probes before Iranian TCP nodes have returned.
     HETZNER_CHANGE_IP_QUALITY_PROBE_ATTEMPTS: '1',
