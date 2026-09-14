@@ -68,6 +68,22 @@ async function probeIranQuality(ip) {
 }
 
 async function verifyCleanCandidate(ip, args = {}) {
+  // Reject a dirty Iran IP before spending up to tens of seconds waiting for SSH.
+  // SSH is only a delivery-health gate after the IP itself has passed the strict
+  // Iran/global quorum. This keeps the same fail-closed policy but makes bad
+  // candidates much cheaper to discard.
+  const qualityProbe = typeof args.qualityProbe === 'function' ? args.qualityProbe : probeIranQuality;
+  const quality = await qualityProbe(ip);
+  if (!quality?.ok) {
+    return {
+      ok: false,
+      definitive: Boolean(quality?.definitive),
+      reason: quality?.reason || 'quality_inconclusive',
+      ssh: null,
+      quality
+    };
+  }
+
   const sshProbe = typeof args.sshProbe === 'function' ? args.sshProbe : probeSshReachability;
   const ssh = await sshProbe(ip);
   if (!ssh?.ok) {
@@ -76,16 +92,14 @@ async function verifyCleanCandidate(ip, args = {}) {
       definitive: true,
       reason: 'ssh_unreachable',
       ssh,
-      quality: null
+      quality
     };
   }
 
-  const qualityProbe = typeof args.qualityProbe === 'function' ? args.qualityProbe : probeIranQuality;
-  const quality = await qualityProbe(ip);
   return {
-    ok: Boolean(quality?.ok),
-    definitive: Boolean(quality?.definitive),
-    reason: quality?.ok ? 'ok' : (quality?.reason || 'quality_inconclusive'),
+    ok: true,
+    definitive: true,
+    reason: 'ok',
     ssh,
     quality
   };
