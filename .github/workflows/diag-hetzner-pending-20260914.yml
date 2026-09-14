@@ -28,7 +28,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_diag_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Read-only production diagnosis
+      - name: Locate Change-IP retry caller
         shell: bash
         run: |
           set -euo pipefail
@@ -38,55 +38,7 @@ jobs:
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
           echo "PROD_HEAD=$(git rev-parse HEAD)"
-          pm2 show hamoonbot --no-color | grep -E 'status|pid' | head -n 4 || true
-          DB_AUTO_INIT=false node - <<'NODE'
-          require('dotenv').config();
-          const mysql = require('mysql2/promise');
-          (async () => {
-            const pool = mysql.createPool({
-              host: process.env.DB_HOST || 'localhost',
-              user: process.env.DB_USER || 'root',
-              password: process.env.DB_PASSWORD || '',
-              database: process.env.DB_NAME || 'hamooncloud_db',
-              connectionLimit: 2
-            });
-            const [cols] = await pool.query(`
-              SELECT TABLE_NAME, COLUMN_NAME
-              FROM INFORMATION_SCHEMA.COLUMNS
-              WHERE TABLE_SCHEMA = DATABASE()
-                AND (COLUMN_NAME LIKE '%username%' OR COLUMN_NAME LIKE '%telegram%')
-              ORDER BY TABLE_NAME, ORDINAL_POSITION
-            `);
-            console.log('IDENTITY_COLUMNS=' + JSON.stringify(cols));
-            const [hist] = await pool.query(`
-              SELECT h.telegram_id, h.server_id, h.datacenter,
-                     MIN(h.first_seen_at) AS first_seen,
-                     MAX(h.last_seen_at) AS last_seen,
-                     COUNT(*) AS distinct_ips,
-                     SUM(h.last_event IN ('candidate_verification_rejected','candidate_verification_inconclusive','duplicate_candidate_rejected','clean_ip_rejected','clean_ip_unverified','clean_ip_rejected_rolled_back','clean_ip_unverified_rolled_back')) AS rejected_rows,
-                     GROUP_CONCAT(CONCAT(h.ip_address, ':', h.last_event) ORDER BY h.last_seen_at DESC SEPARATOR ' | ') AS recent_events
-              FROM server_ip_history h
-              WHERE h.last_seen_at >= UTC_TIMESTAMP() - INTERVAL 90 MINUTE
-              GROUP BY h.telegram_id, h.server_id, h.datacenter
-              ORDER BY last_seen DESC
-              LIMIT 40
-            `);
-            console.log('RECENT_IP_ACTIVITY=' + JSON.stringify(hist));
-            const ids = [...new Set(hist.map(r => String(r.telegram_id || '')).filter(Boolean))];
-            if (ids.length) {
-              const [p] = await pool.query(`
-                SELECT telegram_id, server_id, server_name, datacenter, status, public_ip, delivered_at, updated_at
-                FROM purchases
-                WHERE telegram_id IN (?) AND datacenter = 'hetzner'
-                ORDER BY updated_at DESC
-                LIMIT 80
-              `, [ids]);
-              console.log('RELATED_PURCHASES=' + JSON.stringify(p));
-            }
-            await pool.end();
-          })().catch(err => { console.error(err); process.exit(1); });
-          NODE
-
-          echo '=== CHANGE-IP LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 5000 2>/dev/null | grep -Ei 'HETZNER_CHANGE_IP|change.?ip|candidate_verification|NO_UNUSED_PRIMARY|OPERATION_IN_PROGRESS|Vpnmhm|mhm_admin' | tail -n 1200 || true
+          echo '=== SOURCE MATCHES ==='
+          grep -R -n -E 'HETZNER_CHANGE_IP_CLEAN_REJECTED_ROLLED_BACK|changeHetznerPublicIp|CANDIDATE_REJECTED|NO_UNUSED_PRIMARY_IPV4_AVAILABLE' . \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude='*.log' | head -n 500 || true
           REMOTE
