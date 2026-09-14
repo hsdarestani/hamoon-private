@@ -22,3 +22,4 @@ jobs:
           grep -R -n -E 'تست رایگان|free.?test|trial|test_server|test server|رایگان' . \
             --exclude-dir=node_modules --exclude-dir=.git --exclude='*.log' \
             | head -n 500 || true
+          echo '=== DONE ==='
