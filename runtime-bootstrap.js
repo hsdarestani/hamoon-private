@@ -203,12 +203,6 @@ function run() {
   require.cache[corePath] = child;
   child._compile(source, corePath);
 
-  // Lazy-load the DB-backed one-shot repair only when the bot actually starts.
-  // Source validators import applyPatches() from this module and must not open a
-  // MySQL pool just by loading runtime-bootstrap.js.
-  const { scheduleStaleServerReconcile } = require('./stale-server-reconcile');
-  scheduleStaleServerReconcile(['5825867194'], 500);
-
   return child.exports;
 }
 
