@@ -1,0 +1,65 @@
+name: Probe Hetzner location compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/probe-hetzner-location-matrix.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Read live Hetzner server-type matrix from production
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          const datacenters = require('./datacenters');
+          const { hetznerRequest, getHetznerSellablePlans } = require('./Hetzner/hetzner-api');
+          (async () => {
+            const base = datacenters.hetzner;
+            const raw = await hetznerRequest(base, 'GET', '/server_types?per_page=200');
+            const focus = new Set(['cx23','cx33','cax11','ccx13','cpx11','cpx21','cpx31','cpx41','cpx51','cpx22','cpx32','cpx42','cpx52','cpx62']);
+            console.log('RAW_FOCUS_MATRIX');
+            for (const st of raw.server_types || []) {
+              if (!focus.has(String(st.name || '').toLowerCase())) continue;
+              console.log(JSON.stringify({
+                name: st.name,
+                deprecated: st.deprecated,
+                deprecation: st.deprecation,
+                architecture: st.architecture,
+                locations: (st.locations || []).map(x => ({name:x.name || x.location, available:x.available, recommended:x.recommended, deprecation:x.deprecation})),
+                price_locations: (st.prices || []).map(x => x.location)
+              }));
+            }
+            console.log('NORMALIZED_LOCATION_CATALOGS');
+            for (const location of ['nbg1','fsn1','hel1','ash','hil','sin']) {
+              const cfg = {...base, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: ''};
+              let plans;
+              try { plans = await getHetznerSellablePlans(cfg); }
+              catch (e) { console.log(JSON.stringify({location,error:e.message})); continue; }
+              console.log(JSON.stringify({location, plans: plans.map(p => p.id)}));
+            }
+          })().catch(err => { console.error(err && (err.stack || err.message) || err); process.exit(1); });
+          NODE
+          REMOTE
