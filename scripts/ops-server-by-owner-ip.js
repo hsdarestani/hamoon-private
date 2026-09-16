@@ -7,7 +7,7 @@ const datacenters = require('../datacenters');
 const cloud = require('../cloud-api');
 const { installHetznerPowerStateBarrier } = require('../services/hetzner-power-state-barrier');
 installHetznerPowerStateBarrier();
-const cleanIp = require('../services/hetzner-clean-ip-change');
+const cleanIp = require('../services/hetzner-clean-ip-recovery');
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
