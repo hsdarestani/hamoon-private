@@ -152,9 +152,18 @@ function createCustomerApiRouter() {
     catch (e) { next(e); }
   });
 
-  router.get('/prices', async (_req, res, next) => {
-    try { res.json({ ok: true, plans: await getHetznerSellablePlans(datacenters.hetzner) }); }
-    catch (e) { next(e); }
+  router.get('/prices', async (req, res, next) => {
+    try {
+      const location = String(req.query.location || '').trim().toLowerCase();
+      if (location && !isAllowed(req.apiClient.allowed_locations, location)) {
+        return apiError(res, 403, 'NOT_ALLOWED', 'این لوکیشن برای این کلاینت مجاز نیست.');
+      }
+      const baseDc = datacenters.hetzner;
+      const locationDc = location
+        ? { ...baseDc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' }
+        : baseDc;
+      res.json({ ok: true, location: location || null, plans: await getHetznerSellablePlans(locationDc) });
+    } catch (e) { next(e); }
   });
 
   router.get('/usage', async (req, res, next) => {
@@ -211,15 +220,20 @@ function createCustomerApiRouter() {
         : ['hourly', 'monthly'];
       if (!allowedDurations.includes(requestedDuration)) return apiError(res, 400, 'INVALID_DURATION', 'دوره صورتحساب انتخاب‌شده معتبر نیست.');
       const duration = requestedDuration;
-      const plans = await getHetznerSellablePlans(dc);
       const requestedType = String(input.server_type || '').trim().toLowerCase();
-      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);
-      if (!plan || plan.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن انتخاب‌شده معتبر نیست.');
-
       const image = String(input.image || 'ubuntu-24.04').trim();
       const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();
-      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
+      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, requestedType) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
         return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
+      }
+
+      // Build the catalog for the exact target location so regional/ARM plans
+      // are never offered or priced using a different Hetzner region.
+      const locationDc = { ...dc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' };
+      const plans = await getHetznerSellablePlans(locationDc);
+      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);
+      if (!plan || plan.available === false) {
+        return apiError(res, 400, 'UNSUPPORTED_LOCATION', 'این پلن در لوکیشن انتخابی قابل ارائه نیست. لطفاً پلن دیگری انتخاب کنید.');
       }
       const pricing = createApiPricingSnapshot(client, plan, duration);
       const price = pricing.amount;
