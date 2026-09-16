@@ -1,0 +1,32 @@
+name: Hetzner IP Probe Progress
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  progress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Read probe progress
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          P="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          OUT="$(ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "P='$P' J='cmVxdWlyZSgnZG90ZW52JykuY29uZmlnKHtwYXRoOicuZW52J30pO2NvbnN0IGRiPXJlcXVpcmUoJy4vZGInKTsoYXN5bmMoKT0+e2NvbnN0IFtyb3dzXT1hd2FpdCBkYi5wb29sLnF1ZXJ5KCJTRUxFQ1QgbG9jYXRpb24scmVzdWx0LENPVU5UKCopIGNvdW50IEZST00gaGV0em5lcl9pcF9wb29sX2F1ZGl0IEdST1VQIEJZIGxvY2F0aW9uLHJlc3VsdCBPUkRFUiBCWSBsb2NhdGlvbixyZXN1bHQiKTtjb25zdCBbdG90XT1hd2FpdCBkYi5wb29sLnF1ZXJ5KCJTRUxFQ1QgcmVzdWx0LENPVU5UKCopIGNvdW50IEZST00gaGV0em5lcl9pcF9wb29sX2F1ZGl0IEdST1VQIEJZIHJlc3VsdCBPUkRFUiBCWSByZXN1bHQiKTtjb25zb2xlLmxvZygnUFJPR1JFU1NfSlNPTicpO2NvbnNvbGUubG9nKEpTT04uc3RyaW5naWZ5KHtieV9sb2NhdGlvbjpyb3dzLHRvdGFsczp0b3R9LG51bGwsMikpO3Byb2Nlc3MuZXhpdCgwKX0pKCkuY2F0Y2goZT0+e2NvbnNvbGUuZXJyb3IoZS5tZXNzYWdlKTtwcm9jZXNzLmV4aXQoMSl9KTs=' bash -s" <<'REMOTE'
+          cd "$(printf '%s' "$P" | base64 -d)"
+          node -e "$(printf '%s' "$J" | base64 -d)"
+          REMOTE
+          )"
+          echo "$OUT"
+          { echo '## Probe progress'; echo; echo '```json'; echo "$OUT"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
