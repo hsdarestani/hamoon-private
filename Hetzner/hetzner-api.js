@@ -121,7 +121,7 @@ function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
   const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
   return (serverTypes || [])
-    .filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))
+    .filter(st => st && st.name && !st.deprecated && (st.deprecation == null) && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))
     .map(st => {
       const price = firstPrice(st, config);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
@@ -161,13 +161,26 @@ async function getHetznerSellablePlans(config = {}) {
   const cacheKey = hetznerPlanCacheKey(config);
   const cached = serverTypeCache.get(cacheKey);
   if (cached?.plans && cached.expires > now) return cached.plans;
+
+  const locationScoped = configuredPriceLocations(config).length > 0;
   try {
     const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
     if (plans.length) {
       serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
       return plans;
     }
+    if (locationScoped) {
+      serverTypeCache.set(cacheKey, { plans: [], expires: now + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });
+      return [];
+    }
   } catch (e) {
+    if (locationScoped) {
+      const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');
+      err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';
+      err.cause = e;
+      console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);
+      throw err;
+    }
     console.warn('[hetzner] using static plan fallback:', e.message);
   }
   const fallback = normalizeStaticHetznerPlans(config);
