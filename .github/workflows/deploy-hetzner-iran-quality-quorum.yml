@@ -69,7 +69,7 @@ jobs:
           npm run validate:clean-ip-runtime
           npm run validate:hetzner-lifecycle
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
-          grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4'" runtime-bootstrap.js
+          grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '8'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000'" runtime-bootstrap.js
 
@@ -109,7 +109,7 @@ jobs:
           node scripts/validate-hetzner-location-fallback.js
           node scripts/validate-quality-readiness.js
           grep -q "HETZNER_IP_QUALITY_IR_MIN_SUCCESS: '3'" runtime-bootstrap.js
-          grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4'" runtime-bootstrap.js
+          grep -q "HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '8'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2'" runtime-bootstrap.js
           grep -q "HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000'" runtime-bootstrap.js
           npm run validate:clean-ip-runtime
