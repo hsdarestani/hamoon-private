@@ -32,70 +32,18 @@ jobs:
           from pathlib import Path
           p = Path('Hetzner/hetzner-api.js')
           s = p.read_text()
-
           old_filter = ".filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))"
           new_filter = ".filter(st => st && st.name && !st.deprecated && (st.deprecation == null) && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))"
           if old_filter in s:
               s = s.replace(old_filter, new_filter, 1)
-
-          old = """async function getHetznerSellablePlans(config = {}) {
-  const now = Date.now();
-  const cacheKey = hetznerPlanCacheKey(config);
-  const cached = serverTypeCache.get(cacheKey);
-  if (cached?.plans && cached.expires > now) return cached.plans;
-  try {
-    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
-    if (plans.length) {
-      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
-      return plans;
-    }
-  } catch (e) {
-    console.warn('[hetzner] using static plan fallback:', e.message);
-  }
-  const fallback = normalizeStaticHetznerPlans(config);
-  if (fallback.length) return fallback;
-  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
-}"""
-          new = """async function getHetznerSellablePlans(config = {}) {
-  const now = Date.now();
-  const cacheKey = hetznerPlanCacheKey(config);
-  const cached = serverTypeCache.get(cacheKey);
-  if (cached?.plans && cached.expires > now) return cached.plans;
-
-  const locationScoped = configuredPriceLocations(config).length > 0;
-  try {
-    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
-    if (plans.length) {
-      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
-      return plans;
-    }
-    // For an explicit location, an empty live catalog is authoritative. Never
-    // replace it with global/static flavors that may not exist in this region.
-    if (locationScoped) {
-      serverTypeCache.set(cacheKey, { plans: [], expires: now + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });
-      return [];
-    }
-  } catch (e) {
-    if (locationScoped) {
-      const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');
-      err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';
-      err.cause = e;
-      console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);
-      throw err;
-    }
-    console.warn('[hetzner] using static plan fallback:', e.message);
-  }
-  const fallback = normalizeStaticHetznerPlans(config);
-  if (fallback.length) return fallback;
-  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
-}"""
-          if old not in s and new not in s:
-              raise SystemExit('getHetznerSellablePlans marker not found')
+          old = "async function getHetznerSellablePlans(config = {}) {\n  const now = Date.now();\n  const cacheKey = hetznerPlanCacheKey(config);\n  const cached = serverTypeCache.get(cacheKey);\n  if (cached?.plans && cached.expires > now) return cached.plans;\n  try {\n    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);\n    if (plans.length) {\n      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });\n      return plans;\n    }\n  } catch (e) {\n    console.warn('[hetzner] using static plan fallback:', e.message);\n  }\n  const fallback = normalizeStaticHetznerPlans(config);\n  if (fallback.length) return fallback;\n  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');\n}"
+          new = "async function getHetznerSellablePlans(config = {}) {\n  const now = Date.now();\n  const cacheKey = hetznerPlanCacheKey(config);\n  const cached = serverTypeCache.get(cacheKey);\n  if (cached?.plans && cached.expires > now) return cached.plans;\n\n  const locationScoped = configuredPriceLocations(config).length > 0;\n  try {\n    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);\n    if (plans.length) {\n      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });\n      return plans;\n    }\n    if (locationScoped) {\n      serverTypeCache.set(cacheKey, { plans: [], expires: now + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });\n      return [];\n    }\n  } catch (e) {\n    if (locationScoped) {\n      const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');\n      err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';\n      err.cause = e;\n      console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);\n      throw err;\n    }\n    console.warn('[hetzner] using static plan fallback:', e.message);\n  }\n  const fallback = normalizeStaticHetznerPlans(config);\n  if (fallback.length) return fallback;\n  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');\n}"
           if old in s:
               s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit('getHetznerSellablePlans marker not found')
           p.write_text(s)
           PY
-
           node -c Hetzner/hetzner-api.js
           git diff --check
 
