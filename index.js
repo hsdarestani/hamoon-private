@@ -10,4 +10,5 @@
 // handleRebuildConfirm
 // handleHetznerConsole
 
+require('./server-deletion-consistency-bootstrap').installServerDeletionConsistency();
 module.exports = require('./runtime-bootstrap').run();
