@@ -1,0 +1,124 @@
+name: Audit Hetzner Capacity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Read-only capacity and hygiene audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=15 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config({ path: '.env' });
+          const token = process.env.HETZNER_API_TOKEN;
+          if (!token) throw new Error('HETZNER_API_TOKEN is missing');
+          const base = 'https://api.hetzner.cloud/v1';
+          async function pageAll(resource) {
+            const out = [];
+            let page = 1;
+            for (;;) {
+              const r = await fetch(base + '/' + resource + '?per_page=50&page=' + page, {
+                headers: { Authorization: 'Bearer ' + token }
+              });
+              if (!r.ok) throw new Error(resource + ' HTTP ' + r.status);
+              const j = await r.json();
+              const rows = j[resource] || [];
+              out.push(...rows);
+              if (!j.meta?.pagination?.next_page) break;
+              page = j.meta.pagination.next_page;
+            }
+            return out;
+          }
+          function locOfServer(s) {
+            return s.datacenter?.location?.name || s.datacenter?.name || 'unknown';
+          }
+          function locOfPrimary(p) {
+            return p.datacenter?.location?.name || p.datacenter?.name || 'unknown';
+          }
+          function countBy(rows, keyFn) {
+            return Object.fromEntries([...rows.reduce((m,x)=>m.set(keyFn(x),(m.get(keyFn(x))||0)+1),new Map())].sort());
+          }
+          (async () => {
+            const [servers, primary_ips, floating_ips, server_types, locations] = await Promise.all([
+              pageAll('servers'), pageAll('primary_ips'), pageAll('floating_ips'),
+              pageAll('server_types'), pageAll('locations')
+            ]);
+            const unassignedPrimary = primary_ips.filter(x => !x.assignee_id);
+            const assignedPrimary = primary_ips.filter(x => x.assignee_id);
+            const unassignedFloating = floating_ips.filter(x => !x.server);
+            const active = servers.filter(x => !['deleting','rebuilding'].includes(x.status));
+            const availableByLocation = {};
+            for (const loc of locations) {
+              const names = server_types.filter(t =>
+                (t.locations || []).some(x => x.name === loc.name && x.available !== false)
+              ).map(t => t.name).sort();
+              availableByLocation[loc.name] = names;
+            }
+            const inventory = {
+              generated_at: new Date().toISOString(),
+              totals: {
+                servers: servers.length,
+                active_servers: active.length,
+                primary_ips: primary_ips.length,
+                primary_ips_assigned: assignedPrimary.length,
+                primary_ips_unassigned: unassignedPrimary.length,
+                floating_ips: floating_ips.length,
+                floating_ips_unassigned: unassignedFloating.length
+              },
+              servers_by_location: countBy(servers, locOfServer),
+              servers_by_status: countBy(servers, x => x.status || 'unknown'),
+              servers_by_type: countBy(servers, x => x.server_type?.name || 'unknown'),
+              primary_ips_by_location: countBy(primary_ips, locOfPrimary),
+              unassigned_primary_ips_by_location: countBy(unassignedPrimary, locOfPrimary),
+              unassigned_primary_ip_ids: unassignedPrimary.map(x => ({
+                id: x.id, type: x.type, location: locOfPrimary(x), auto_delete: x.auto_delete
+              })),
+              unassigned_floating_ip_ids: unassignedFloating.map(x => ({
+                id: x.id, type: x.type, home_location: x.home_location?.name || 'unknown'
+              })),
+              available_server_types_by_location: availableByLocation
+            };
+            console.log('HETZNER_CAPACITY_AUDIT_BEGIN');
+            console.log(JSON.stringify(inventory, null, 2));
+            console.log('HETZNER_CAPACITY_AUDIT_END');
+          })().catch(e => { console.error('AUDIT_FAILED:', e.message); process.exit(1); });
+          NODE
+
+          if command -v mysql >/dev/null 2>&1; then
+            node - <<'NODE'
+            require('dotenv').config({ path: '.env' });
+            const { spawnSync } = require('child_process');
+            const env = { ...process.env, MYSQL_PWD: process.env.DB_PASSWORD || '' };
+            const sql = "SELECT TABLE_NAME,COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND (TABLE_NAME REGEXP 'server|hetzner|quality|ip' OR COLUMN_NAME REGEXP 'server|hetzner|quality|ip|location') ORDER BY TABLE_NAME,ORDINAL_POSITION";
+            const args = ['-N','-B','-h',process.env.DB_HOST || '127.0.0.1','-u',process.env.DB_USER,'-D',process.env.DB_NAME || 'hamooncloud_db','-e',sql];
+            const r = spawnSync('mysql', args, { env, encoding: 'utf8' });
+            console.log('DB_RELEVANT_SCHEMA_BEGIN');
+            console.log(r.status === 0 ? r.stdout : 'DB schema inspection unavailable');
+            console.log('DB_RELEVANT_SCHEMA_END');
+            process.exit(r.status === 0 ? 0 : 0);
+            NODE
+          fi
+          REMOTE
