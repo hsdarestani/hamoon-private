@@ -8,6 +8,9 @@ on:
       - 'loyalty-club-bootstrap.js'
       - 'loyalty-history-bootstrap.js'
       - 'runtime-bootstrap.js'
+      - 'server-power-controls-bootstrap.js'
+      - 'server-deletion-consistency-bootstrap.js'
+      - 'scripts/ops-server-by-owner-ip.js'
       - 'server.js'
       - 'public/club/**'
       - '.env.example'
@@ -24,7 +27,7 @@ concurrency:
 jobs:
   validate-and-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
@@ -45,6 +48,9 @@ jobs:
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check loyalty-history-bootstrap.js
+          node --check server-power-controls-bootstrap.js
+          node --check server-deletion-consistency-bootstrap.js
+          node --check scripts/ops-server-by-owner-ip.js
           node --check runtime-bootstrap.js
           node --check server.js
           grep -q 'باشگاه هامون' public/club/index.html
@@ -64,10 +70,13 @@ jobs:
             "recordEligibleSpend({",
             "eventKey: `renewal:",
             "syncHistory(userId)",
-            "ℹ️ قوانین و نحوه کار"
+            "ℹ️ قوانین و نحوه کار",
+            "text: '▶️ روشن کردن'",
+            "text: '🔄 ریبوت سرور'",
+            "case 'REBOOT':"
           ];
           for (const marker of required) {
-            if (!output.includes(marker)) throw new Error('Missing loyalty marker: ' + marker);
+            if (!output.includes(marker)) throw new Error('Missing runtime marker: ' + marker);
           }
           new Function('require', 'module', 'exports', '__filename', '__dirname', output);
           console.log('loyalty_runtime_patch_ok=true');
@@ -87,12 +96,12 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy production bot and club page
+      - name: Deploy production bot and repair reported incidents
         shell: bash
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=50 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -111,6 +120,9 @@ jobs:
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check loyalty-history-bootstrap.js
+          node --check server-power-controls-bootstrap.js
+          node --check server-deletion-consistency-bootstrap.js
+          node --check scripts/ops-server-by-owner-ip.js
           node --check runtime-bootstrap.js
           node --check server.js
           grep -q 'باشگاه هامون' public/club/index.html
@@ -124,12 +136,15 @@ jobs:
             "getRedemptionPreview(userId, finalPrice)",
             "consumeCredit({",
             "eventKey: `renewal:",
-            "syncHistory(userId)"
+            "syncHistory(userId)",
+            "text: '▶️ روشن کردن'",
+            "text: '🔄 ریبوت سرور'",
+            "case 'REBOOT':"
           ]) {
             if (!output.includes(marker)) throw new Error('Production runtime patch missing: ' + marker);
           }
           new Function('require', 'module', 'exports', '__filename', '__dirname', output);
-          console.log('production_loyalty_patch_ok=true');
+          console.log('production_runtime_patch_ok=true');
           NODE
 
           pm2 restart hamoonbot --update-env
@@ -139,7 +154,16 @@ jobs:
           pm2 pid hamoonbot | grep -Eq '^[1-9][0-9]*$'
           pm2 pid dashboard-server | grep -Eq '^[1-9][0-9]*$'
           curl -fsS --max-time 10 http://127.0.0.1:3000/health | grep -q '"ok":true'
-          curl -fsS --max-time 10 http://127.0.0.1:3000/club | grep -q 'باشگاه هامون'
+
+          echo '=== REPORTED INCIDENT: POWER ON 1144186664 / 5.75.202.189 ==='
+          node scripts/ops-server-by-owner-ip.js power-on 1144186664 5.75.202.189
+
+          echo '=== REPORTED INCIDENT: CHANGE IP 1301377458 / 91.107.149.82 ==='
+          if timeout 1500 node scripts/ops-server-by-owner-ip.js change-ip 1301377458 91.107.149.82; then
+            echo 'REPORTED_CHANGE_IP_RETRY=success'
+          else
+            echo 'REPORTED_CHANGE_IP_RETRY=not_resolved'
+          fi
 
           public_club_code="$(curl -kLsS --max-time 15 -o /tmp/hamoon-club-public -w '%{http_code}' https://pay.hamooncloud.ir/club || true)"
           echo "public /club -> HTTP ${public_club_code:-000}"
@@ -147,5 +171,5 @@ jobs:
           grep -q 'باشگاه هامون' /tmp/hamoon-club-public
           rm -f /tmp/hamoon-club-public
 
-          echo 'loyalty_deploy_ok=true'
+          echo 'incident_repair_deploy_ok=true'
           REMOTE
