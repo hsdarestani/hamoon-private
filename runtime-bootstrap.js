@@ -28,6 +28,7 @@ const { installServerDeletionConsistency } = require('./server-deletion-consiste
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installFastLocationFallbackModule } = require('./services/hetzner-location-fallback-fast-bootstrap');
+const { installHetznerPowerStateBarrier } = require('./services/hetzner-power-state-barrier');
 
 // Reconcile policy imports the location-fallback module at module load time. Install
 // the accelerated version first so every reconcile cycle uses the same temporary
@@ -194,6 +195,7 @@ function run() {
   applyRuntimeSafetyDefaults();
   installStrictCheckHostFetch();
   installSafeLifecycleModule();
+  installHetznerPowerStateBarrier();
   installHetznerReconcilePolicy();
   installCleanIpChangeModule();
   installServerDeletionConsistency();
