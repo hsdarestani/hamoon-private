@@ -1,0 +1,134 @@
+name: Fix Hetzner location catalog fallback
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/fix-location-catalog-fallback.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Make location-scoped catalog fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Hetzner/hetzner-api.js')
+          s = p.read_text()
+
+          old_filter = ".filter(st => st && st.name && !st.deprecated && st.deprecation === null && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))"
+          new_filter = ".filter(st => st && st.name && !st.deprecated && (st.deprecation == null) && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))"
+          if old_filter in s:
+              s = s.replace(old_filter, new_filter, 1)
+
+          old = """async function getHetznerSellablePlans(config = {}) {
+  const now = Date.now();
+  const cacheKey = hetznerPlanCacheKey(config);
+  const cached = serverTypeCache.get(cacheKey);
+  if (cached?.plans && cached.expires > now) return cached.plans;
+  try {
+    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
+    if (plans.length) {
+      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
+      return plans;
+    }
+  } catch (e) {
+    console.warn('[hetzner] using static plan fallback:', e.message);
+  }
+  const fallback = normalizeStaticHetznerPlans(config);
+  if (fallback.length) return fallback;
+  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
+}"""
+          new = """async function getHetznerSellablePlans(config = {}) {
+  const now = Date.now();
+  const cacheKey = hetznerPlanCacheKey(config);
+  const cached = serverTypeCache.get(cacheKey);
+  if (cached?.plans && cached.expires > now) return cached.plans;
+
+  const locationScoped = configuredPriceLocations(config).length > 0;
+  try {
+    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
+    if (plans.length) {
+      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
+      return plans;
+    }
+    // For an explicit location, an empty live catalog is authoritative. Never
+    // replace it with global/static flavors that may not exist in this region.
+    if (locationScoped) {
+      serverTypeCache.set(cacheKey, { plans: [], expires: now + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });
+      return [];
+    }
+  } catch (e) {
+    if (locationScoped) {
+      const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');
+      err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';
+      err.cause = e;
+      console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);
+      throw err;
+    }
+    console.warn('[hetzner] using static plan fallback:', e.message);
+  }
+  const fallback = normalizeStaticHetznerPlans(config);
+  if (fallback.length) return fallback;
+  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
+}"""
+          if old not in s and new not in s:
+              raise SystemExit('getHetznerSellablePlans marker not found')
+          if old in s:
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          node -c Hetzner/hetzner-api.js
+          git diff --check
+
+      - name: Commit source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Hetzner/hetzner-api.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(hetzner): never leak static plans into location catalog'
+            git push origin HEAD:main
+          fi
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git fetch origin main
+          git pull --ff-only origin main
+          node -c Hetzner/hetzner-api.js
+          node -c customer-api.js
+          pm2 restart hamoonbot --update-env
+          sleep 3
+          pm2 show hamoonbot --no-color | sed -n '1,18p'
+          REMOTE
