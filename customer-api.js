@@ -96,7 +96,12 @@ async function auth(req, res, next) {
     if (!token || !token.startsWith('hm_live_')) return apiError(res, 401, 'AUTH_REQUIRED', 'کلید API معتبر ارسال نشده است.');
     const client = await db.authenticateApiKey(token);
     if (!client) return apiError(res, 401, 'INVALID_API_KEY', 'کلید API نامعتبر یا غیرفعال است.');
-    if (!checkRate(client.key_prefix, ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? 10 : 60)) {
+    const isWriteRequest = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+    const rateScope = isWriteRequest ? 'write' : 'read';
+    const rateLimit = isWriteRequest
+      ? Math.max(10, Number(process.env.RESELLER_API_WRITE_RPM || 30))
+      : Math.max(60, Number(process.env.RESELLER_API_READ_RPM || 180));
+    if (!checkRate(`${client.key_prefix}:${rateScope}`, rateLimit)) {
       return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
     }
     req.apiClient = client;
