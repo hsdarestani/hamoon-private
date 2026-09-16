@@ -34,57 +34,15 @@ jobs:
           p = Path('customer-api.js')
           s = p.read_text()
 
-          old_prices = """  router.get('/prices', async (_req, res, next) => {
-    try { res.json({ ok: true, plans: await getHetznerSellablePlans(datacenters.hetzner) }); }
-    catch (e) { next(e); }
-  });"""
-          new_prices = """  router.get('/prices', async (req, res, next) => {
-    try {
-      const location = String(req.query.location || '').trim().toLowerCase();
-      if (location && !isAllowed(req.apiClient.allowed_locations, location)) {
-        return apiError(res, 403, 'NOT_ALLOWED', 'این لوکیشن برای این کلاینت مجاز نیست.');
-      }
-      const baseDc = datacenters.hetzner;
-      const locationDc = location
-        ? { ...baseDc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' }
-        : baseDc;
-      res.json({ ok: true, location: location || null, plans: await getHetznerSellablePlans(locationDc) });
-    } catch (e) { next(e); }
-  });"""
+          old_prices = "  router.get('/prices', async (_req, res, next) => {\n    try { res.json({ ok: true, plans: await getHetznerSellablePlans(datacenters.hetzner) }); }\n    catch (e) { next(e); }\n  });"
+          new_prices = "  router.get('/prices', async (req, res, next) => {\n    try {\n      const location = String(req.query.location || '').trim().toLowerCase();\n      if (location && !isAllowed(req.apiClient.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این لوکیشن برای این کلاینت مجاز نیست.');\n      }\n      const baseDc = datacenters.hetzner;\n      const locationDc = location\n        ? { ...baseDc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' }\n        : baseDc;\n      res.json({ ok: true, location: location || null, plans: await getHetznerSellablePlans(locationDc) });\n    } catch (e) { next(e); }\n  });"
           if old_prices in s:
               s = s.replace(old_prices, new_prices, 1)
           elif new_prices not in s:
               raise SystemExit('prices route marker not found')
 
-          old_create = """      const plans = await getHetznerSellablePlans(dc);
-      const requestedType = String(input.server_type || '').trim().toLowerCase();
-      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);
-      if (!plan || plan.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن انتخاب‌شده معتبر نیست.');
-
-      const image = String(input.image || 'ubuntu-24.04').trim();
-      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();
-      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
-        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
-      }
-      const pricing = createApiPricingSnapshot(client, plan, duration);"""
-          new_create = """      const requestedType = String(input.server_type || '').trim().toLowerCase();
-      const image = String(input.image || 'ubuntu-24.04').trim();
-      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();
-      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, requestedType) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {
-        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');
-      }
-
-      // Build the catalog for the exact target location. Hetzner exposes
-      // per-location availability and pricing on server types; using the
-      // generic/default catalog here can expose ARM/regional plans in regions
-      // where they cannot actually be created.
-      const locationDc = { ...dc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' };
-      const plans = await getHetznerSellablePlans(locationDc);
-      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);
-      if (!plan || plan.available === false) {
-        return apiError(res, 400, 'UNSUPPORTED_LOCATION', 'این پلن در لوکیشن انتخابی قابل ارائه نیست. لطفاً پلن دیگری انتخاب کنید.');
-      }
-      const pricing = createApiPricingSnapshot(client, plan, duration);"""
+          old_create = "      const plans = await getHetznerSellablePlans(dc);\n      const requestedType = String(input.server_type || '').trim().toLowerCase();\n      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);\n      if (!plan || plan.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن انتخاب‌شده معتبر نیست.');\n\n      const image = String(input.image || 'ubuntu-24.04').trim();\n      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();\n      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');\n      }\n      const pricing = createApiPricingSnapshot(client, plan, duration);"
+          new_create = "      const requestedType = String(input.server_type || '').trim().toLowerCase();\n      const image = String(input.image || 'ubuntu-24.04').trim();\n      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();\n      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, requestedType) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');\n      }\n\n      // Build the catalog for the exact target location so regional/ARM plans\n      // are never offered or priced using a different Hetzner region.\n      const locationDc = { ...dc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' };\n      const plans = await getHetznerSellablePlans(locationDc);\n      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);\n      if (!plan || plan.available === false) {\n        return apiError(res, 400, 'UNSUPPORTED_LOCATION', 'این پلن در لوکیشن انتخابی قابل ارائه نیست. لطفاً پلن دیگری انتخاب کنید.');\n      }\n      const pricing = createApiPricingSnapshot(client, plan, duration);"
           if old_create in s:
               s = s.replace(old_create, new_create, 1)
           elif new_create not in s:
