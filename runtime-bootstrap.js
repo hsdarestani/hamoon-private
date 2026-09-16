@@ -23,6 +23,8 @@ const { applyLoyaltyClubPatches } = require('./loyalty-club-bootstrap');
 const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
 const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmation-safety-bootstrap');
 const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootstrap');
+const { applyServerPowerControlPatches } = require('./server-power-controls-bootstrap');
+const { installServerDeletionConsistency } = require('./server-deletion-consistency-bootstrap');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installFastLocationFallbackModule } = require('./services/hetzner-location-fallback-fast-bootstrap');
@@ -59,11 +61,10 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_IP_QUALITY_GLOBAL_NODES: '6',
     HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO: '0.67',
     HETZNER_CHANGE_IP_REJECTED_COOLDOWN_MS: '0',
-    // Manual Change-IP runs against an already-delivered server and therefore must
-    // never rebuild/move the VM across locations. Keep the operation bounded: try
-    // only a few verified candidates, then preserve the previous IP and return a
-    // clear failure instead of spinning through the pool for tens of minutes.
-    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '4',
+    // Manual Change-IP never moves/rebuilds the VM. Try more definitively bad
+    // candidates in-place before giving up, while still keeping the inconclusive
+    // cap low so external probe outages cannot trap the request for a long time.
+    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '8',
     HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2',
     HETZNER_TRAFFIC_EUR_TO_TOMAN: '250000',
     LOYALTY_SILVER_CASHBACK: '2',
@@ -184,7 +185,8 @@ function applyPatches(coreSource) {
       )
     )
   );
-  const patched = applyBillingRenewalTickPatches(applyResumeTransactionalPatches(baseline));
+  const withPowerControls = applyServerPowerControlPatches(baseline);
+  const patched = applyBillingRenewalTickPatches(applyResumeTransactionalPatches(withPowerControls));
   return applyAdminUnlimitedFreeTestPatches(patched);
 }
 
@@ -194,6 +196,7 @@ function run() {
   installSafeLifecycleModule();
   installHetznerReconcilePolicy();
   installCleanIpChangeModule();
+  installServerDeletionConsistency();
   installDeliveredStatusRepair();
   const corePath = path.join(__dirname, 'index-core.js');
   const source = applyPatches(fs.readFileSync(corePath, 'utf8'));
