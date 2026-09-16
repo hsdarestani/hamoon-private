@@ -26,7 +26,6 @@ const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootst
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installFastLocationFallbackModule } = require('./services/hetzner-location-fallback-fast-bootstrap');
-const { scheduleStaleServerReconcile } = require('./stale-server-reconcile');
 
 // Reconcile policy imports the location-fallback module at module load time. Install
 // the accelerated version first so every reconcile cycle uses the same temporary
@@ -204,9 +203,10 @@ function run() {
   require.cache[corePath] = child;
   child._compile(source, corePath);
 
-  // One-shot, fail-closed cleanup for the customer-reported ghost server(s).
-  // Only rows for which the provider returns a definite 404/Not Found are marked
-  // deleted; live servers and auth/network/5xx failures are left untouched.
+  // Lazy-load the DB-backed one-shot repair only when the bot actually starts.
+  // Source validators import applyPatches() from this module and must not open a
+  // MySQL pool just by loading runtime-bootstrap.js.
+  const { scheduleStaleServerReconcile } = require('./stale-server-reconcile');
   scheduleStaleServerReconcile(['5825867194'], 500);
 
   return child.exports;
