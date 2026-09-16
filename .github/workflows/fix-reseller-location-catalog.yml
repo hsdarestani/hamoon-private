@@ -1,4 +1,4 @@
-name: Fix reseller location-aware catalog
+name: Fix reseller API request limits
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Patch customer API location-aware pricing and validation
+      - name: Separate reseller read and write rate-limit buckets
         shell: bash
         run: |
           set -euo pipefail
@@ -33,25 +33,42 @@ jobs:
 
           p = Path('customer-api.js')
           s = p.read_text()
+          old = """    if (!checkRate(client.key_prefix, ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) ? 10 : 60)) {
+      return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
+    }"""
+          new = """    const isWriteRequest = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+    const rateScope = isWriteRequest ? 'write' : 'read';
+    const rateLimit = isWriteRequest
+      ? Math.max(10, Number(process.env.RESELLER_API_WRITE_RPM || 30))
+      : Math.max(60, Number(process.env.RESELLER_API_READ_RPM || 180));
+    if (!checkRate(`${client.key_prefix}:${rateScope}`, rateLimit)) {
+      return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
+    }"""
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit('customer API rate-limit marker not found')
+          p.write_text(s)
 
-          old_prices = "  router.get('/prices', async (_req, res, next) => {\n    try { res.json({ ok: true, plans: await getHetznerSellablePlans(datacenters.hetzner) }); }\n    catch (e) { next(e); }\n  });"
-          new_prices = "  router.get('/prices', async (req, res, next) => {\n    try {\n      const location = String(req.query.location || '').trim().toLowerCase();\n      if (location && !isAllowed(req.apiClient.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این لوکیشن برای این کلاینت مجاز نیست.');\n      }\n      const baseDc = datacenters.hetzner;\n      const locationDc = location\n        ? { ...baseDc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' }\n        : baseDc;\n      res.json({ ok: true, location: location || null, plans: await getHetznerSellablePlans(locationDc) });\n    } catch (e) { next(e); }\n  });"
-          if old_prices in s:
-              s = s.replace(old_prices, new_prices, 1)
-          elif new_prices not in s:
-              raise SystemExit('prices route marker not found')
-
-          old_create = "      const plans = await getHetznerSellablePlans(dc);\n      const requestedType = String(input.server_type || '').trim().toLowerCase();\n      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);\n      if (!plan || plan.available === false) return apiError(res, 400, 'INVALID_PLAN', 'پلن انتخاب‌شده معتبر نیست.');\n\n      const image = String(input.image || 'ubuntu-24.04').trim();\n      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();\n      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, plan.id) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');\n      }\n      const pricing = createApiPricingSnapshot(client, plan, duration);"
-          new_create = "      const requestedType = String(input.server_type || '').trim().toLowerCase();\n      const image = String(input.image || 'ubuntu-24.04').trim();\n      const location = String(input.location || dc.HETZNER_LOCATION || 'nbg1').trim().toLowerCase();\n      if (!isAllowed(client.allowed_datacenters, dcKey) || !isAllowed(client.allowed_plans, requestedType) || !isAllowed(client.allowed_images, image) || !isAllowed(client.allowed_locations, location)) {\n        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن، ایمیج یا لوکیشن برای این کلاینت مجاز نیست.');\n      }\n\n      // Build the catalog for the exact target location so regional/ARM plans\n      // are never offered or priced using a different Hetzner region.\n      const locationDc = { ...dc, HETZNER_LOCATION: location, HETZNER_LOCATION_FALLBACKS: '' };\n      const plans = await getHetznerSellablePlans(locationDc);\n      const plan = plans.find(p => String(p.id || '').toLowerCase() === requestedType || String(p.hetzner_type || '').toLowerCase() === requestedType);\n      if (!plan || plan.available === false) {\n        return apiError(res, 400, 'UNSUPPORTED_LOCATION', 'این پلن در لوکیشن انتخابی قابل ارائه نیست. لطفاً پلن دیگری انتخاب کنید.');\n      }\n      const pricing = createApiPricingSnapshot(client, plan, duration);"
-          if old_create in s:
-              s = s.replace(old_create, new_create, 1)
-          elif new_create not in s:
-              raise SystemExit('server create catalog marker not found')
-
+          p = Path('reseller-api-extensions.js')
+          s = p.read_text()
+          old = """    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && !allowWrite(client.key_prefix || client.id)) {
+      return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
+    }"""
+          new = """    const isWriteRequest = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+    const writeLimit = Math.max(20, Number(process.env.RESELLER_API_EXTENSION_WRITE_RPM || 30));
+    if (isWriteRequest && !allowWrite(`${client.key_prefix || client.id}:write`, writeLimit)) {
+      return apiError(res, 429, 'RATE_LIMITED', 'تعداد درخواست‌ها بیش از حد مجاز است.');
+    }"""
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit('reseller extension rate-limit marker not found')
           p.write_text(s)
           PY
 
           node -c customer-api.js
+          node -c reseller-api-extensions.js
           git diff --check
 
       - name: Commit source fix
@@ -60,9 +77,9 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add customer-api.js
+          git add customer-api.js reseller-api-extensions.js
           if ! git diff --cached --quiet; then
-            git commit -m 'fix(api): scope reseller plans and pricing by location'
+            git commit -m 'fix(api): separate reseller read and write rate limits'
             git push origin HEAD:main
           fi
 
@@ -82,7 +99,7 @@ jobs:
           git fetch origin main
           git pull --ff-only origin main
           node -c customer-api.js
-          node -c Hetzner/hetzner-api.js
+          node -c reseller-api-extensions.js
           pm2 restart hamoonbot --update-env
           sleep 3
           pm2 show hamoonbot --no-color | sed -n '1,18p'
