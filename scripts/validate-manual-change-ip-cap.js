@@ -11,7 +11,7 @@ runtime.applyRuntimeSafetyDefaults();
 assert.strictEqual(
   process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS,
   '8',
-  'manual Change-IP must try up to eight verified candidate cycles'
+  'production manual Change-IP must try up to eight verified candidate cycles'
 );
 assert.strictEqual(
   process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
@@ -23,7 +23,7 @@ const source = fs.readFileSync(
   path.join(__dirname, '../services/hetzner-clean-ip-change.js'),
   'utf8'
 );
-assert(source.includes("HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 8, 1, 8"));
+assert(source.includes("HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 8"));
 assert(source.includes("HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,\n    2,"));
 assert(source.includes("error.code = 'NO_CLEAN_IPV4_AVAILABLE'"));
 assert(source.includes('error.attempts = maxAttempts'));
