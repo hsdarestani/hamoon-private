@@ -95,7 +95,7 @@ function applyRuntimeSafetyDefaults() {
 
 function installCleanIpChangeModule() {
   const legacyPath = require.resolve('./services/hetzner-change-ip');
-  const cleanModule = require('./services/hetzner-clean-ip-change');
+  const cleanModule = require('./services/hetzner-clean-ip-recovery');
   if (require.cache[legacyPath]) require.cache[legacyPath].exports = cleanModule;
 }
 
