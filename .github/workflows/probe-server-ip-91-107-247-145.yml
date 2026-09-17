@@ -21,8 +21,9 @@ jobs:
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
       TARGET_IP: 91.107.247.145
+      TARGET_SERVER_ID: '166093734'
     steps:
-      - name: Probe production DB and provider state by IP
+      - name: Probe production DB provider network and recent IP logs
         shell: bash
         run: |
           set -euo pipefail
@@ -31,7 +32,7 @@ jobs:
           chmod 600 ~/.ssh/hamoon_server_key
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_IP='$TARGET_IP' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_IP='$TARGET_IP' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
@@ -40,6 +41,7 @@ jobs:
           const db = require('./db');
           const datacenters = require('./datacenters');
           const cloud = require('./cloud-api');
+          const hetzner = require('./Hetzner/hetzner-api');
           const targetIp = process.env.TARGET_IP;
 
           (async () => {
@@ -51,7 +53,6 @@ jobs:
               ORDER BY updated_at DESC, created_at DESC
               LIMIT 10
             `, [targetIp]);
-
             console.log('PROBE_MATCH_COUNT=' + rows.length);
             for (const row of rows) {
               const safe = {
@@ -70,19 +71,34 @@ jobs:
               }
               try {
                 const srv = await cloud.getServer(dc, null, row.server_id);
-                const providerIp = srv?.public_net?.ipv4?.ip || srv?.public_ip || srv?.ip || null;
+                const providerIp = (srv?.addresses?.public || []).find(a => Number(a?.version) === 4)?.addr || null;
                 console.log('PROBE_ROW=' + JSON.stringify({
                   ...safe,
                   provider_state: String(srv?.status || srv?.state || 'unknown'),
                   provider_ip: providerIp,
                   provider_name: srv?.name || null
                 }));
-              } catch (e) {
-                console.log('PROBE_ROW=' + JSON.stringify({
-                  ...safe,
-                  provider_state: 'lookup_failed',
-                  provider_error: String(e?.status || e?.code || e?.message || 'unknown').replace(/\s+/g, '_').slice(0,120)
+
+                const raw = await hetzner.hetznerRequest(dc, 'GET', `/servers/${row.server_id}`);
+                const ipv4 = raw?.server?.public_net?.ipv4 || null;
+                console.log('PROBE_RAW_IPV4=' + JSON.stringify({
+                  ip: ipv4?.ip || null,
+                  blocked: ipv4?.blocked ?? null
                 }));
+
+                const primaries = await hetzner.hetznerRequest(dc, 'GET', '/primary_ips?per_page=200');
+                const match = (primaries?.primary_ips || []).find(p => String(p?.ip || '') === targetIp || String(p?.assignee_id || '') === String(row.server_id));
+                console.log('PROBE_PRIMARY_IP=' + JSON.stringify(match ? {
+                  id: match.id,
+                  ip: match.ip,
+                  type: match.type,
+                  assignee_id: match.assignee_id,
+                  assignee_type: match.assignee_type,
+                  auto_delete: match.auto_delete,
+                  location: match.location?.name || match.location || null
+                } : null));
+              } catch (e) {
+                console.log('PROBE_PROVIDER_ERROR=' + String(e?.status || e?.code || e?.message || 'unknown').replace(/\s+/g, '_').slice(0,160));
               }
             }
             await db.pool.end().catch(() => {});
@@ -92,4 +108,12 @@ jobs:
             process.exitCode = 1;
           });
           NODE
+
+          echo 'PROBE_RECENT_LOGS_BEGIN'
+          pm2 logs hamoonbot --nostream --lines 12000 2>&1 \
+            | grep -E "$TARGET_SERVER_ID|$TARGET_IP" \
+            | tail -n 160 \
+            | sed -E 's/((root_)?password|pass)([[:space:]]*[:=][[:space:]]*)[^,}[:space:]]+/\1\3<redacted>/Ig' \
+            || true
+          echo 'PROBE_RECENT_LOGS_END'
           REMOTE
