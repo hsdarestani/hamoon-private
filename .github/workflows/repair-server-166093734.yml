@@ -1,0 +1,94 @@
+name: Repair server 166093734
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-server-166093734.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 91.107.247.145
+      TARGET_SERVER_ID: '166093734'
+    steps:
+      - name: Reboot target through Hetzner API
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' TARGET_IP='$TARGET_IP' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const datacenters = require('./datacenters');
+          const hetzner = require('./Hetzner/hetzner-api');
+          const dc = datacenters.hetzner;
+          const id = process.env.TARGET_SERVER_ID;
+          const ip = process.env.TARGET_IP;
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function waitAction(actionId, timeoutMs=180000) {
+            const start = Date.now();
+            while (Date.now()-start < timeoutMs) {
+              const d = await hetzner.hetznerRequest(dc,'GET',`/actions/${actionId}`);
+              const a = d?.action;
+              if (a?.status === 'success') return a;
+              if (a?.status === 'error') throw new Error(`ACTION_FAILED:${a?.error?.message||'unknown'}`);
+              await sleep(3000);
+            }
+            throw new Error('ACTION_TIMEOUT');
+          }
+          (async()=>{
+            const before = await hetzner.hetznerRequest(dc,'GET',`/servers/${id}`);
+            const s = before?.server;
+            const actualIp = s?.public_net?.ipv4?.ip || null;
+            console.log('REPAIR_BEFORE='+JSON.stringify({id:String(s?.id||id),status:s?.status||null,ip:actualIp,blocked:s?.public_net?.ipv4?.blocked??null}));
+            if (String(actualIp) !== String(ip)) throw new Error(`IP_MISMATCH:${actualIp}`);
+            const r = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/reboot`,{});
+            console.log('REPAIR_REBOOT_ACTION='+String(r?.action?.id||''));
+            await waitAction(r?.action?.id);
+            let last = null;
+            for (let i=0;i<60;i++) {
+              const d = await hetzner.hetznerRequest(dc,'GET',`/servers/${id}`);
+              last = d?.server;
+              if (String(last?.status||'').toLowerCase()==='running') break;
+              await sleep(3000);
+            }
+            console.log('REPAIR_AFTER='+JSON.stringify({status:last?.status||null,ip:last?.public_net?.ipv4?.ip||null,blocked:last?.public_net?.ipv4?.blocked??null}));
+          })().catch(e=>{ console.error('REPAIR_FATAL='+String(e?.message||e)); process.exit(1); });
+          NODE
+          REMOTE
+
+      - name: Verify network after reboot
+        shell: bash
+        run: |
+          set +e
+          sleep 25
+          echo "PING_BEGIN"
+          ping -c 3 -W 2 "$TARGET_IP"
+          echo "PING_EXIT=$?"
+          echo "PING_END"
+          for p in 22 80 443; do
+            echo "PORT_${p}_BEGIN"
+            nc -vz -w 5 "$TARGET_IP" "$p"
+            echo "PORT_${p}_EXIT=$?"
+            echo "PORT_${p}_END"
+          done
+          exit 0
