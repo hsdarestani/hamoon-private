@@ -1,0 +1,95 @@
+name: Probe server IP 91.107.247.145
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-server-ip-91-107-247-145.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 91.107.247.145
+    steps:
+      - name: Probe production DB and provider state by IP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_IP='$TARGET_IP' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const targetIp = process.env.TARGET_IP;
+
+          (async () => {
+            const [rows] = await db.pool.execute(`
+              SELECT server_id, datacenter, status, public_ip, delivered_at, created_at, updated_at
+              FROM purchases
+              WHERE public_ip = ?
+                AND COALESCE(status, '') NOT IN ('deleted','provider_missing')
+              ORDER BY updated_at DESC, created_at DESC
+              LIMIT 10
+            `, [targetIp]);
+
+            console.log('PROBE_MATCH_COUNT=' + rows.length);
+            for (const row of rows) {
+              const safe = {
+                server_id: String(row.server_id),
+                datacenter: String(row.datacenter || ''),
+                db_status: String(row.status || ''),
+                public_ip: String(row.public_ip || ''),
+                delivered: row.delivered_at ? 'yes' : 'no',
+                created_at: row.created_at,
+                updated_at: row.updated_at
+              };
+              const dc = datacenters[row.datacenter];
+              if (!dc) {
+                console.log('PROBE_ROW=' + JSON.stringify({...safe, provider_state: 'datacenter_not_found'}));
+                continue;
+              }
+              try {
+                const srv = await cloud.getServer(dc, null, row.server_id);
+                const providerIp = srv?.public_net?.ipv4?.ip || srv?.public_ip || srv?.ip || null;
+                console.log('PROBE_ROW=' + JSON.stringify({
+                  ...safe,
+                  provider_state: String(srv?.status || srv?.state || 'unknown'),
+                  provider_ip: providerIp,
+                  provider_name: srv?.name || null
+                }));
+              } catch (e) {
+                console.log('PROBE_ROW=' + JSON.stringify({
+                  ...safe,
+                  provider_state: 'lookup_failed',
+                  provider_error: String(e?.status || e?.code || e?.message || 'unknown').replace(/\s+/g, '_').slice(0,120)
+                }));
+              }
+            }
+            await db.pool.end().catch(() => {});
+          })().catch(async (e) => {
+            console.log('PROBE_FATAL=' + String(e?.message || e).replace(/\s+/g, '_').slice(0,160));
+            try { await db.pool.end(); } catch (_) {}
+            process.exitCode = 1;
+          });
+          NODE
+          REMOTE
