@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/diagnose-hetzner-ssh.js'
+      - 'scripts/diagnose-installed-from-rescue.js'
       - '.github/workflows/diagnose-hetzner-ssh.yml'
   workflow_dispatch:
 
