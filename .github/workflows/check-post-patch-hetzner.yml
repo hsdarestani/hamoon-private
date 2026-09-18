@@ -1,5 +1,4 @@
 name: Check Post Patch Hetzner Purchases
-# temporary suspension-cause check
 
 on:
   push:
@@ -21,7 +20,7 @@ jobs:
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
     steps:
-      - name: Inspect affected server
+      - name: Inspect recent purchases
         shell: bash
         run: |
           set -euo pipefail
@@ -36,6 +35,13 @@ jobs:
           node - <<'NODE'
           require('dotenv').config();
           const mysql=require('mysql2/promise');
+          const net=require('net');
+          const tcp=(host,port=22,timeout=2500)=>new Promise(resolve=>{
+            if(!host)return resolve(null);
+            const s=net.createConnection({host,port});
+            let done=false;const f=(ok,error=null)=>{if(done)return;done=true;s.destroy();resolve({ok,error})};
+            s.setTimeout(timeout);s.once('connect',()=>f(true));s.once('timeout',()=>f(false,'timeout'));s.once('error',e=>f(false,e.code||e.message));
+          });
           (async()=>{
             const conn=await mysql.createConnection({
               host:process.env.DB_HOST||'localhost',
@@ -44,24 +50,30 @@ jobs:
               database:process.env.DB_NAME||'hamooncloud_db'
             });
             try{
-              const [[p]]=await conn.execute(
-                `SELECT telegram_id,server_id,server_name,datacenter,status,provider_status,public_ip,
-                        duration,amount,auto_renew,auto_renew_disabled_at,renewal_stopped_at,suspend_reason,
-                        created_at,updated_at,delivered_at,last_billed_at,ip_quality_summary
-                   FROM purchases WHERE server_id='166498066'`
+              const [rows]=await conn.execute(
+                `SELECT server_id,server_name,datacenter,status,public_ip,created_at,delivered_at,ip_quality_summary
+                   FROM purchases
+                  WHERE datacenter LIKE 'hetzner%'
+                    AND created_at >= '2026-09-18 20:27:00'
+                  ORDER BY created_at ASC
+                  LIMIT 30`
               );
-              console.log('PURCHASE='+JSON.stringify(p||null,null,2));
-              const [wl]=await conn.execute(
-                `SELECT id,amount,description,type,timestamp
-                   FROM wallet_logs
-                  WHERE telegram_id='278773395'
-                    AND timestamp >= DATE_SUB(NOW(), INTERVAL 90 MINUTE)
-                  ORDER BY id DESC LIMIT 40`
-              );
-              console.log('WALLET='+JSON.stringify(wl,null,2));
-            } finally { await conn.end(); }
+              const out=[];
+              for(const row of rows){
+                out.push({
+                  server_id:String(row.server_id),
+                  server_name:row.server_name,
+                  datacenter:row.datacenter,
+                  status:row.status,
+                  public_ip:row.public_ip,
+                  created_at:row.created_at,
+                  delivered_at:row.delivered_at,
+                  ip_quality_summary:row.ip_quality_summary,
+                  tcp22:await tcp(row.public_ip)
+                });
+              }
+              console.log('POST_PATCH='+JSON.stringify(out,null,2));
+            }finally{await conn.end()}
           })().catch(e=>{console.error(e);process.exit(1)});
           NODE
-          echo '=== SERVER FOCUSED LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 25000 2>&1             | grep -B 18 -A 35 -E '166498066|Srv-FIN-c98ce3|278773395'             | grep -E '166498066|Srv-FIN-c98ce3|278773395|SUSPEND|RESUME|خاموش|روشن|MINUTE_RENEWAL|Billing|billing|CHANGE_IP|PROVISIONING|callback|Callback|action'             | tail -n 500 || true
           REMOTE
