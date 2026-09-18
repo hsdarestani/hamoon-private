@@ -24,7 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate
-        run: node --check scripts/diagnose-hetzner-ssh.js
+        run: |
+          node --check scripts/diagnose-hetzner-ssh.js
+          node --check scripts/diagnose-installed-from-rescue.js
       - name: Prepare SSH
         shell: bash
         run: |
