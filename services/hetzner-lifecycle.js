@@ -10,6 +10,7 @@ const NON_BILLABLE_STATUSES = new Set([
 ]);
 const VALID_OPERATION_STATUSES = new Set(['active','suspended','stopped','shutoff']);
 const locks = new Set();
+const pendingSshRecoveryAttempted = new Set();
 const unavailable = new Map();
 const CHECK_HOST_BASE = 'https://check-host.net';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -460,9 +461,142 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
         }
       }
 
-      const readiness = await waitForReadiness(dc, purchase.server_id, { timeoutMs });
+      let readiness = await waitForReadiness(dc, purchase.server_id, { timeoutMs });
       if (readiness.quality && db.updateIpQualityResult) {
         await db.updateIpQualityResult(purchase.telegram_id, purchase.server_id, purchase.datacenter, qualitySummary(readiness.quality), false);
+      }
+
+      // A Hetzner VM that stays pending_ssh for several minutes must not spin
+      // forever. Perform one non-destructive power-cycle per process lifetime,
+      // then re-run the full readiness barrier. If SSH is still unavailable,
+      // move it to manual_review so billing remains blocked and support can
+      // repair/rebuild it deliberately instead of repeatedly rebooting it.
+      if (isDelivery && readiness.status === 'pending_ssh') {
+        const createdMs = new Date(purchase.created_at || 0).getTime();
+        const pendingAgeMs = Number.isFinite(createdMs) && createdMs > 0
+          ? Math.max(0, Date.now() - createdMs)
+          : 0;
+        const recoveryAfterMs = Math.max(
+          3 * 60 * 1000,
+          Number(process.env.HETZNER_PENDING_SSH_RECOVERY_AFTER_MS || 8 * 60 * 1000)
+        );
+        const recoveryKey = `${purchase.datacenter}:${purchase.server_id}`;
+
+        if (pendingAgeMs >= recoveryAfterMs && !pendingSshRecoveryAttempted.has(recoveryKey)) {
+          pendingSshRecoveryAttempted.add(recoveryKey);
+          try {
+            const live = await cloud.getServer(dc, null, purchase.server_id);
+            const liveStatus = String(live?.status || live?.state || '').toLowerCase();
+            if (liveStatus === 'running') {
+              await waitActionMaybe(dc, await cloud.powerOffHetznerServer(dc, purchase.server_id));
+            }
+            await waitActionMaybe(dc, await cloud.powerOnHetznerServer(dc, purchase.server_id));
+
+            readiness = await waitForReadiness(dc, purchase.server_id, {
+              timeoutMs: Math.max(
+                30000,
+                Number(process.env.HETZNER_PENDING_SSH_RECOVERY_TIMEOUT_MS || 90000)
+              )
+            });
+
+            if (readiness.quality && db.updateIpQualityResult) {
+              await db.updateIpQualityResult(
+                purchase.telegram_id,
+                purchase.server_id,
+                purchase.datacenter,
+                qualitySummary(readiness.quality),
+                false
+              );
+            }
+
+            console.log('[HETZNER_PENDING_SSH_RECOVERY]', {
+              server_id: String(purchase.server_id),
+              status: readiness.status,
+              ready: Boolean(readiness.ready),
+              ip: readiness.ip || null
+            });
+
+            if (readiness.ready) {
+              const newlyDelivered = Boolean(await db.markDelivered?.(
+                purchase.telegram_id,
+                purchase.server_id,
+                purchase.datacenter,
+                readiness.ip
+              ));
+              results.push({
+                server_id: purchase.server_id,
+                telegram_id: purchase.telegram_id,
+                datacenter: purchase.datacenter,
+                previous_status: purchase.status,
+                status: 'active',
+                ready: true,
+                newly_delivered: newlyDelivered,
+                ip: readiness.ip,
+                quality: readiness.quality,
+                ssh_recovered: true
+              });
+              continue;
+            }
+
+            if (readiness.status === 'pending_ip_quality') {
+              await db.updateScopedStatus?.(
+                purchase.telegram_id,
+                purchase.server_id,
+                purchase.datacenter,
+                'pending_ip_quality'
+              );
+              results.push({
+                server_id: purchase.server_id,
+                telegram_id: purchase.telegram_id,
+                datacenter: purchase.datacenter,
+                previous_status: purchase.status,
+                status: 'pending_ip_quality',
+                ready: false,
+                ip: readiness.ip || null,
+                quality: readiness.quality,
+                ssh_recovered: true,
+                reason: 'ssh_recovered_quality_pending'
+              });
+              continue;
+            }
+
+            await db.updateScopedStatus?.(
+              purchase.telegram_id,
+              purchase.server_id,
+              purchase.datacenter,
+              'manual_review'
+            );
+            results.push({
+              server_id: purchase.server_id,
+              telegram_id: purchase.telegram_id,
+              datacenter: purchase.datacenter,
+              previous_status: purchase.status,
+              status: 'manual_review',
+              ready: false,
+              ip: readiness.ip || null,
+              reason: 'ssh_unreachable_after_powercycle'
+            });
+            continue;
+          } catch (recoveryError) {
+            await db.updateScopedStatus?.(
+              purchase.telegram_id,
+              purchase.server_id,
+              purchase.datacenter,
+              'manual_review'
+            ).catch(() => null);
+            results.push({
+              server_id: purchase.server_id,
+              telegram_id: purchase.telegram_id,
+              datacenter: purchase.datacenter,
+              previous_status: purchase.status,
+              status: 'manual_review',
+              ready: false,
+              reason: 'pending_ssh_recovery_failed',
+              error: String(recoveryError?.message || recoveryError).slice(0, 120)
+            });
+            continue;
+          }
+        }
       }
 
       // Check-Host is an external signal, not the server itself. If Hetzner is running,
