@@ -1,0 +1,120 @@
+name: Diagnose current Hoseinzadeh Hetzner delivery
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/diag-hoseinzadeh-current.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect recent purchases and live readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo '=== PROCESS ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s); const p=a.find(x=>x.name==='hamoonbot'); console.log(JSON.stringify({status:p?.pm2_env?.status,pid:p?.pid,restarts:p?.pm2_env?.restart_time,uptime:p?.pm2_env?.pm_uptime},null,2));})"
+          echo '=== RECENT PURCHASES ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const cloud=require('./cloud-api');
+          const datacenters=require('./datacenters');
+          const net=require('net');
+          const runtime=require('./runtime-bootstrap');
+
+          function tcp22(ip, timeoutMs=5000){
+            return new Promise(resolve=>{
+              if(!ip) return resolve(false);
+              const s=net.createConnection({host:ip,port:22});
+              let done=false;
+              const finish=v=>{if(done)return;done=true;s.destroy();resolve(v);};
+              s.setTimeout(timeoutMs);
+              s.once('connect',()=>finish(true));
+              s.once('timeout',()=>finish(false));
+              s.once('error',()=>finish(false));
+            });
+          }
+
+          (async()=>{
+            runtime.applyRuntimeSafetyDefaults();
+            require('./services/check-host-strict-fetch').installStrictCheckHostFetch();
+            runtime.installSafeLifecycleModule();
+            const lifecycle=require('./services/hetzner-lifecycle');
+
+            const conn=await mysql.createConnection({
+              host:process.env.DB_HOST||'localhost',
+              user:process.env.DB_USER||'root',
+              password:process.env.DB_PASSWORD||'',
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            try {
+              const [rows]=await conn.execute(
+                `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
+                        delivered_at,created_at,updated_at,lifecycle_updated_at,ip_quality_attempts,
+                        last_ip_quality_result,last_billed_at
+                   FROM purchases
+                  WHERE telegram_id=? AND datacenter LIKE 'hetzner%'
+                    AND created_at >= DATE_SUB(NOW(), INTERVAL 18 HOUR)
+                  ORDER BY created_at DESC LIMIT 12`,
+                ['278773395']
+              );
+              console.log('ROWS='+JSON.stringify(rows,null,2));
+
+              for(const row of rows.slice(0,6)){
+                const key=String(row.datacenter||'').split('__')[0];
+                const dc=datacenters[row.datacenter]||datacenters[key];
+                if(!dc){ console.log('DIAG='+JSON.stringify({server_id:String(row.server_id),db_status:row.status,error:'DC_NOT_FOUND'})); continue; }
+                try{
+                  const srv=await cloud.getServer(dc,null,String(row.server_id));
+                  const ip=srv?.public_net?.ipv4?.ip||srv?.public_ip||row.public_ip||null;
+                  const providerStatus=String(srv?.status||srv?.state||'');
+                  const directTcp=await tcp22(ip);
+                  const quality=ip ? await lifecycle.checkIpQuality(ip,{polls:8,pollDelayMs:1200}) : null;
+                  console.log('DIAG='+JSON.stringify({
+                    server_id:String(row.server_id),
+                    name:row.server_name,
+                    db_status:row.status,
+                    delivered_at:row.delivered_at,
+                    age_min:Math.round((Date.now()-new Date(row.created_at).getTime())/60000),
+                    provider_status:providerStatus,
+                    ip,
+                    tcp22:directTcp,
+                    quality
+                  }));
+                }catch(e){
+                  console.log('DIAG='+JSON.stringify({server_id:String(row.server_id),db_status:row.status,error:String(e?.message||e),http:e?.response?.status||null}));
+                }
+              }
+            } finally { await conn.end(); }
+          })().catch(e=>{console.error(e);process.exit(1);});
+          NODE
+          echo '=== RELATED PM2 LOGS ==='
+          pm2 logs hamoonbot --lines 12000 --nostream 2>&1 | grep -B 12 -A 30 -E '278773395|HETZNER_PENDING_SSH_RECOVERY|HETZNER_PROVISIONING|hetzner_delivery_pending|HETZNER_PROVISIONING_RECONCILE' | tail -n 700 || true
+          REMOTE
