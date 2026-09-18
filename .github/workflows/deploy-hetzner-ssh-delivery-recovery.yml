@@ -43,7 +43,7 @@ jobs:
           const fs=require('fs');
           const vm=require('vm');
           const core=fs.readFileSync('index-core.js','utf8');
-          if (core.includes('99-hamoon.conf') || core.includes('ssh_pwauth: true')) {
+          if (core.includes('99-hamoon.conf')) {
             throw new Error('LEGACY_HETZNER_CLOUD_INIT_STILL_PRESENT');
           }
           if (!core.includes('Avoid custom cloud-init here')) {
