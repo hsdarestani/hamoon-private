@@ -39,6 +39,17 @@ async function waitAction(dc, action) {
   if (id) await hetzner.waitHetznerAction(dc, id, 180000);
 }
 
+async function hardPowerCycle(dc, serverId) {
+  const current = await hetzner.getHetznerServer(dc, serverId);
+  if (String(current?.status || '').toLowerCase() !== 'off') {
+    const off = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/poweroff`, {});
+    await waitAction(dc, off?.action);
+  }
+  await sleep(4000);
+  const on = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/poweron`, {});
+  await waitAction(dc, on?.action);
+}
+
 function sshExec({ host, password, command, timeoutMs = 120000 }) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
@@ -118,8 +129,19 @@ fi
 printf 'root:%s\\n' ${rootPass} | chroot /mnt/hamoon-root chpasswd
 chroot /mnt/hamoon-root ssh-keygen -A
 chroot /mnt/hamoon-root /usr/sbin/sshd -t
+if chroot /mnt/hamoon-root command -v netplan >/dev/null 2>&1; then
+  chroot /mnt/hamoon-root netplan generate
+fi
+chroot /mnt/hamoon-root systemctl unmask systemd-networkd.service >/dev/null 2>&1 || true
+chroot /mnt/hamoon-root systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
+chroot /mnt/hamoon-root systemctl enable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+chroot /mnt/hamoon-root systemctl unmask ssh.service ssh.socket >/dev/null 2>&1 || true
 chroot /mnt/hamoon-root systemctl enable ssh.service >/dev/null 2>&1 || chroot /mnt/hamoon-root systemctl enable sshd.service >/dev/null 2>&1 || true
+chroot /mnt/hamoon-root systemctl enable ssh.socket >/dev/null 2>&1 || true
+chroot /mnt/hamoon-root systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
 rm -f /mnt/hamoon-root/run/nologin /mnt/hamoon-root/etc/nologin 2>/dev/null || true
+echo "NETWORKD_ENABLED=$(chroot /mnt/hamoon-root systemctl is-enabled systemd-networkd.service 2>/dev/null || true)"
+echo "SSH_ENABLED=$(chroot /mnt/hamoon-root systemctl is-enabled ssh.service 2>/dev/null || true)"
 echo REPAIR_OK
 `;
   return `bash -lc ${shellSingleQuote(script)}`;
@@ -168,9 +190,8 @@ async function main() {
     rescueEnabled = true;
     await waitAction(dc, rescue?.action);
 
-    const reboot = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/reboot`, {});
-    await waitAction(dc, reboot?.action);
-    if (!await waitTcp(ip, 120000)) throw new Error('RESCUE_SSH_DID_NOT_START');
+    await hardPowerCycle(dc, serverId);
+    if (!await waitTcp(ip, 150000)) throw new Error('RESCUE_SSH_DID_NOT_START');
 
     console.log('[SSH_REPAIR] rescue SSH reachable; repairing installed system');
     const repaired = await sshExec({
@@ -185,8 +206,7 @@ async function main() {
     await waitAction(dc, disable?.action);
     rescueEnabled = false;
 
-    const rebootBack = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/reboot`, {});
-    await waitAction(dc, rebootBack?.action);
+    await hardPowerCycle(dc, serverId);
     const ready = await waitTcp(ip, 150000);
     if (!ready) throw new Error('SSH_STILL_UNREACHABLE_AFTER_REPAIR');
 
@@ -204,8 +224,7 @@ async function main() {
       try {
         const disable = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/disable_rescue`, {});
         await waitAction(dc, disable?.action);
-        const rebootBack = await hetzner.hetznerRequest(dc, 'POST', `/servers/${serverId}/actions/reboot`, {});
-        await waitAction(dc, rebootBack?.action);
+        await hardPowerCycle(dc, serverId);
       } catch (_) {}
     }
     throw error;
