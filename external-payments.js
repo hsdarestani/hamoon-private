@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('crypto');
+const { postToZibal } = require('./services/zibal-gateway');
 
 const PLANS = Object.freeze({
   '1m': { amountToman: 490000, label: 'اشتراک یک‌ماهه وستالند' },
@@ -87,9 +88,9 @@ async function createGatewayPayment({ db, axios, appName, intent, plan, amountTo
     [receipt, appName, intent, plan, amountToman, amountRial, orderId, metadataHash || null]
   );
   try {
-    const gateway = await axios.post('https://gateway.zibal.ir/v1/request', {
+    const gateway = await postToZibal(axios, '/v1/request', {
       merchant, amount: amountRial, callbackUrl, orderId, description: label
-    }, { timeout: 20000 });
+    }, { timeoutMs: 20000 });
     const data = gateway.data || {};
     if (Number(data.result) !== 100 || !data.trackId) {
       await db.pool.execute('UPDATE external_payments SET status=? WHERE receipt=?', ['gateway_error', receipt]);
@@ -122,7 +123,7 @@ async function verifyCallback({ req, res, db, axios, appName, returnUrl }) {
     const effectiveTrackId = trackId || String(row.track_id || '');
     if (!effectiveTrackId) return res.redirect(302, returnUrl('failed', row));
     const merchant = process.env.ZIBAL_MERCHANT_ID || MERCHANT_FALLBACK;
-    const verify = await axios.post('https://gateway.zibal.ir/v1/verify', { merchant, trackId: Number(effectiveTrackId) }, { timeout: 20000 });
+    const verify = await postToZibal(axios, '/v1/verify', { merchant, trackId: Number(effectiveTrackId) }, { timeoutMs: 20000 });
     const v = verify.data || {};
     if (Number(v.result) !== 100) {
       await db.pool.execute('UPDATE external_payments SET status=?,verify_payload=? WHERE receipt=?', ['verify_failed', JSON.stringify(v), receipt]);
