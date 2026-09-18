@@ -119,6 +119,22 @@ grep -E '^(ENABLED|IPV6)=' /mnt/hamoon-root/etc/ufw/ufw.conf 2>/dev/null || true
 grep -n -E '(^### tuple|^-A ufw-user-input|^COMMIT)' /mnt/hamoon-root/etc/ufw/user.rules 2>/dev/null | head -n 160 || true
 echo '=== IPTABLES PERSISTENT ==='
 sed -n '1,220p' /mnt/hamoon-root/etc/iptables/rules.v4 2>/dev/null || true
+echo '=== NFTABLES ==='
+sed -n '1,260p' /mnt/hamoon-root/etc/nftables.conf 2>/dev/null || true
+for f in /mnt/hamoon-root/etc/nftables.d/*; do [ -f "$f" ] && { echo "--- $f"; sed -n '1,220p' "$f"; }; done
+echo '=== OFFLINE SERVICE ENABLEMENT ==='
+for svc in systemd-networkd.service systemd-networkd-wait-online.service ssh.service sshd.service nftables.service ufw.service firewalld.service netfilter-persistent.service docker.service; do
+  printf '%s=' "$svc"
+  systemctl --root=/mnt/hamoon-root is-enabled "$svc" 2>/dev/null || true
+done
+echo '=== NETWORKD GENERATED FILES ==='
+find /mnt/hamoon-root/run/systemd/network /mnt/hamoon-root/etc/systemd/network -maxdepth 1 -type f -print 2>/dev/null | head -n 80 || true
+echo '=== LAST BOOT NETWORK/SSH JOURNAL ==='
+journalctl --directory=/mnt/hamoon-root/var/log/journal -b -1 --no-pager -u systemd-networkd.service -u systemd-networkd-wait-online.service -u ssh.service -u nftables.service -u ufw.service 2>/dev/null | tail -n 320 || true
+echo '=== CLOUD INIT LOG TAIL ==='
+tail -n 220 /mnt/hamoon-root/var/log/cloud-init.log 2>/dev/null || true
+echo '=== BOOT LOG CLUES ==='
+grep -R -h -E 'networkd|DHCP|eth0|ssh|nft|iptables|ufw|failed|error' /mnt/hamoon-root/var/log/syslog /mnt/hamoon-root/var/log/kern.log 2>/dev/null | tail -n 260 || true
 echo '=== FSTAB ==='
 sed -n '1,120p' /mnt/hamoon-root/etc/fstab 2>/dev/null || true
 echo '=== DIAG_DONE ==='
