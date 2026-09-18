@@ -45,6 +45,11 @@ jobs:
           curl -sS -o /tmp/zibal-body -w 'HTTP=%{http_code} CONNECT=%{time_connect} TLS=%{time_appconnect} TOTAL=%{time_total}\n' --connect-timeout 10 --max-time 20 https://gateway.zibal.ir/v1/request || true
           head -c 600 /tmp/zibal-body 2>/dev/null || true
           echo
+          echo '=== EACH A RECORD ==='
+          for ip in 185.143.233.238 185.143.234.238; do
+            echo "IP=$ip"
+            curl -sS -o /dev/null -w 'HTTP=%{http_code} REMOTE=%{remote_ip} CONNECT=%{time_connect} TLS=%{time_appconnect} TOTAL=%{time_total}\n' --resolve gateway.zibal.ir:443:$ip --connect-timeout 5 --max-time 10 https://gateway.zibal.ir/v1/request || true
+          done
 
           echo '=== ENV PRESENCE (NO VALUES) ==='
           node - <<'NODE'
