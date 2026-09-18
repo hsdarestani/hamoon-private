@@ -37,6 +37,8 @@ jobs:
           set -euo pipefail
           APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           cd "$APP_PATH"
+          echo '=== PM2 SERVER CONTEXT ==='
+          pm2 logs hamoonbot --lines 12000 --nostream 2>&1 | grep -B 18 -A 35 -E '166478452|166481659|Srv-FIN-581e23|Srv-FIN-9f6daa' | tail -n 500 || true
           node - <<'NODE'
           require('dotenv').config();
           const mysql = require('mysql2/promise');
