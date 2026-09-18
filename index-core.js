@@ -2413,26 +2413,18 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
         const kp = await openstackApi.createKeyPair(effectiveDc, null, `user-${userId}`);
         hetznerKeyId = kp.key_id || null;
       }
-      const userData = `#cloud-config
-ssh_pwauth: true
-disable_root: false
-write_files:
-  - path: /etc/ssh/sshd_config.d/99-hamoon.conf
-    permissions: '0644'
-    content: |
-      PasswordAuthentication yes
-      PermitRootLogin yes
-runcmd:
-  - systemctl reload ssh || systemctl restart ssh
-`;
+      // Hetzner system images already configure root/password SSH when no
+      // SSH key is supplied and return the generated root password in the
+      // create response. Avoid custom cloud-init here: it adds a second sshd
+      // configuration/reload during first boot and can race with the provider
+      // image's own cloud-init/network initialization.
       srv = await openstackApi.createServer(effectiveDc, null, {
         name: serverName,
         serverType: selectedFlavor?.hetzner_type || selectedFlavor?.id,
         image: selectedImage?.name || selectedImage?.id,
         location: effectiveDc.HETZNER_LOCATION,
         key_id: passwordOnly ? null : hetznerKeyId,
-        userLabel: userId,
-        user_data: userData
+        userLabel: userId
       });
       rootPassword = srv.root_password || null;
     }
