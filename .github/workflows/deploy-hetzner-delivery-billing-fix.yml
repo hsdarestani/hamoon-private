@@ -1,0 +1,114 @@
+name: Deploy Hetzner Delivery Billing Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-hetzner-delivery-billing-fix.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: hamoon-hetzner-delivery-billing-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: Validate source and runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check services/hetzner-lifecycle.js
+          node --check db.js
+          node --check server-deletion-refund.js
+          node scripts/validate-hetzner-lifecycle.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const db = fs.readFileSync('db.js','utf8');
+          const refund = fs.readFileSync('server-deletion-refund.js','utf8');
+          if (!/delivered_at = NOW\(\),\s*last_billed_at = NOW\(\)/s.test(db)) {
+            throw new Error('DELIVERY_BILLING_CLOCK_RESET_MISSING');
+          }
+          if (!refund.includes('server-deletion-refund-undelivered:') ||
+              !refund.includes('hetzner_never_delivered') ||
+              !refund.includes('undelivered_full_refund')) {
+            throw new Error('UNDELIVERED_FULL_REFUND_MISSING');
+          }
+          const runtime = require('./runtime-bootstrap');
+          const source = runtime.applyPatches(fs.readFileSync('index-core.js','utf8'));
+          new vm.Script(source,{filename:'index-core.runtime-patched.js'});
+          console.log('DELIVERY_BILLING_VALIDATION=ok');
+          NODE
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          git pull --ff-only
+          node scripts/restore-server-secret-key.js .env >/dev/null
+
+          node --check services/hetzner-lifecycle.js
+          node --check db.js
+          node --check server-deletion-refund.js
+          node scripts/validate-hetzner-lifecycle.js
+
+          node - <<'NODE'
+          const lifecycle = require('./services/hetzner-lifecycle');
+          if (lifecycle.isBillablePurchase({
+            status:'active',
+            datacenter:'hetzner-finland',
+            delivered_at:null
+          })) throw new Error('LIVE_GUARD_UNDELIVERED_BILLABLE');
+          if (!lifecycle.isBillablePurchase({
+            status:'active',
+            datacenter:'hetzner-finland',
+            delivered_at:new Date()
+          })) throw new Error('LIVE_GUARD_DELIVERED_NOT_BILLABLE');
+          console.log('LIVE_DELIVERY_BILLING_GUARD=ok');
+          NODE
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          node - <<'NODE'
+          const {execSync}=require('child_process');
+          const list=JSON.parse(execSync('pm2 jlist',{encoding:'utf8'}));
+          const p=list.find(x=>x.name==='hamoonbot');
+          const status=p?.pm2_env?.status||'missing';
+          console.log('HAMOONBOT_STATUS='+status);
+          if(status!=='online') process.exit(1);
+          NODE
+          REMOTE
