@@ -1,5 +1,5 @@
 name: Notify Fixed Hetzner Incidents
-# trigger-refund-resolution-20260919
+# trigger-refund-resolution-20260919-v2
 
 on:
   push:
