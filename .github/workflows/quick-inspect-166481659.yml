@@ -1,0 +1,67 @@
+name: Quick Inspect Hetzner 166481659
+
+on:
+  push:
+    paths:
+      - '.github/workflows/quick-inspect-166481659.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const net=require('net');
+          const db=require('./db');
+          const dc=require('./datacenters')['hetzner-finland'];
+          const cloud=require('./cloud-api');
+          const tcp=(host,port,timeout=5000)=>new Promise(resolve=>{
+            const s=net.createConnection({host,port});
+            const start=Date.now(); let done=false;
+            const f=(ok,error=null)=>{if(done)return;done=true;s.destroy();resolve({ok,error,ms:Date.now()-start})};
+            s.setTimeout(timeout);s.once('connect',()=>f(true));s.once('timeout',()=>f(false,'timeout'));s.once('error',e=>f(false,e.code||e.message));
+          });
+          (async()=>{
+            const p=await db.getPurchaseByServerId('166481659');
+            const srv=await cloud.getServer(dc,await cloud.getToken(dc),'166481659');
+            const ip=srv?.public_net?.ipv4?.ip||p?.public_ip;
+            console.log('PURCHASE='+JSON.stringify({
+              status:p?.status,delivered_at:p?.delivered_at,created_at:p?.created_at,
+              last_billed_at:p?.last_billed_at,public_ip:p?.public_ip,
+              ip_quality_summary:p?.ip_quality_summary,ip_quality_attempts:p?.ip_quality_attempts
+            }));
+            console.log('PROVIDER='+JSON.stringify({
+              id:srv?.id,name:srv?.name,status:srv?.status,locked:srv?.locked,
+              rescue_enabled:srv?.rescue_enabled,ipv4:srv?.public_net?.ipv4,
+              ipv6:srv?.public_net?.ipv6,server_type:srv?.server_type?.name||srv?.server_type?.id,
+              image:srv?.image?.name||srv?.image?.description||srv?.image?.id
+            }));
+            console.log('TCP22='+JSON.stringify(await tcp(ip,22,5000)));
+            console.log('TCP80='+JSON.stringify(await tcp(ip,80,3000)));
+            console.log('TCP443='+JSON.stringify(await tcp(ip,443,3000)));
+          })().catch(e=>{console.error(e);process.exit(1)});
+          NODE
+          REMOTE
