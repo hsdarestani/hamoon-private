@@ -51,5 +51,5 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
-          node scripts/diagnose-hetzner-ssh.js "$TARGET_IP"
+          node scripts/diagnose-installed-from-rescue.js "$TARGET_IP" "166290719"
           REMOTE
