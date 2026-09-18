@@ -81,7 +81,7 @@ function applyProviderVisibilityPatches(coreSource) {
     '            const userServers = results.flat();',
     "  console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);",
     '',
-    '            if (userServers.length === 0) {'
+    '            if (userServers.length === 0 && projectManageKeyboard.length === 0) {'
   ].join('\n');
   const manageReplacement = [
     '            const results = await Promise.all(promises);',
@@ -112,7 +112,7 @@ function applyProviderVisibilityPatches(coreSource) {
     "              return sendMessage(effectiveChatId, `⚠️ در حال حاضر ارتباط با ${failedNames} برقرار نیست و لیست سرورها قابل دریافت نیست. این پیام به معنی حذف شدن یا نداشتن سرور نیست. لطفاً کمی بعد دوباره تلاش کنید.`);",
     '            }',
     '',
-    '            if (userServers.length === 0) {'
+    '            if (userServers.length === 0 && projectManageKeyboard.length === 0) {'
   ].join('\n');
 
   source = replaceOnce(
