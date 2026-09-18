@@ -1,4 +1,4 @@
-name: Hard-cycle rescue server 166290719
+name: Boot installed OS server 166290719
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
       TARGET_IP: 91.107.245.81
       TARGET_SERVER_ID: '166290719'
     steps:
-      - name: Enable rescue and hard power-cycle target
+      - name: Hard power-cycle target into installed OS
         shell: bash
         run: |
           set -euo pipefail
@@ -61,10 +61,6 @@ jobs:
             const actualIp = s?.public_net?.ipv4?.ip || null;
             console.log('REPAIR_BEFORE='+JSON.stringify({id:String(s?.id||id),status:s?.status||null,ip:actualIp,blocked:s?.public_net?.ipv4?.blocked??null}));
             if (String(actualIp) !== String(ip)) throw new Error(`IP_MISMATCH:${actualIp}`);
-            const rescue = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/enable_rescue`,{type:'linux64'});
-            console.log('RESCUE_ENABLE_ACTION='+String(rescue?.action?.id||''));
-            await waitAction(rescue?.action?.id);
-
             const current = await hetzner.hetznerRequest(dc,'GET',`/servers/${id}`);
             if (String(current?.server?.status||'').toLowerCase() !== 'off') {
               const off = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
@@ -83,12 +79,12 @@ jobs:
               if (String(last?.status||'').toLowerCase()==='running') break;
               await sleep(3000);
             }
-            console.log('RESCUE_AFTER='+JSON.stringify({status:last?.status||null,rescue_enabled:last?.rescue_enabled??null,ip:last?.public_net?.ipv4?.ip||null,blocked:last?.public_net?.ipv4?.blocked??null}));
+            console.log('INSTALLED_OS_AFTER='+JSON.stringify({status:last?.status||null,rescue_enabled:last?.rescue_enabled??null,ip:last?.public_net?.ipv4?.ip||null,blocked:last?.public_net?.ipv4?.blocked??null}));
           })().catch(e=>{ console.error('REPAIR_FATAL='+String(e?.message||e)); process.exit(1); });
           NODE
           REMOTE
 
-      - name: Verify rescue network after hard cycle
+      - name: Verify installed OS network after hard cycle
         shell: bash
         run: |
           set +e
