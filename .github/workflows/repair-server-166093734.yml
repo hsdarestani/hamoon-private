@@ -1,4 +1,4 @@
-name: Repair server 166093734
+name: Hard-cycle rescue server 166290719
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ jobs:
       SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
-      TARGET_IP: 91.107.247.145
-      TARGET_SERVER_ID: '166093734'
+      TARGET_IP: 91.107.245.81
+      TARGET_SERVER_ID: '166290719'
     steps:
-      - name: Reboot target through Hetzner API
+      - name: Enable rescue and hard power-cycle target
         shell: bash
         run: |
           set -euo pipefail
@@ -61,9 +61,21 @@ jobs:
             const actualIp = s?.public_net?.ipv4?.ip || null;
             console.log('REPAIR_BEFORE='+JSON.stringify({id:String(s?.id||id),status:s?.status||null,ip:actualIp,blocked:s?.public_net?.ipv4?.blocked??null}));
             if (String(actualIp) !== String(ip)) throw new Error(`IP_MISMATCH:${actualIp}`);
-            const r = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/reboot`,{});
-            console.log('REPAIR_REBOOT_ACTION='+String(r?.action?.id||''));
-            await waitAction(r?.action?.id);
+            const rescue = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/enable_rescue`,{type:'linux64'});
+            console.log('RESCUE_ENABLE_ACTION='+String(rescue?.action?.id||''));
+            await waitAction(rescue?.action?.id);
+
+            const current = await hetzner.hetznerRequest(dc,'GET',`/servers/${id}`);
+            if (String(current?.server?.status||'').toLowerCase() !== 'off') {
+              const off = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              console.log('POWER_OFF_ACTION='+String(off?.action?.id||''));
+              await waitAction(off?.action?.id);
+            }
+            await sleep(5000);
+            const on = await hetzner.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            console.log('POWER_ON_ACTION='+String(on?.action?.id||''));
+            await waitAction(on?.action?.id);
+
             let last = null;
             for (let i=0;i<60;i++) {
               const d = await hetzner.hetznerRequest(dc,'GET',`/servers/${id}`);
@@ -71,12 +83,12 @@ jobs:
               if (String(last?.status||'').toLowerCase()==='running') break;
               await sleep(3000);
             }
-            console.log('REPAIR_AFTER='+JSON.stringify({status:last?.status||null,ip:last?.public_net?.ipv4?.ip||null,blocked:last?.public_net?.ipv4?.blocked??null}));
+            console.log('RESCUE_AFTER='+JSON.stringify({status:last?.status||null,rescue_enabled:last?.rescue_enabled??null,ip:last?.public_net?.ipv4?.ip||null,blocked:last?.public_net?.ipv4?.blocked??null}));
           })().catch(e=>{ console.error('REPAIR_FATAL='+String(e?.message||e)); process.exit(1); });
           NODE
           REMOTE
 
-      - name: Verify network after reboot
+      - name: Verify rescue network after hard cycle
         shell: bash
         run: |
           set +e
