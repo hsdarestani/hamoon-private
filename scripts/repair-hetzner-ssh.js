@@ -94,60 +94,47 @@ function shellSingleQuote(value) {
 }
 
 function buildRepairCommand() {
-  const script = `set -euo pipefail
-ROOT_DEV="$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2=="part" || $2=="lvm") && ($3=="ext4" || $3=="xfs" || $3=="btrfs") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')"
-if [ -z "$ROOT_DEV" ]; then
-  echo ROOT_DEVICE_NOT_FOUND >&2
-  exit 31
-fi
-mkdir -p /mnt/hamoon-root
-mount "$ROOT_DEV" /mnt/hamoon-root
-cleanup() {
-  umount /mnt/hamoon-root 2>/dev/null || true
-}
-trap cleanup EXIT
-
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BACKUP="/mnt/hamoon-root/root/hamoon-network-recovery-$STAMP"
-mkdir -p "$BACKUP"
-cp -a /mnt/hamoon-root/etc/netplan "$BACKUP/" 2>/dev/null || true
-cp -a /mnt/hamoon-root/etc/ssh "$BACKUP/" 2>/dev/null || true
-
-# Do not chroot into the installed OS: the guest may use a different CPU
-# architecture than the Rescue environment. systemctl --root only manages
-# unit symlinks on disk and does not execute guest binaries.
-systemctl --root=/mnt/hamoon-root unmask systemd-networkd.service 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root enable systemd-networkd.service 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root enable systemd-networkd-wait-online.service 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root unmask ssh.service ssh.socket 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root enable ssh.service 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root enable ssh.socket 2>/dev/null || true
-systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null || true
-
-# Netplan is present, but this server has previously booted with networkd disabled.
-# Add a minimal native networkd DHCP fallback matched by the NIC MAC so future
-# Primary-IP rotations keep working without hardcoding any IPv4 address.
-NET_MAC="$(grep -RhsE '^[[:space:]]*macaddress:' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | cut -d: -f2- | tr -d ' "' | tr -d "'" | xargs || true)"
-if printf '%s' "$NET_MAC" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}
-
-NETWORKD_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled systemd-networkd.service 2>/dev/null || true)"
-SSH_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled ssh.service 2>/dev/null || true)"
-SSH_SOCKET_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled ssh.socket 2>/dev/null || true)"
-echo "NETWORKD_ENABLED=$NETWORKD_STATE"
-echo "SSH_ENABLED=$SSH_STATE"
-echo "SSH_SOCKET_ENABLED=$SSH_SOCKET_STATE"
-echo "NETWORK_FALLBACK_FILE=$(test -s /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network && echo present || echo missing)"
-echo "REPAIR_BACKUP=$BACKUP"
-
-case "$NETWORKD_STATE" in enabled|enabled-runtime|static|indirect) ;; *) echo NETWORKD_ENABLE_FAILED >&2; exit 41;; esac
-if [ "$SSH_STATE" != "enabled" ] && [ "$SSH_SOCKET_STATE" != "enabled" ]; then
-  echo SSH_ENABLE_FAILED >&2
-  exit 42
-fi
-
-echo REPAIR_OK
-`;
-  return `bash -lc ${shellSingleQuote(script)}`;
+  const script = [
+    "set -euo pipefail",
+    "ROOT_DEV=\"$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2==\\\"part\\\" || $2==\\\"lvm\\\") && ($3==\\\"ext4\\\" || $3==\\\"xfs\\\" || $3==\\\"btrfs\\\") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')\"",
+    "if [ -z \"$ROOT_DEV\" ]; then echo ROOT_DEVICE_NOT_FOUND >&2; exit 31; fi",
+    "mkdir -p /mnt/hamoon-root",
+    "mount \"$ROOT_DEV\" /mnt/hamoon-root",
+    "cleanup() { umount /mnt/hamoon-root 2>/dev/null || true; }",
+    "trap cleanup EXIT",
+    "STAMP=\"$(date -u +%Y%m%dT%H%M%SZ)\"",
+    "BACKUP=\"/mnt/hamoon-root/root/hamoon-network-recovery-$STAMP\"",
+    "mkdir -p \"$BACKUP\"",
+    "cp -a /mnt/hamoon-root/etc/netplan \"$BACKUP/\" 2>/dev/null || true",
+    "cp -a /mnt/hamoon-root/etc/ssh \"$BACKUP/\" 2>/dev/null || true",
+    "cp -a /mnt/hamoon-root/etc/systemd/network \"$BACKUP/systemd-network\" 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root unmask systemd-networkd.service systemd-networkd-wait-online.service 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root unmask ssh.service ssh.socket 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root enable systemd-networkd.service 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root enable systemd-networkd-wait-online.service 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root enable ssh.service 2>/dev/null || true",
+    "systemctl --root=/mnt/hamoon-root enable ssh.socket 2>/dev/null || true",
+    "NET_MAC=\"$(awk '/macaddress:/ {gsub(/[\\\"[:space:]]/,\\\"\\\",$2); print $2; exit}' /mnt/hamoon-root/etc/netplan/*.yaml /mnt/hamoon-root/etc/netplan/*.yml 2>/dev/null || true)\"",
+    "if ! printf '%s\\n' \"$NET_MAC\" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then echo NETWORK_FALLBACK_MAC_NOT_FOUND >&2; exit 43; fi",
+    "mkdir -p /mnt/hamoon-root/etc/systemd/network",
+    "printf '%s\\n' '[Match]' \"MACAddress=$NET_MAC\" '' '[Network]' 'DHCP=ipv4' 'IPv6AcceptRA=yes' '' '[DHCPv4]' 'RouteMetric=100' 'UseDNS=yes' > /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network",
+    "chmod 644 /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network",
+    "rm -f /mnt/hamoon-root/run/nologin /mnt/hamoon-root/etc/nologin 2>/dev/null || true",
+    "NETWORKD_STATE=\"$(systemctl --root=/mnt/hamoon-root is-enabled systemd-networkd.service 2>/dev/null || true)\"",
+    "SSH_STATE=\"$(systemctl --root=/mnt/hamoon-root is-enabled ssh.service 2>/dev/null || true)\"",
+    "SSH_SOCKET_STATE=\"$(systemctl --root=/mnt/hamoon-root is-enabled ssh.socket 2>/dev/null || true)\"",
+    "echo \"NETWORKD_ENABLED=$NETWORKD_STATE\"",
+    "echo \"SSH_ENABLED=$SSH_STATE\"",
+    "echo \"SSH_SOCKET_ENABLED=$SSH_SOCKET_STATE\"",
+    "echo \"NETWORK_FALLBACK_MAC=$NET_MAC\"",
+    "echo \"NETWORK_FALLBACK_FILE=$(test -s /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network && echo present || echo missing)\"",
+    "echo \"REPAIR_BACKUP=$BACKUP\"",
+    "case \"$NETWORKD_STATE\" in enabled|enabled-runtime|static|indirect) ;; *) echo NETWORKD_ENABLE_FAILED >&2; exit 41;; esac",
+    "case \"$SSH_STATE:$SSH_SOCKET_STATE\" in enabled:*|static:*|indirect:*|*:enabled|*:static|*:indirect) ;; *) echo SSH_ENABLE_FAILED >&2; exit 42;; esac",
+    "echo REPAIR_OK"
+  ].join('\n');
+  return 'bash -lc ' + shellSingleQuote(script);
 }
 
 async function findPurchaseByIp(ip) {
