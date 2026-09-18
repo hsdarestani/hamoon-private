@@ -1,1 +1,2 @@
 trigger current Hoseinzadeh production diagnostic
+retry after query fix
