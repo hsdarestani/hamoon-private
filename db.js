@@ -1819,6 +1819,7 @@ async function markDelivered(
      SET status = 'active',
          public_ip = COALESCE(?, public_ip),
          delivered_at = NOW(),
+         last_billed_at = NOW(),
          lifecycle_error_code = NULL,
          lifecycle_updated_at = NOW(),
          updated_at = NOW()
