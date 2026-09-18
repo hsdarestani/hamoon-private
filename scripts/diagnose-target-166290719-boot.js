@@ -99,6 +99,72 @@ function sshExec({host, password, command, timeoutMs = 120000}) {
       'ls -ld /mnt/hamoon-root/usr/bin /mnt/hamoon-root/usr/sbin /mnt/hamoon-root/usr/lib/systemd 2>/dev/null || true',
       'for x in sh dash bash env mount ip systemctl init; do echo --$x--; find /mnt/hamoon-root/usr /mnt/hamoon-root/bin /mnt/hamoon-root/sbin -maxdepth 4 -name "$x" -ls 2>/dev/null | head -n 12; done',
       'for x in /mnt/hamoon-root/usr/bin/dash /mnt/hamoon-root/usr/bin/bash /mnt/hamoon-root/usr/bin/env /mnt/hamoon-root/usr/bin/mount /mnt/hamoon-root/usr/bin/systemctl /mnt/hamoon-root/usr/sbin/init /mnt/hamoon-root/usr/lib/systemd/systemd; do printf "%s " "$x"; if [ -e "$x" ] || [ -L "$x" ]; then stat -Lc "%F %a %s" "$x" 2>/dev/null || ls -l "$x"; else echo MISSING; fi; done',
+      "echo '=== PACKAGE CACHE / DPKG ==='",
+      'ls -lh /mnt/hamoon-root/var/cache/apt/archives/*.deb 2>/dev/null | tail -n 80 || true',
+      'for x in /mnt/hamoon-root/usr/bin/apt-get /mnt/hamoon-root/usr/bin/apt /mnt/hamoon-root/usr/bin/dpkg /mnt/hamoon-root/usr/bin/dpkg-deb /mnt/hamoon-root/usr/bin/curl /mnt/hamoon-root/usr/bin/wget; do printf "%s=" "$x"; if [ -e "$x" ]; then ls -l "$x"; else echo MISSING; fi; done',
+      "for p in apt bash coreutils mount util-linux systemd systemd-sysv iproute2 openssh-server; do printf '%s ' \"$p\"; dpkg-query --admindir=/mnt/hamoon-root/var/lib/dpkg -W -f='${Version} ${db:Status-Abbrev}\\n' \"$p\" 2>/dev/null || true; done",
+      "for p in apt bash coreutils mount util-linux systemd systemd-sysv iproute2 openssh-server; do echo ---$p.list---; grep -E '/(apt-get|bash|env|mount|systemctl|init|ip|sshd)
+      "dpkg-query --admindir=/mnt/hamoon-root/var/lib/dpkg -W -f='${Package} ${Version} ${db:Status-Abbrev}\\n' bash dash systemd systemd-sysv init-system-helpers openssh-server 2>/dev/null || true",
+      "echo '=== FSTAB ==='",
+      'cat /mnt/hamoon-root/etc/fstab 2>/dev/null || true',
+      "echo '=== PARTITIONS ==='",
+      'lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,UUID,PARTUUID,LABEL,MOUNTPOINTS || true',
+      'blkid || true',
+      'fdisk -l /dev/sda 2>/dev/null || true',
+      "echo '=== EFI PARTITION ==='",
+      'EFI_DEV=$(blkid -U EC56-40F3 2>/dev/null || true)',
+      'echo EFI_DEV=$EFI_DEV',
+      'if [ -n "$EFI_DEV" ]; then mkdir -p /mnt/hamoon-efi; mount -o ro "$EFI_DEV" /mnt/hamoon-efi; find /mnt/hamoon-efi -maxdepth 4 -type f -printf "%p %s bytes %TY-%Tm-%Td %TH:%TM:%TS\\n" 2>/dev/null | sort; umount /mnt/hamoon-efi; fi',
+      "echo '=== ROOT FS ==='",
+      'df -h /mnt/hamoon-root || true',
+      "tune2fs -l \"$ROOT_DEV\" 2>/dev/null | grep -E 'Filesystem state|Errors behavior|Last mount time|Last write time|Mount count|Maximum mount count|Last checked|Check interval' || true",
+      "echo '=== BOOT TREE ==='",
+      "find /mnt/hamoon-root/boot -maxdepth 2 -type f -printf '%p %s bytes\\n' 2>/dev/null | sort | tail -n 220 || true",
+      'ls -lah /mnt/hamoon-root/boot 2>/dev/null || true',
+      'ls -lah /mnt/hamoon-root/boot/grub 2>/dev/null || true',
+      "echo '=== KERNELS ==='",
+      'ls -1 /mnt/hamoon-root/lib/modules 2>/dev/null || true',
+      'ls -l /mnt/hamoon-root/vmlinuz /mnt/hamoon-root/initrd.img 2>/dev/null || true',
+      "echo '=== GRUB DEFAULT ==='",
+      'cat /mnt/hamoon-root/etc/default/grub 2>/dev/null || true',
+      "echo '=== GRUB MENU ==='",
+      "grep -nE '^(menuentry|submenu)|linux[[:space:]]+/boot|initrd[[:space:]]+/boot' /mnt/hamoon-root/boot/grub/grub.cfg 2>/dev/null | tail -n 220 || true",
+      "echo '=== DEFAULT TARGET ==='",
+      'readlink -f /mnt/hamoon-root/etc/systemd/system/default.target 2>/dev/null || true',
+      "echo '=== LAST BOOTS ==='",
+      'journalctl --directory=/mnt/hamoon-root/var/log/journal --list-boots --no-pager 2>/dev/null | tail -n 24 || true',
+      "echo '=== LAST BOOT WARNINGS ==='",
+      'journalctl --directory=/mnt/hamoon-root/var/log/journal -b -1 -p warning..alert --no-pager 2>/dev/null | tail -n 600 || true',
+      "echo '=== LAST BOOT KERNEL ==='",
+      'journalctl --directory=/mnt/hamoon-root/var/log/journal -b -1 -k --no-pager 2>/dev/null | tail -n 650 || true',
+      "echo '=== LAST BOOT CORE ==='",
+      "journalctl --directory=/mnt/hamoon-root/var/log/journal -b -1 --no-pager 2>/dev/null | grep -E 'Reached target|Failed to|Dependency failed|emergency|rescue|mount|fsck|systemd-networkd|network-online|sshd|ssh.service|cloud-init|cloud-final|segfault|panic|OOM|read-only|I/O error' | tail -n 850 || true",
+      "echo '=== RECOVERY SERVICE ==='",
+      'ls -l /mnt/hamoon-root/etc/systemd/system/multi-user.target.wants/hamoon-network-recovery.service 2>/dev/null || true',
+      'cat /mnt/hamoon-root/etc/systemd/system/hamoon-network-recovery.service 2>/dev/null || true',
+      'test -e /mnt/hamoon-root/run/hamoon-recovery/network.ok && cat /mnt/hamoon-root/run/hamoon-recovery/network.ok || echo RECOVERY_RUNTIME_MARKER_ABSENT',
+      "echo '=== SSH UNIT ==='",
+      'ls -l /mnt/hamoon-root/usr/lib/systemd/system/ssh.service /mnt/hamoon-root/lib/systemd/system/ssh.service /mnt/hamoon-root/etc/systemd/system/multi-user.target.wants/ssh.service 2>/dev/null || true',
+      "grep -nE '^(ExecStart|After|Wants|Requires|Condition|Type|WantedBy|Alias)' /mnt/hamoon-root/usr/lib/systemd/system/ssh.service 2>/dev/null || true",
+      "echo '=== BOOT DIAG DONE ==='"
+    ].join('\n');
+    const out = await sshExec({host:TARGET_IP, password:rescuePassword, command:cmd, timeoutMs:120000});
+    console.log(out.stdout.slice(0,100000));
+    if (out.stderr) console.log('STDERR=' + out.stderr.slice(0,5000));
+  } finally {
+    if (rescueEnabled) {
+      try {
+        const disable = await hetzner.hetznerRequest(dc, 'POST', '/servers/' + TARGET_SERVER_ID + '/actions/disable_rescue', {});
+        await waitAction(dc, disable?.action);
+        await hardCycle(dc, TARGET_SERVER_ID);
+      } catch (_) {}
+    }
+    await db.pool.end().catch(() => {});
+  }
+})().catch(e => {
+  console.error('BOOT_DIAG_FATAL=' + String(e?.message || e).slice(0,500));
+  process.exitCode = 1;
+}); \"/mnt/hamoon-root/var/lib/dpkg/info/$p.list\" 2>/dev/null || true; done",
       "echo '=== PACKAGE STATUS ==='",
       "dpkg-query --admindir=/mnt/hamoon-root/var/lib/dpkg -W -f='${Package} ${Version} ${db:Status-Abbrev}\\n' bash dash systemd systemd-sysv init-system-helpers openssh-server 2>/dev/null || true",
       "echo '=== FSTAB ==='",
