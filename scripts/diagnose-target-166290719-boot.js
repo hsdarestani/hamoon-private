@@ -103,7 +103,7 @@ function sshExec({host, password, command, timeoutMs = 120000}) {
       'ls -lh /mnt/hamoon-root/var/cache/apt/archives/*.deb 2>/dev/null | tail -n 80 || true',
       'for x in /mnt/hamoon-root/usr/bin/apt-get /mnt/hamoon-root/usr/bin/apt /mnt/hamoon-root/usr/bin/dpkg /mnt/hamoon-root/usr/bin/dpkg-deb /mnt/hamoon-root/usr/bin/curl /mnt/hamoon-root/usr/bin/wget; do printf "%s=" "$x"; if [ -e "$x" ]; then ls -l "$x"; else echo MISSING; fi; done',
       "for p in apt bash coreutils mount util-linux systemd systemd-sysv iproute2 openssh-server; do printf '%s ' \"$p\"; dpkg-query --admindir=/mnt/hamoon-root/var/lib/dpkg -W -f='${Version} ${db:Status-Abbrev}\\n' \"$p\" 2>/dev/null || true; done",
-      "for p in apt bash coreutils mount util-linux systemd systemd-sysv iproute2 openssh-server; do echo ---$p.list---; grep -E '/(apt-get|bash|env|mount|systemctl|init|ip|sshd)
+      'for p in apt bash coreutils mount util-linux systemd systemd-sysv iproute2 openssh-server; do echo ---$p.list---; grep -E \'/(apt-get|bash|env|mount|systemctl|init|ip|sshd)$\' "/mnt/hamoon-root/var/lib/dpkg/info/$p.list" 2>/dev/null || true; done',
       "dpkg-query --admindir=/mnt/hamoon-root/var/lib/dpkg -W -f='${Package} ${Version} ${db:Status-Abbrev}\\n' bash dash systemd systemd-sysv init-system-helpers openssh-server 2>/dev/null || true",
       "echo '=== FSTAB ==='",
       'cat /mnt/hamoon-root/etc/fstab 2>/dev/null || true',
