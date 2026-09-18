@@ -1,0 +1,27 @@
+name: Probe 65.109.195.219
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe-65-109-195-219.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Probe TCP
+        shell: bash
+        run: |
+          set -u
+          for port in 22 80 443; do
+            if timeout 6 bash -c "cat < /dev/null > /dev/tcp/65.109.195.219/$port" 2>/dev/null; then
+              echo "PORT_$port=OPEN"
+            else
+              echo "PORT_$port=CLOSED_OR_TIMEOUT"
+            fi
+          done
