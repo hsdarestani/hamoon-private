@@ -482,6 +482,26 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
         );
         const recoveryKey = `${purchase.datacenter}:${purchase.server_id}`;
 
+        if (pendingAgeMs >= recoveryAfterMs && pendingSshRecoveryAttempted.has(recoveryKey)) {
+          await db.updateScopedStatus?.(
+            purchase.telegram_id,
+            purchase.server_id,
+            purchase.datacenter,
+            'manual_review'
+          );
+          results.push({
+            server_id: purchase.server_id,
+            telegram_id: purchase.telegram_id,
+            datacenter: purchase.datacenter,
+            previous_status: purchase.status,
+            status: 'manual_review',
+            ready: false,
+            ip: readiness.ip || null,
+            reason: 'ssh_unstable_after_recovery'
+          });
+          continue;
+        }
+
         if (pendingAgeMs >= recoveryAfterMs && !pendingSshRecoveryAttempted.has(recoveryKey)) {
           pendingSshRecoveryAttempted.add(recoveryKey);
           try {
