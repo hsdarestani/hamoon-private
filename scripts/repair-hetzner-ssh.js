@@ -115,7 +115,7 @@ function buildRepairCommand() {
     "systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null || true",
     "systemctl --root=/mnt/hamoon-root enable ssh.service 2>/dev/null || true",
     "systemctl --root=/mnt/hamoon-root enable ssh.socket 2>/dev/null || true",
-    "NET_MAC=\"$(grep -Rhs 'macaddress:' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | tr -d '\\"' | awk '{print $2}' || true)\"",
+    "NET_MAC=\"$(grep -Rhs 'macaddress:' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | cut -d'\"' -f2 || true)\"",
     "if ! printf '%s\\n' \"$NET_MAC\" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then echo NETWORK_FALLBACK_MAC_NOT_FOUND >&2; exit 43; fi",
     "mkdir -p /mnt/hamoon-root/etc/systemd/network",
     "printf '%s\\n' '[Match]' \"MACAddress=$NET_MAC\" '' '[Network]' 'DHCP=ipv4' 'IPv6AcceptRA=yes' '' '[DHCPv4]' 'RouteMetric=100' 'UseDNS=yes' > /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network",
