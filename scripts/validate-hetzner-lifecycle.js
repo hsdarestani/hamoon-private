@@ -79,6 +79,14 @@ const cloud = require('../cloud-api');
   assert(!lifecycle.isBillablePurchase({ status: 'provisioning' }));
   assert(!lifecycle.isBillablePurchase({ status: 'pending_ip_quality' }));
   assert(lifecycle.isBillablePurchase({ status: 'active' }));
+  assert.strictEqual(
+    lifecycle.isBillablePurchase({ status: 'active', datacenter: 'hetzner-finland', delivered_at: null }),
+    false
+  );
+  assert.strictEqual(
+    lifecycle.isBillablePurchase({ status: 'active', datacenter: 'hetzner-finland', delivered_at: new Date() }),
+    true
+  );
   const plan = { amount_hourly: 10, amount_monthly: 6000, id: 'cax11' };
   assert.strictEqual(lifecycle.getFlavorCyclePrice(plan, 'hourly'), 10);
   assert.strictEqual(lifecycle.getFlavorCyclePrice(plan, 'daily'), 240);
