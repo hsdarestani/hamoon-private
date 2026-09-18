@@ -25,7 +25,7 @@ jobs:
       SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
-      TARGET_IP: 65.109.181.115
+      TARGET_IP: 91.107.245.81
     steps:
       - uses: actions/checkout@v4
 
