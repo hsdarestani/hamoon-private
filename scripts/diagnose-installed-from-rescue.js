@@ -104,12 +104,12 @@ trap 'umount /mnt/hamoon-root 2>/dev/null || true' EXIT
 echo '=== OS ==='
 sed -n '1,25p' /mnt/hamoon-root/etc/os-release 2>/dev/null || true
 echo '=== NETPLAN ==='
-for f in /mnt/hamoon-root/etc/netplan/*.yaml /mnt/hamoon-root/etc/netplan/*.yml; do [ -f "$f" ] && { echo "--- ${f#/mnt/hamoon-root}"; sed -n '1,220p' "$f"; }; done
+for f in /mnt/hamoon-root/etc/netplan/*.yaml /mnt/hamoon-root/etc/netplan/*.yml; do [ -f "$f" ] && { echo "--- $f"; sed -n '1,220p' "$f"; }; done
 echo '=== IFUPDOWN ==='
 [ -f /mnt/hamoon-root/etc/network/interfaces ] && sed -n '1,220p' /mnt/hamoon-root/etc/network/interfaces || true
-for f in /mnt/hamoon-root/etc/network/interfaces.d/*; do [ -f "$f" ] && { echo "--- ${f#/mnt/hamoon-root}"; sed -n '1,220p' "$f"; }; done
+for f in /mnt/hamoon-root/etc/network/interfaces.d/*; do [ -f "$f" ] && { echo "--- $f"; sed -n '1,220p' "$f"; }; done
 echo '=== SYSTEMD NETWORK ==='
-for f in /mnt/hamoon-root/etc/systemd/network/*; do [ -f "$f" ] && { echo "--- ${f#/mnt/hamoon-root}"; sed -n '1,220p' "$f"; }; done
+for f in /mnt/hamoon-root/etc/systemd/network/*; do [ -f "$f" ] && { echo "--- $f"; sed -n '1,220p' "$f"; }; done
 echo '=== CLOUD INIT NETWORK ==='
 grep -R -n -E 'network:|config:[[:space:]]*disabled' /mnt/hamoon-root/etc/cloud/cloud.cfg.d 2>/dev/null | head -n 120 || true
 echo '=== SSHD EFFECTIVE CONFIG FILES ==='
