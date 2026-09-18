@@ -121,8 +121,35 @@ async function main() {
       }
     }
 
+    const refundResolutionUser = '278773395';
+    let refundResolutionSent = 0;
+    const [refundAlready] = await db.execute(
+      'SELECT 1 FROM incident_fix_notifications WHERE incident_key=? AND telegram_id=? LIMIT 1',
+      ['hoseinzadeh-refund-resolution-20260919', refundResolutionUser]
+    );
+    if (!refundAlready.length) {
+      const message = [
+        '✅ وضعیت سرور و کیف پول شما بررسی و اصلاح شد.',
+        '',
+        'سرور Srv-FIN-581e23 هیچ‌وقت تحویل نهایی نشده بود. از مبلغ کسرشده، ۱۱۶۴ تومان باقی‌مانده به کیف پول شما برگشت داده شد.',
+        'موجودی فعلی کیف پول شما: ۱۰۳٬۳۵۱ تومان',
+        '',
+        'سرور Srv-FIN-9f6daa هم تحویل نشده بود و مبلغ ۲۹۶۲ تومان آن قبلاً به‌طور کامل برگشت داده شده است.',
+        '',
+        'کسرهای ساعتی حدود ۳۰۰۰ تومان مربوط به این دو سرور نیست و مربوط به Srv-FIN-7b24a5 است که فعال و تحویل‌شده است.',
+        '',
+        'برای سرورهای Hetzner تا قبل از تحویل نهایی، تمدید و Billing شروع نمی‌شود و در صورت حذف بدون تحویل، مبلغ خرید باید کامل Refund شود. 🙏'
+      ].join('\n');
+      await bot.sendMessage(refundResolutionUser, message);
+      await db.execute(
+        'INSERT IGNORE INTO incident_fix_notifications (incident_key, telegram_id) VALUES (?,?)',
+        ['hoseinzadeh-refund-resolution-20260919', refundResolutionUser]
+      );
+      refundResolutionSent = 1;
+    }
+
     console.log(`upgrade_notifications_sent=${upgradeSent}`);
-    console.log(`change_ip_notifications_sent=${changeIpSent}`);
+    console.log(`change_ip_notifications_sent=${changeIpSent}`);\n    console.log(`refund_resolution_notifications_sent=${refundResolutionSent}`);
     console.log(`upgrade_recipient_resolved=${Boolean(upgrade?.user)}`);
     console.log(`change_ip_recipient_resolved=${Boolean(changeIpUser)}`);
   } finally {
