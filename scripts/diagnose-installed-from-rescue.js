@@ -95,6 +95,11 @@ async function main() {
     if (!await waitTcp(ip, 150000)) throw new Error('RESCUE_SSH_DID_NOT_START_AFTER_HARD_CYCLE');
 
     const command = String.raw`set -euo pipefail
+echo '=== RESCUE NETWORK ==='
+ip -br link 2>/dev/null || true
+ip -4 -br addr 2>/dev/null || true
+ip -4 route 2>/dev/null || true
+for n in /sys/class/net/*; do [ "${n##*/}" = "lo" ] || echo "RESCUE_NIC=${n##*/} MAC=$(cat "$n/address" 2>/dev/null || true)"; done
 ROOT_DEV="$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2=="part" || $2=="lvm") && ($3=="ext4" || $3=="xfs" || $3=="btrfs") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')"
 echo "ROOT_DEV=$ROOT_DEV"
 [ -n "$ROOT_DEV" ] || exit 31
@@ -150,7 +155,7 @@ echo '=== DIAG_DONE ==='
 
     const result = await sshExec({host:ip, password:rescuePassword, command, timeoutMs:120000});
     console.log('INSTALLED_DIAG_BEGIN');
-    console.log(result.stdout.slice(0,30000));
+    console.log(result.stdout.slice(0,60000));
     if (result.stderr) console.log('INSTALLED_DIAG_STDERR=' + result.stderr.slice(0,3000));
     console.log('INSTALLED_DIAG_END');
 
