@@ -1,5 +1,5 @@
 name: Check Post Patch Hetzner Purchases
-# manual current-state check 2026-09-19
+# temporary user-specific current-state check
 
 on:
   push:
@@ -52,22 +52,26 @@ jobs:
             });
             try{
               const [rows]=await conn.execute(
-                `SELECT server_id,server_name,datacenter,status,public_ip,created_at,delivered_at,ip_quality_summary
+                `SELECT telegram_id,server_id,server_name,datacenter,status,provider_status,public_ip,created_at,updated_at,delivered_at,ip_quality_summary
                    FROM purchases
-                  WHERE datacenter LIKE 'hetzner%'
-                    AND created_at >= '2026-09-18 20:27:00'
-                  ORDER BY created_at ASC
-                  LIMIT 30`
+                  WHERE telegram_id='278773395'
+                    AND datacenter LIKE 'hetzner%'
+                    AND created_at >= '2026-09-18 20:00:00'
+                  ORDER BY created_at DESC
+                  LIMIT 12`
               );
               const out=[];
               for(const row of rows){
                 out.push({
+                  telegram_id:String(row.telegram_id),
                   server_id:String(row.server_id),
                   server_name:row.server_name,
                   datacenter:row.datacenter,
                   status:row.status,
+                  provider_status:row.provider_status,
                   public_ip:row.public_ip,
                   created_at:row.created_at,
+                  updated_at:row.updated_at,
                   delivered_at:row.delivered_at,
                   ip_quality_summary:row.ip_quality_summary,
                   tcp22:await tcp(row.public_ip)
