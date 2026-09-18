@@ -1,0 +1,88 @@
+name: Refund Hoseinzadeh Undelivered Server
+
+on:
+  push:
+    paths:
+      - '.github/workflows/refund-hoseinzadeh-undelivered.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refund:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Refund exact undelivered purchase
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const { refundUnusedServerCycle } = require('./server-deletion-refund');
+
+          const expected = {
+            telegramId: '278773395',
+            serverId: '166478452',
+            serverName: 'Srv-FIN-581e23',
+            datacenter: 'hetzner-finland'
+          };
+
+          (async () => {
+            const p = await db.getPurchaseForOwner(expected.telegramId, expected.serverId, expected.datacenter);
+            if (!p) throw new Error('PURCHASE_NOT_FOUND');
+            if (String(p.server_name) !== expected.serverName) throw new Error('SERVER_NAME_MISMATCH');
+            if (p.delivered_at) throw new Error('REFUND_BLOCKED_SERVER_WAS_DELIVERED');
+            if (!['provider_missing','deleted','manual_review','pending_ssh','pending_ip_quality','provisioning_failed'].includes(String(p.status||'').toLowerCase())) {
+              throw new Error('REFUND_BLOCKED_UNEXPECTED_STATUS:' + String(p.status));
+            }
+
+            const result = await refundUnusedServerCycle({
+              db,
+              telegramId: expected.telegramId,
+              serverId: expected.serverId,
+              datacenter: expected.datacenter
+            });
+            console.log('REFUND_RESULT=' + JSON.stringify(result));
+
+            const [logs] = await db.pool.execute(
+              `SELECT id,amount,description,type,timestamp
+                 FROM wallet_logs
+                WHERE telegram_id=? AND type='server_deletion_refund' AND description LIKE ?
+                ORDER BY id DESC LIMIT 5`,
+              [expected.telegramId, '%server_id=' + expected.serverId + '%']
+            );
+            console.log('REFUND_LOGS=' + JSON.stringify(logs));
+
+            const [events] = await db.pool.execute(
+              `SELECT event_key,amount_toman,event_type,created_at,metadata
+                 FROM billing_events
+                WHERE telegram_id=? AND server_id=?
+                ORDER BY id DESC LIMIT 5`,
+              [expected.telegramId, expected.serverId]
+            );
+            console.log('REFUND_EVENTS=' + JSON.stringify(events));
+          })().then(()=>process.exit(0)).catch(e=>{console.error(e);process.exit(1);});
+          NODE
+          REMOTE
