@@ -96,7 +96,7 @@ function shellSingleQuote(value) {
 function buildRepairCommand() {
   const script = [
     "set -euo pipefail",
-    "ROOT_DEV=\"$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2==\\\"part\\\" || $2==\\\"lvm\\\") && ($3==\\\"ext4\\\" || $3==\\\"xfs\\\" || $3==\\\"btrfs\\\") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')\"",
+    "ROOT_DEV=\"$(lsblk -bpnro NAME,FSTYPE,SIZE | grep -E ' (ext4|xfs|btrfs) ' | sort -k3,3nr | head -n1 | awk '{print $1}')\"",
     "if [ -z \"$ROOT_DEV\" ]; then echo ROOT_DEVICE_NOT_FOUND >&2; exit 31; fi",
     "mkdir -p /mnt/hamoon-root",
     "mount \"$ROOT_DEV\" /mnt/hamoon-root",
@@ -115,7 +115,7 @@ function buildRepairCommand() {
     "systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null || true",
     "systemctl --root=/mnt/hamoon-root enable ssh.service 2>/dev/null || true",
     "systemctl --root=/mnt/hamoon-root enable ssh.socket 2>/dev/null || true",
-    "NET_MAC=\"$(awk '/macaddress:/ {gsub(/[\\\"[:space:]]/,\\\"\\\",$2); print $2; exit}' /mnt/hamoon-root/etc/netplan/*.yaml /mnt/hamoon-root/etc/netplan/*.yml 2>/dev/null || true)\"",
+    "NET_MAC=\"$(grep -Rhs 'macaddress:' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | tr -d '\\"' | awk '{print $2}' || true)\"",
     "if ! printf '%s\\n' \"$NET_MAC\" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then echo NETWORK_FALLBACK_MAC_NOT_FOUND >&2; exit 43; fi",
     "mkdir -p /mnt/hamoon-root/etc/systemd/network",
     "printf '%s\\n' '[Match]' \"MACAddress=$NET_MAC\" '' '[Network]' 'DHCP=ipv4' 'IPv6AcceptRA=yes' '' '[DHCPv4]' 'RouteMetric=100' 'UseDNS=yes' > /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network",
