@@ -149,7 +149,8 @@ async function main() {
     }
 
     console.log(`upgrade_notifications_sent=${upgradeSent}`);
-    console.log(`change_ip_notifications_sent=${changeIpSent}`);\n    console.log(`refund_resolution_notifications_sent=${refundResolutionSent}`);
+    console.log(`change_ip_notifications_sent=${changeIpSent}`);
+    console.log(`refund_resolution_notifications_sent=${refundResolutionSent}`);
     console.log(`upgrade_recipient_resolved=${Boolean(upgrade?.user)}`);
     console.log(`change_ip_recipient_resolved=${Boolean(changeIpUser)}`);
   } finally {
