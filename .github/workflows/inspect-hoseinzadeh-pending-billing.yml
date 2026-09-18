@@ -50,7 +50,7 @@ jobs:
             });
             try {
               const [target] = await conn.execute(
-                `SELECT * FROM purchases WHERE server_name=? ORDER BY id DESC LIMIT 1`,
+                `SELECT * FROM purchases WHERE server_name=? ORDER BY created_at DESC LIMIT 1`,
                 ['Srv-FIN-581e23']
               );
               console.log('TARGET=' + JSON.stringify(target, null, 2));
@@ -58,9 +58,9 @@ jobs:
               const uid = String(target[0].telegram_id);
 
               const [purchases] = await conn.execute(
-                `SELECT id,telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
+                `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
                         auto_renew,created_at,last_billed_at,delivered_at,lifecycle_updated_at,
-                        suspend_reason,provider_status,ip_quality_summary
+                        suspend_reason
                    FROM purchases
                   WHERE telegram_id=?
                     AND datacenter LIKE 'hetzner%'
