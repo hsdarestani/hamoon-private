@@ -103,45 +103,43 @@ fi
 mkdir -p /mnt/hamoon-root
 mount "$ROOT_DEV" /mnt/hamoon-root
 cleanup() {
-  for p in run sys proc dev; do umount -R "/mnt/hamoon-root/$p" 2>/dev/null || true; done
   umount /mnt/hamoon-root 2>/dev/null || true
 }
 trap cleanup EXIT
-for p in dev proc sys run; do
-  mkdir -p "/mnt/hamoon-root/$p"
-  mount --rbind "/$p" "/mnt/hamoon-root/$p"
-  mount --make-rslave "/mnt/hamoon-root/$p" || true
-done
-mkdir -p /mnt/hamoon-root/etc/ssh/sshd_config.d
-cat > /mnt/hamoon-root/etc/ssh/sshd_config.d/99-hamooncloud.conf <<'EOF'
-PasswordAuthentication yes
-PermitRootLogin yes
-KbdInteractiveAuthentication yes
-UsePAM yes
-EOF
-if [ ! -f /mnt/hamoon-root/etc/ssh/sshd_config ]; then
-  echo 'Include /etc/ssh/sshd_config.d/*.conf' > /mnt/hamoon-root/etc/ssh/sshd_config
-fi
-if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\\*.conf' /mnt/hamoon-root/etc/ssh/sshd_config; then
-  printf '\\nInclude /etc/ssh/sshd_config.d/*.conf\\n' >> /mnt/hamoon-root/etc/ssh/sshd_config
-fi
-chroot /mnt/hamoon-root ssh-keygen -A
-chroot /mnt/hamoon-root /usr/sbin/sshd -t
-if [ -x /mnt/hamoon-root/usr/sbin/netplan ]; then
-  chroot /mnt/hamoon-root /usr/sbin/netplan generate
-elif [ -x /mnt/hamoon-root/usr/bin/netplan ]; then
-  chroot /mnt/hamoon-root /usr/bin/netplan generate
-fi
-chroot /mnt/hamoon-root systemctl unmask systemd-networkd.service >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl enable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl unmask ssh.service ssh.socket >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl enable ssh.service >/dev/null 2>&1 || chroot /mnt/hamoon-root systemctl enable sshd.service >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl enable ssh.socket >/dev/null 2>&1 || true
-chroot /mnt/hamoon-root systemctl enable systemd-resolved.service >/dev/null 2>&1 || true
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+BACKUP="/mnt/hamoon-root/root/hamoon-network-recovery-$STAMP"
+mkdir -p "$BACKUP"
+cp -a /mnt/hamoon-root/etc/netplan "$BACKUP/" 2>/dev/null || true
+cp -a /mnt/hamoon-root/etc/ssh "$BACKUP/" 2>/dev/null || true
+
+# Do not chroot into the installed OS: the guest may use a different CPU
+# architecture than the Rescue environment. systemctl --root only manages
+# unit symlinks on disk and does not execute guest binaries.
+systemctl --root=/mnt/hamoon-root unmask systemd-networkd.service 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root enable systemd-networkd.service 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root enable systemd-networkd-wait-online.service 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root unmask ssh.service ssh.socket 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root enable ssh.service 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root enable ssh.socket 2>/dev/null || true
+systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null || true
+
 rm -f /mnt/hamoon-root/run/nologin /mnt/hamoon-root/etc/nologin 2>/dev/null || true
-echo "NETWORKD_ENABLED=$(chroot /mnt/hamoon-root systemctl is-enabled systemd-networkd.service 2>/dev/null || true)"
-echo "SSH_ENABLED=$(chroot /mnt/hamoon-root systemctl is-enabled ssh.service 2>/dev/null || true)"
+
+NETWORKD_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled systemd-networkd.service 2>/dev/null || true)"
+SSH_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled ssh.service 2>/dev/null || true)"
+SSH_SOCKET_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled ssh.socket 2>/dev/null || true)"
+echo "NETWORKD_ENABLED=$NETWORKD_STATE"
+echo "SSH_ENABLED=$SSH_STATE"
+echo "SSH_SOCKET_ENABLED=$SSH_SOCKET_STATE"
+echo "REPAIR_BACKUP=$BACKUP"
+
+case "$NETWORKD_STATE" in enabled|enabled-runtime|static|indirect) ;; *) echo NETWORKD_ENABLE_FAILED >&2; exit 41;; esac
+if [ "$SSH_STATE" != "enabled" ] && [ "$SSH_SOCKET_STATE" != "enabled" ]; then
+  echo SSH_ENABLE_FAILED >&2
+  exit 42
+fi
+
 echo REPAIR_OK
 `;
   return `bash -lc ${shellSingleQuote(script)}`;
