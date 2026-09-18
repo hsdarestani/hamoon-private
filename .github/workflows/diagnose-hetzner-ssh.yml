@@ -7,6 +7,7 @@ on:
       - 'scripts/diagnose-hetzner-ssh.js'
       - 'scripts/diagnose-installed-from-rescue.js'
       - 'scripts/recover-target-166290719-network.js'
+      - 'scripts/diagnose-target-166290719-boot.js'
       - '.github/workflows/diagnose-hetzner-ssh.yml'
   workflow_dispatch:
 
@@ -30,6 +31,7 @@ jobs:
           node --check scripts/diagnose-hetzner-ssh.js
           node --check scripts/diagnose-installed-from-rescue.js
           node --check scripts/recover-target-166290719-network.js
+          node --check scripts/diagnose-target-166290719-boot.js
       - name: Prepare SSH
         shell: bash
         run: |
@@ -56,5 +58,5 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
-          node scripts/recover-target-166290719-network.js
+          node scripts/diagnose-target-166290719-boot.js
           REMOTE
