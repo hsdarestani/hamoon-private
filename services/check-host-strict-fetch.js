@@ -79,6 +79,17 @@ function nodeResultForOriginalParser(state) {
   return state ? [[['OK', 0.01]]] : [[['TIMEOUT', 3.0]]];
 }
 
+// For server usability, a real TCP/22 connection is stronger evidence than ICMP.
+// Iran/global ping can be blocked or delayed independently of SSH. Treat TCP as
+// authoritative when it has completed, and use strict ping only as a fallback
+// while the TCP probe is still pending. This keeps failed TCP fail-closed while
+// avoiding endless "inconclusive" rotations caused only by missing ICMP replies.
+function mergeProbeState(ping, tcp) {
+  if (tcp === true) return true;
+  if (tcp === false) return false;
+  return ping;
+}
+
 function copySelectedNodes(fromUrl, toUrl) {
   for (const node of fromUrl.searchParams.getAll('node')) toUrl.searchParams.append('node', node);
 }
@@ -135,7 +146,7 @@ async function readStrictResult(originalFetch, syntheticId, init) {
   for (const node of pending.nodes) {
     const ping = strictPingState(pingResult?.[node]);
     const tcp = tcpNodeState(tcpResult?.[node]);
-    const state = ping === null || tcp === null ? null : (ping && tcp);
+    const state = mergeProbeState(ping, tcp);
     merged[node] = nodeResultForOriginalParser(state);
   }
 
@@ -172,5 +183,6 @@ module.exports = {
   installStrictCheckHostFetch,
   strictPingState,
   tcpNodeState,
+  mergeProbeState,
   flattenPingStatuses
 };
