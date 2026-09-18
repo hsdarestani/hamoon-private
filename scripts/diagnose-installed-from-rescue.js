@@ -99,7 +99,7 @@ echo '=== RESCUE NETWORK ==='
 ip -br link 2>/dev/null || true
 ip -4 -br addr 2>/dev/null || true
 ip -4 route 2>/dev/null || true
-for n in /sys/class/net/*; do [ "${n##*/}" = "lo" ] || echo "RESCUE_NIC=${n##*/} MAC=$(cat "$n/address" 2>/dev/null || true)"; done
+for n in /sys/class/net/*; do name=$(basename "$n"); [ "$name" = "lo" ] || echo "RESCUE_NIC=$name MAC=$(cat "$n/address" 2>/dev/null || true)"; done
 ROOT_DEV="$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2=="part" || $2=="lvm") && ($3=="ext4" || $3=="xfs" || $3=="btrfs") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')"
 echo "ROOT_DEV=$ROOT_DEV"
 [ -n "$ROOT_DEV" ] || exit 31
