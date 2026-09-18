@@ -16,7 +16,18 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function isBillablePurchase(p) {
   if (!p) return false;
-  return !NON_BILLABLE_STATUSES.has(String(p.status || '').toLowerCase());
+  const status = String(p.status || '').toLowerCase();
+  if (NON_BILLABLE_STATUSES.has(status)) return false;
+
+  // Hetzner billing starts only after the server has passed the delivery
+  // barrier (provider running + SSH + IP quality) and delivered_at is set.
+  // This is intentionally independent from status so an accidental/stale
+  // "active" status can never bill an undelivered VM.
+  const dc = String(p.datacenter || '').toLowerCase();
+  const isHetznerPurchase = dc === 'hetzner' || dc.startsWith('hetzner-');
+  if (isHetznerPurchase && !p.delivered_at) return false;
+
+  return true;
 }
 function isNotFound(err) { return Number(err?.status || err?.statusCode || err?.response?.status) === 404; }
 function safeProviderMessage(err) {
