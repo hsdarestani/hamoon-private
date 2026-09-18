@@ -1,0 +1,107 @@
+name: Inspect Rajabi Server
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-rajabi-server.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect purchase and provider state
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const datacenters = require('./datacenters');
+          const cloud = require('./cloud-api');
+
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            try {
+              const [rows] = await conn.execute(
+                `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,
+                        duration,amount,auto_renew,suspend_reason,last_billed_at,
+                        last_billed_traffic_gb,created_at,updated_at,deleted_at
+                   FROM purchases
+                  WHERE server_name = ?
+                     OR server_name LIKE ?
+                     OR CAST(server_id AS CHAR) LIKE ?
+                  ORDER BY updated_at DESC`,
+                ['Srv-HET-470171', '%470171%', '%470171%']
+              );
+              console.log('MATCHES=' + JSON.stringify(rows, null, 2));
+
+              for (const row of rows) {
+                const dc = datacenters[row.datacenter];
+                if (!dc) {
+                  console.log('PROVIDER=' + JSON.stringify({server_id:row.server_id,error:'DC_NOT_FOUND'}));
+                  continue;
+                }
+                try {
+                  const tok = await cloud.getToken(dc);
+                  const srv = await cloud.getServer(dc, tok, row.server_id);
+                  console.log('PROVIDER=' + JSON.stringify({
+                    server_id: row.server_id,
+                    exists: true,
+                    id: srv?.id || srv?.uuid || null,
+                    name: srv?.name || null,
+                    status: srv?.status || srv?.state || null,
+                    public_ip: srv?.public_net?.ipv4?.ip || srv?.public_ip || null
+                  }));
+                } catch (error) {
+                  console.log('PROVIDER=' + JSON.stringify({
+                    server_id: row.server_id,
+                    exists: error?.response?.status === 404 || error?.status === 404 ? false : null,
+                    status_code: error?.response?.status || error?.status || null,
+                    code: error?.code || null,
+                    message: error?.message || String(error)
+                  }));
+                }
+              }
+
+              const [alerts] = await conn.execute(
+                `SELECT * FROM hetzner_traffic_alerts
+                  WHERE CAST(server_id AS CHAR) LIKE ?
+                  ORDER BY created_at DESC LIMIT 20`,
+                ['%470171%']
+              ).catch(() => [[]]);
+              console.log('ALERTS=' + JSON.stringify(alerts, null, 2));
+            } finally {
+              await conn.end();
+            }
+          })().catch(e => { console.error(e); process.exit(1); });
+          NODE
+          REMOTE
