@@ -52,8 +52,8 @@ function applyPatches(originalSource) {
 
   source = replaceOnce(
     source,
-    `ensureUserState(effectiveUserId);\n\nconst keyboard = userServers.map(s => {`,
-    `ensureUserState(effectiveUserId);\nconst serverDisplayNames = await getServerDisplayNameMap(effectiveUserId);\n\nconst keyboard = userServers.map(s => {`,
+    `ensureUserState(effectiveUserId);\n\nconst serverManageKeyboard = userServers.map(s => {`,
+    `ensureUserState(effectiveUserId);\nconst serverDisplayNames = await getServerDisplayNameMap(effectiveUserId);\n\nconst serverManageKeyboard = userServers.map(s => {`,
     'load aliases for regular server list'
   );
 
