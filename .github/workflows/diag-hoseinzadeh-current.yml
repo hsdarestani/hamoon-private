@@ -75,8 +75,7 @@ jobs:
             try {
               const [rows]=await conn.execute(
                 `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
-                        delivered_at,created_at,updated_at,lifecycle_updated_at,ip_quality_attempts,
-                        last_ip_quality_result,last_billed_at
+                        delivered_at,created_at,updated_at,lifecycle_updated_at,ip_quality_attempts,last_billed_at
                    FROM purchases
                   WHERE telegram_id=? AND datacenter LIKE 'hetzner%'
                     AND created_at >= DATE_SUB(NOW(), INTERVAL 18 HOUR)
