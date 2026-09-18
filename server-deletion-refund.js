@@ -133,7 +133,7 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
     await conn.beginTransaction();
     const [purchaseRows] = await conn.execute(
       `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, pricing_mode, monthly_basis_price, boot_method,
-              status, created_at, last_billed_at
+              status, created_at, last_billed_at, delivered_at
        FROM purchases
        WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
        LIMIT 1 FOR UPDATE`,
@@ -145,6 +145,128 @@ async function refundUnusedServerCycle({ db, telegramId, serverId, datacenter, n
     }
 
     const purchase = purchaseRows[0];
+
+    // If a Hetzner VM never crossed the delivery barrier, the customer never
+    // received a usable billing cycle. Refund the net amount actually debited
+    // for the purchase (after loyalty/cashback adjustments), minus any older
+    // partial deletion refund already credited for this same server.
+    const purchaseDc = String(purchase.datacenter || '').toLowerCase();
+    const isUndeliveredHetzner =
+      (purchaseDc === 'hetzner' || purchaseDc.startsWith('hetzner-')) &&
+      !purchase.delivered_at;
+
+    if (isUndeliveredHetzner) {
+      const eventKey = `server-deletion-refund-undelivered:${String(serverId)}`;
+      const [existing] = await conn.execute(
+        'SELECT id, amount_toman FROM billing_events WHERE event_key = ? LIMIT 1',
+        [eventKey]
+      );
+      if (existing.length) {
+        await conn.commit();
+        return {
+          status: 'already_refunded',
+          refunded: 0,
+          previousRefund: Number(existing[0].amount_toman || 0),
+          eventKey
+        };
+      }
+
+      const serverLabel = String(purchase.server_name || serverId);
+      const [chargeRows] = await conn.execute(
+        `SELECT id, amount
+           FROM wallet_logs
+          WHERE telegram_id = ?
+            AND amount < 0
+            AND type IN ('purchase','server_api_purchase')
+            AND description LIKE ?
+          ORDER BY id ASC
+          LIMIT 1`,
+        [String(telegramId), `%${serverLabel}%`]
+      );
+
+      if (!chargeRows.length) {
+        await conn.commit();
+        return { status: 'undelivered_purchase_charge_missing', refunded: 0, eventKey };
+      }
+
+      const netInitialCharge = Math.max(0, roundMoney(Math.abs(Number(chargeRows[0].amount || 0))));
+      const [priorRefundRows] = await conn.execute(
+        `SELECT COALESCE(SUM(amount), 0) AS total
+           FROM wallet_logs
+          WHERE telegram_id = ?
+            AND amount > 0
+            AND type = 'server_deletion_refund'
+            AND description LIKE ?`,
+        [String(telegramId), `%server_id=${String(serverId)}%`]
+      );
+      const priorRefund = Math.max(0, roundMoney(Number(priorRefundRows[0]?.total || 0)));
+      const refund = Math.max(0, roundMoney(netInitialCharge - priorRefund));
+
+      if (!(refund > 0)) {
+        await conn.commit();
+        return {
+          status: 'undelivered_already_fully_refunded',
+          refunded: 0,
+          previousRefund: priorRefund,
+          eventKey
+        };
+      }
+
+      const [userRows] = await conn.execute(
+        'SELECT wallet FROM users WHERE telegram_id = ? LIMIT 1 FOR UPDATE',
+        [String(telegramId)]
+      );
+      if (!userRows.length) {
+        await conn.rollback();
+        return { status: 'user_missing', refunded: 0 };
+      }
+
+      const balanceBefore = Number(userRows[0].wallet || 0);
+      await conn.execute(
+        'UPDATE users SET wallet = wallet + ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?',
+        [refund, String(telegramId)]
+      );
+      await conn.execute(
+        'INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)',
+        [
+          String(telegramId),
+          refund,
+          `بازگشت کامل هزینه سرور تحویل‌نشده ${serverLabel}؛ server_id=${serverId}`,
+          'server_deletion_refund'
+        ]
+      );
+      await conn.execute(
+        `INSERT INTO billing_events
+         (event_key, telegram_id, server_id, datacenter, event_type, amount_toman, period_start, period_end, metadata)
+         VALUES (?, ?, ?, ?, 'server_deletion_refund', ?, ?, ?, ?)`,
+        [
+          eventKey,
+          String(telegramId),
+          String(serverId),
+          String(datacenter),
+          refund,
+          toDate(purchase.created_at)?.toISOString().slice(0, 19).replace('T', ' ') || null,
+          toDate(now).toISOString().slice(0, 19).replace('T', ' '),
+          JSON.stringify({
+            reason: 'hetzner_never_delivered',
+            netInitialCharge,
+            priorRefund,
+            source: 'server_delete'
+          })
+        ]
+      );
+
+      await conn.commit();
+      return {
+        status: 'undelivered_full_refund',
+        refunded: refund,
+        newWallet: balanceBefore + refund,
+        eventKey,
+        netInitialCharge,
+        priorRefund
+      };
+    }
+
     const calc = calculateUnusedCycleRefund({
       amount: purchase.amount,
       cycle: purchase.duration,
