@@ -127,7 +127,7 @@ systemctl --root=/mnt/hamoon-root enable systemd-resolved.service 2>/dev/null ||
 # Netplan is present, but this server has previously booted with networkd disabled.
 # Add a minimal native networkd DHCP fallback matched by the NIC MAC so future
 # Primary-IP rotations keep working without hardcoding any IPv4 address.
-NET_MAC="$(grep -RhsE '^[[:space:]]*macaddress:[[:space:]]*["'"'"']?[0-9A-Fa-f:]{17}' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | sed -E 's/.*macaddress:[[:space:]]*["'"'"']?([0-9A-Fa-f:]{17}).*/\1/' || true)"
+NET_MAC="$(grep -RhsE '^[[:space:]]*macaddress:' /mnt/hamoon-root/etc/netplan 2>/dev/null | head -n1 | cut -d: -f2- | tr -d ' "' | tr -d "'" | xargs || true)"
 if printf '%s' "$NET_MAC" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}
 
 NETWORKD_STATE="$(systemctl --root=/mnt/hamoon-root is-enabled systemd-networkd.service 2>/dev/null || true)"
