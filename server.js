@@ -3,6 +3,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const axios = require('axios');
+const { postToZibal } = require('./services/zibal-gateway');
 const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
 const { createCustomerApiRouter } = require('./customer-api');
@@ -224,10 +225,11 @@ app.get('/zibal/callback', async (req, res) => {
       return res.status(400).send(html('پرداخت ناموفق', 'پرداخت توسط درگاه تأیید نشد یا توسط کاربر لغو شد.'));
     }
 
-    const verifyRes = await axios.post(
-      'https://gateway.zibal.ir/v1/verify',
+    const verifyRes = await postToZibal(
+      axios,
+      '/v1/verify',
       { merchant, trackId: Number(trackId) },
-      { timeout: 20000 }
+      { timeoutMs: 20000 }
     );
     const v = verifyRes.data || {};
     if (Number(v.result) !== 100) {
