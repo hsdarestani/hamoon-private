@@ -101,6 +101,9 @@ echo "ROOT_DEV=$ROOT_DEV"
 mkdir -p /mnt/hamoon-root
 mount -o ro "$ROOT_DEV" /mnt/hamoon-root
 trap 'umount /mnt/hamoon-root 2>/dev/null || true' EXIT
+echo '=== BLOCK DEVICES ==='
+lsblk -o NAME,PATH,SIZE,TYPE,FSTYPE,UUID,PARTUUID,LABEL,MOUNTPOINTS 2>/dev/null || true
+blkid 2>/dev/null || true
 echo '=== OS ==='
 sed -n '1,25p' /mnt/hamoon-root/etc/os-release 2>/dev/null || true
 echo '=== NETPLAN ==='
@@ -134,7 +137,12 @@ journalctl --directory=/mnt/hamoon-root/var/log/journal -b -1 --no-pager -u syst
 echo '=== CLOUD INIT LOG TAIL ==='
 tail -n 220 /mnt/hamoon-root/var/log/cloud-init.log 2>/dev/null || true
 echo '=== BOOT LOG CLUES ==='
-grep -R -h -E 'networkd|DHCP|eth0|ssh|nft|iptables|ufw|failed|error' /mnt/hamoon-root/var/log/syslog /mnt/hamoon-root/var/log/kern.log 2>/dev/null | tail -n 260 || true
+grep -R -h -E 'networkd|DHCP|eth0|enp|ens|ssh|nft|iptables|ufw|failed|error' /mnt/hamoon-root/var/log/syslog /mnt/hamoon-root/var/log/kern.log 2>/dev/null | tail -n 320 || true
+echo '=== CUSTOM BOOT UNITS ==='
+find /mnt/hamoon-root/etc/systemd/system -maxdepth 3 -type l -printf '%p -> %l\n' 2>/dev/null | head -n 240 || true
+grep -R -n -E 'ExecStart=.*(iptables|nft|ufw|networkctl|ip[[:space:]]+(addr|link|route)|systemctl.*(network|ssh))' /mnt/hamoon-root/etc/systemd/system 2>/dev/null | head -n 160 || true
+echo '=== FALLBACK NETWORK FILE ==='
+sed -n '1,120p' /mnt/hamoon-root/etc/systemd/network/10-hamoon-dhcp.network 2>/dev/null || true
 echo '=== FSTAB ==='
 sed -n '1,120p' /mnt/hamoon-root/etc/fstab 2>/dev/null || true
 echo '=== DIAG_DONE ==='
