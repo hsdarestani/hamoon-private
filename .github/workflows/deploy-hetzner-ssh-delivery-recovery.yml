@@ -1,0 +1,116 @@
+name: Deploy Hetzner SSH Delivery Recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-hetzner-ssh-delivery-recovery.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: hamoon-hetzner-ssh-delivery-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: Validate source and runtime patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check index-core.js
+          node --check services/hetzner-lifecycle.js
+          node scripts/validate-hetzner-lifecycle.js
+          node - <<'NODE'
+          const fs=require('fs');
+          const vm=require('vm');
+          const core=fs.readFileSync('index-core.js','utf8');
+          if (core.includes('99-hamoon.conf') || core.includes('ssh_pwauth: true')) {
+            throw new Error('LEGACY_HETZNER_CLOUD_INIT_STILL_PRESENT');
+          }
+          if (!core.includes('Avoid custom cloud-init here')) {
+            throw new Error('HETZNER_PROVIDER_SSH_MARKER_MISSING');
+          }
+          const life=fs.readFileSync('services/hetzner-lifecycle.js','utf8');
+          for (const marker of [
+            'pendingSshRecoveryAttempted',
+            '[HETZNER_PENDING_SSH_RECOVERY]',
+            'ssh_unreachable_after_powercycle',
+            'HETZNER_PENDING_SSH_RECOVERY_AFTER_MS'
+          ]) {
+            if (!life.includes(marker)) throw new Error('SSH_RECOVERY_MARKER_MISSING:'+marker);
+          }
+          const runtime=require('./runtime-bootstrap');
+          const source=runtime.applyPatches(core);
+          new vm.Script(source,{filename:'index-core.runtime-patched.js'});
+          console.log('HETZNER_SSH_DELIVERY_VALIDATION=ok');
+          NODE
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          git pull --ff-only
+          node scripts/restore-server-secret-key.js .env >/dev/null
+
+          node --check index-core.js
+          node --check services/hetzner-lifecycle.js
+          node scripts/validate-hetzner-lifecycle.js
+
+          node - <<'NODE'
+          const fs=require('fs');
+          const vm=require('vm');
+          const runtime=require('./runtime-bootstrap');
+          const core=fs.readFileSync('index-core.js','utf8');
+          const source=runtime.applyPatches(core);
+          new vm.Script(source,{filename:'index-core.runtime-patched.js'});
+          if (source.includes('99-hamoon.conf')) throw new Error('OLD_CLOUD_INIT_RUNTIME_PRESENT');
+          if (!fs.readFileSync('services/hetzner-lifecycle.js','utf8').includes('[HETZNER_PENDING_SSH_RECOVERY]')) {
+            throw new Error('SSH_RECOVERY_NOT_DEPLOYED');
+          }
+          console.log('PRODUCTION_RUNTIME=ok');
+          NODE
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 6
+
+          node - <<'NODE'
+          const {execSync}=require('child_process');
+          const list=JSON.parse(execSync('pm2 jlist',{encoding:'utf8'}));
+          const p=list.find(x=>x.name==='hamoonbot');
+          const status=p?.pm2_env?.status||'missing';
+          console.log('HAMOONBOT_STATUS='+status);
+          if(status!=='online') process.exit(1);
+          NODE
+          REMOTE
