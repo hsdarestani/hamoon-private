@@ -3,8 +3,6 @@ name: Diagnose current Hoseinzadeh Hetzner delivery
 on:
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/diag-hoseinzadeh-current.yml'
   workflow_dispatch:
 
 permissions:
