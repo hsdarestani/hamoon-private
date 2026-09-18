@@ -6,9 +6,19 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const cleanChange = require('../services/hetzner-clean-ip-change');
+const strictCheckHost = require('../services/check-host-strict-fetch');
 const safeLifecycle = require('../services/hetzner-lifecycle-safe-bootstrap');
 
 (async () => {
+  // TCP/22 is the actual service-reachability signal. ICMP may be filtered or
+  // delayed by a probe node without meaning the server is inaccessible.
+  assert.strictEqual(strictCheckHost.mergeProbeState(null, true), true);
+  assert.strictEqual(strictCheckHost.mergeProbeState(false, true), true);
+  assert.strictEqual(strictCheckHost.mergeProbeState(true, false), false);
+  assert.strictEqual(strictCheckHost.mergeProbeState(null, false), false);
+  assert.strictEqual(strictCheckHost.mergeProbeState(true, null), true);
+  assert.strictEqual(strictCheckHost.mergeProbeState(null, null), null);
+
   let qualityCalls = 0;
   let sshCalls = 0;
   const bootingThenClean = await cleanChange.verifyCleanCandidate('10.0.0.2', {
