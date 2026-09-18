@@ -1,0 +1,56 @@
+name: Diagnose Zibal Production
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diagnose-zibal-production.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect Zibal logs and connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo '=== PM2 ZIBAL CONTEXT ==='
+          pm2 logs hamoonbot --lines 5000 --nostream 2>&1 | grep -i -B 8 -A 16 'zibal' | tail -n 240 || true
+
+          echo '=== DNS/HTTPS ==='
+          getent ahostsv4 gateway.zibal.ir | head -n 5 || true
+          curl -sS -o /tmp/zibal-body -w 'HTTP=%{http_code} CONNECT=%{time_connect} TLS=%{time_appconnect} TOTAL=%{time_total}\n' --connect-timeout 10 --max-time 20 https://gateway.zibal.ir/v1/request || true
+          head -c 600 /tmp/zibal-body 2>/dev/null || true
+          echo
+
+          echo '=== ENV PRESENCE (NO VALUES) ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          for (const k of ['ZIBAL_MERCHANT','ZIBAL_MERCHANT_ID','ZIBAL_CALLBACK_URL']) {
+            console.log(k+'='+(process.env[k] ? 'SET' : 'UNSET'));
+          }
+          NODE
+          REMOTE
