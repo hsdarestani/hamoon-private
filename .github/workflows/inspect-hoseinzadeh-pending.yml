@@ -1,0 +1,144 @@
+name: Inspect Hoseinzadeh Pending Servers
+
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-hoseinzadeh-pending.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect production state
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          const cloud = require('./cloud-api');
+          const datacenters = require('./datacenters');
+          const net = require('net');
+
+          function tcp22(ip, timeoutMs=3500) {
+            return new Promise(resolve => {
+              if (!ip) return resolve(false);
+              const s = net.createConnection({ host: ip, port: 22 });
+              let done=false;
+              const finish=v => { if(done) return; done=true; s.destroy(); resolve(v); };
+              s.setTimeout(timeoutMs);
+              s.once('connect',()=>finish(true));
+              s.once('timeout',()=>finish(false));
+              s.once('error',()=>finish(false));
+            });
+          }
+
+          (async()=>{
+            const conn=await mysql.createConnection({
+              host:process.env.DB_HOST||'localhost',
+              user:process.env.DB_USER||'root',
+              password:process.env.DB_PASSWORD||'',
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            try {
+              const [targets]=await conn.execute(
+                `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
+                        auto_renew,suspend_reason,delivered_at,created_at,last_billed_at,
+                        lifecycle_updated_at,ip_quality_attempts,updated_at
+                   FROM purchases
+                  WHERE server_name=? OR
+                        (datacenter LIKE 'hetzner%' AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') AND created_at >= DATE_SUB(NOW(), INTERVAL 2 DAY))
+                  ORDER BY created_at DESC`,
+                ['Srv-FIN-581e23']
+              );
+              console.log('TARGETS='+JSON.stringify(targets,null,2));
+
+              const owner=targets.find(x=>x.server_name==='Srv-FIN-581e23')?.telegram_id;
+              if (owner) {
+                const [ownerPurchases]=await conn.execute(
+                  `SELECT telegram_id,server_id,server_name,datacenter,status,public_ip,duration,amount,
+                          delivered_at,created_at,last_billed_at,lifecycle_updated_at,ip_quality_attempts,updated_at
+                     FROM purchases
+                    WHERE telegram_id=? AND created_at >= DATE_SUB(NOW(), INTERVAL 2 DAY)
+                    ORDER BY created_at DESC`,
+                  [String(owner)]
+                );
+                console.log('OWNER_PURCHASES='+JSON.stringify(ownerPurchases,null,2));
+
+                const [wallet]=await conn.execute(
+                  `SELECT id,amount,description,type,timestamp
+                     FROM wallet_logs
+                    WHERE telegram_id=? AND timestamp >= DATE_SUB(NOW(), INTERVAL 2 DAY)
+                    ORDER BY id DESC LIMIT 120`,
+                  [String(owner)]
+                );
+                console.log('WALLET_LOGS='+JSON.stringify(wallet,null,2));
+
+                const [events]=await conn.execute(
+                  `SELECT event_key,server_id,datacenter,event_type,amount_toman,period_start,period_end,created_at,metadata
+                     FROM billing_events
+                    WHERE telegram_id=? AND created_at >= DATE_SUB(NOW(), INTERVAL 2 DAY)
+                    ORDER BY id DESC LIMIT 120`,
+                  [String(owner)]
+                ).catch(()=>[[]]);
+                console.log('BILLING_EVENTS='+JSON.stringify(events,null,2));
+              }
+
+              for (const row of targets) {
+                const key=String(row.datacenter||'').split('__')[0];
+                const dc=datacenters[row.datacenter]||datacenters[key];
+                if (!dc) {
+                  console.log('LIVE='+JSON.stringify({server_id:String(row.server_id),error:'DC_NOT_FOUND'}));
+                  continue;
+                }
+                try {
+                  const tok=await cloud.getToken(dc);
+                  const srv=await cloud.getServer(dc,tok,String(row.server_id));
+                  const ip=srv?.public_net?.ipv4?.ip||srv?.public_ip||row.public_ip||null;
+                  console.log('LIVE='+JSON.stringify({
+                    server_id:String(row.server_id),
+                    name:srv?.name||null,
+                    provider_status:srv?.status||srv?.state||null,
+                    ip,
+                    tcp22:await tcp22(ip),
+                    image:srv?.image?.name||srv?.image?.description||srv?.image?.id||null,
+                    location:srv?.datacenter?.location?.name||srv?.location?.name||srv?.location||null
+                  }));
+                } catch(e) {
+                  console.log('LIVE='+JSON.stringify({
+                    server_id:String(row.server_id),
+                    error:String(e?.message||e),
+                    status:e?.response?.status||e?.status||null
+                  }));
+                }
+              }
+            } finally {
+              await conn.end();
+            }
+          })().catch(e=>{console.error(e);process.exit(1);});
+          NODE
+          REMOTE
