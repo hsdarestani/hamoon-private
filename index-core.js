@@ -838,12 +838,9 @@ case '👛 کیف پول': {
             //const datacenterKeys = Object.keys(datacenters);
  sendMessage(effectiveChatId, 'در حال دریافت لیست سرورها از دیتاسنترهای شما...');
   const projects = getUserProjects(String(effectiveUserId)) || [];
-  if (projects.length > 0) {
-    const keyboard = projects.map(p => ([
-      { text: `📂 ${p.label || p.dcKey}`, callback_data: makeShortCb(effectiveUserId, { action: 'OPEN_PROJECT', projectId: p.auth?.OS_PROJECT_ID, dcKey: `${p.dcKey}__${p.alias || p.auth?.OS_PROJECT_ID || 'u_' + effectiveUserId}`}) }
-    ]));
-    return sendMessage(effectiveChatId, '📂 لطفاً یک پروژه انتخاب کنید:', { reply_markup: { inline_keyboard: keyboard } });
-  }
+  const projectManageKeyboard = projects.map(p => ([
+    { text: `📂 ${p.label || p.dcKey}`, callback_data: makeShortCb(effectiveUserId, { action: 'OPEN_PROJECT', projectId: p.auth?.OS_PROJECT_ID, dcKey: `${p.dcKey}__${p.alias || p.auth?.OS_PROJECT_ID || 'u_' + effectiveUserId}`}) }
+  ]));
  const userDCs = getUserEffectiveDCs(effectiveUserId);
  const datacenterKeys = Object.keys(userDCs);
   console.log('[MANAGE] effectiveUserId =', effectiveUserId, ' impersonating =', isImpersonating);
@@ -889,13 +886,13 @@ console.error(`Could not fetch servers from ${dcConfig?.name || dcKey}: ${error.
             const userServers = results.flat();
   console.log('[MANAGE] TOTAL servers for user', effectiveUserId, '=', userServers.length);
 
-            if (userServers.length === 0) {
+            if (userServers.length === 0 && projectManageKeyboard.length === 0) {
                 return sendMessage(effectiveChatId, 'شما هیچ سروری ندارید.');
             }
 
 ensureUserState(effectiveUserId);
 
-const keyboard = userServers.map(s => {
+const serverManageKeyboard = userServers.map(s => {
   const token = makeShortCb(effectiveUserId, {
     action: 'M',
     dcKey: s.datacenter,
@@ -905,9 +902,10 @@ const keyboard = userServers.map(s => {
     { text: `${s.purchase?.server_name || s.name} (${userDCs[s.datacenter]?.name || s.datacenter})`, callback_data: token }
   ];
 });
+const keyboard = [...projectManageKeyboard, ...serverManageKeyboard];
 
 
-            sendMessage(effectiveChatId, 'سرورهای شما:', { reply_markup: { inline_keyboard: keyboard } });
+            sendMessage(effectiveChatId, 'سرورها و پروژه‌های شما:', { reply_markup: { inline_keyboard: keyboard } });
             break;
         case '📞 پشتیبانی':
             sendMessage(effectiveChatId, `✉️ برای پشتیبانی با \\@${escapeMarkdownV2(SUPPORT_USERNAME)} در تماس باشید\\.`, { parse_mode: 'MarkdownV2'});
