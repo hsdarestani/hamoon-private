@@ -93,8 +93,7 @@ function shellSingleQuote(value) {
   return `'${String(value).replace(/'/g, `'"'"'`)}'`;
 }
 
-function buildRepairCommand(rootPassword) {
-  const rootPass = shellSingleQuote(rootPassword);
+function buildRepairCommand() {
   const script = `set -euo pipefail
 ROOT_DEV="$(lsblk -bpnro NAME,TYPE,FSTYPE,SIZE | awk '($2=="part" || $2=="lvm") && ($3=="ext4" || $3=="xfs" || $3=="btrfs") {print $4, $1}' | sort -nr | head -n1 | awk '{print $2}')"
 if [ -z "$ROOT_DEV" ]; then
@@ -126,11 +125,12 @@ fi
 if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\\*.conf' /mnt/hamoon-root/etc/ssh/sshd_config; then
   printf '\\nInclude /etc/ssh/sshd_config.d/*.conf\\n' >> /mnt/hamoon-root/etc/ssh/sshd_config
 fi
-printf 'root:%s\\n' ${rootPass} | chroot /mnt/hamoon-root chpasswd
 chroot /mnt/hamoon-root ssh-keygen -A
 chroot /mnt/hamoon-root /usr/sbin/sshd -t
-if chroot /mnt/hamoon-root command -v netplan >/dev/null 2>&1; then
-  chroot /mnt/hamoon-root netplan generate
+if [ -x /mnt/hamoon-root/usr/sbin/netplan ]; then
+  chroot /mnt/hamoon-root /usr/sbin/netplan generate
+elif [ -x /mnt/hamoon-root/usr/bin/netplan ]; then
+  chroot /mnt/hamoon-root /usr/bin/netplan generate
 fi
 chroot /mnt/hamoon-root systemctl unmask systemd-networkd.service >/dev/null 2>&1 || true
 chroot /mnt/hamoon-root systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
@@ -197,7 +197,7 @@ async function main() {
     const repaired = await sshExec({
       host: ip,
       password: rescuePassword,
-      command: buildRepairCommand(originalRootPassword),
+      command: buildRepairCommand(),
       timeoutMs: 120000
     });
     if (!repaired.stdout.includes('REPAIR_OK')) throw new Error('REPAIR_CONFIRMATION_MISSING');
