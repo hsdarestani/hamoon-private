@@ -60,5 +60,5 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           if [ -s "$ENV_BACKUP" ]; then cp "$ENV_BACKUP" .env; chmod 600 .env || true; fi
-          node scripts/inspect-target-166290719-state.js
+          node scripts/recover-target-166290719-network.js
           REMOTE
