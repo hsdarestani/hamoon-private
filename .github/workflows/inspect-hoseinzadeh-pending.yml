@@ -72,7 +72,7 @@ jobs:
                         auto_renew,suspend_reason,delivered_at,created_at,last_billed_at,
                         lifecycle_updated_at,ip_quality_attempts,updated_at
                    FROM purchases
-                  WHERE server_name=? OR
+                  WHERE server_name=? OR server_id='163453394' OR
                         (datacenter LIKE 'hetzner%' AND status IN ('provisioning','pending_ip','pending_ssh','pending_ip_quality','manual_review') AND created_at >= DATE_SUB(NOW(), INTERVAL 2 DAY))
                   ORDER BY created_at DESC`,
                 ['Srv-FIN-581e23']
