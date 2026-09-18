@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const { postToZibal } = require('./services/zibal-gateway');
 const cron = require('node-cron');
 const { hasCapability, getCapabilityLabel } = require('./provider-capabilities');
 const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
@@ -933,8 +934,8 @@ await sendMessage(
         state[effectiveUserId] = { step: 'READY' };
         try {
             const axios = require('axios');
-const res = await axios.post('https://gateway.zibal.ir/v1/request', {
-    merchant: "68985f4ba45c72000bcfd5a2",
+const res = await postToZibal(axios, '/v1/request', {
+    merchant: process.env.ZIBAL_MERCHANT_ID || "68985f4ba45c72000bcfd5a2",
     amount: payableRial,
     callbackUrl: "https://pay.hamooncloud.ir/zibal/callback",
     orderId: `${effectiveUserId}-${orderId}-${originalAmount}`, // ← مبلغ اصلی را در orderId قرار بده
@@ -953,7 +954,7 @@ const res = await axios.post('https://gateway.zibal.ir/v1/request', {
                 `برای پرداخت روی لینک زیر کلیک کنید:\n${payUrl}`
             );
         } catch (e) {
-            console.error("Zibal error:", e.message);
+            console.error("Zibal error:", { code: e.code || null, message: e.message, gateway_ip: e.zibalGatewayIp || null });
             sendMessage(effectiveChatId, "❌ خطا در ارتباط با درگاه زیبال.");
         }
     }
