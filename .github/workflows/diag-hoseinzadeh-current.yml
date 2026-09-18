@@ -118,3 +118,5 @@ jobs:
           echo '=== RELATED PM2 LOGS ==='
           pm2 logs hamoonbot --lines 12000 --nostream 2>&1 | grep -B 12 -A 30 -E '278773395|HETZNER_PENDING_SSH_RECOVERY|HETZNER_PROVISIONING|hetzner_delivery_pending|HETZNER_PROVISIONING_RECONCILE' | tail -n 700 || true
           REMOTE
+
+# trigger diagnostic after base workflow installation
