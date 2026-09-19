@@ -84,7 +84,9 @@ jobs:
           ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
           set -euo pipefail
           cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
-          git pull --ff-only
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
           node scripts/restore-server-secret-key.js .env >/dev/null
 
           node --check index-core.js
