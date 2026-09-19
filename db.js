@@ -11,6 +11,7 @@ const HETZNER_DATACENTER_KEYS = Object.keys(datacenters).filter(key => {
 const hetznerDatacenterSqlList = HETZNER_DATACENTER_KEYS.map(key => `'${key.replace(/'/g, "''")}'`).join(',') || "'hetzner'";
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const deliveryCharge = require('./delivery-charge');
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST || 'localhost',
@@ -358,14 +359,26 @@ async function getUserWallet(telegramId) {
 }
 
 async function debitUser(telegramId, amount) {
+    await deliveryCharge.ensureSchema(pool);
+    const debitAmount = Math.max(0, Number(amount || 0));
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
-        const currentBalance = await getUserWallet(telegramId);
-        if (currentBalance >= amount) {
+        const [users] = await conn.execute(
+            'SELECT wallet FROM users WHERE telegram_id = ? LIMIT 1 FOR UPDATE',
+            [String(telegramId)]
+        );
+        if (!users.length) {
+            await conn.rollback();
+            return false;
+        }
+        const currentBalance = Number(users[0].wallet || 0);
+        const pendingReserved = await deliveryCharge.pendingTotalForUser(conn, telegramId);
+        const spendableBalance = currentBalance - pendingReserved;
+        if (debitAmount > 0 && spendableBalance + 1e-9 >= debitAmount) {
             const [result] = await conn.execute(
-                'UPDATE users SET wallet = wallet - ? WHERE telegram_id = ?',
-                [amount, String(telegramId)]
+                'UPDATE users SET wallet = wallet - ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?',
+                [debitAmount, String(telegramId)]
             );
             if (result.affectedRows > 0) {
                 await conn.commit();
@@ -375,12 +388,24 @@ async function debitUser(telegramId, amount) {
         await conn.rollback();
         return false;
     } catch (error) {
-        await conn.rollback();
+        await conn.rollback().catch(() => {});
         console.error(`debitUser: Error debiting user ${telegramId}:`, error);
         throw error;
     } finally {
         conn.release();
     }
+}
+
+async function reserveDeliveryCharge(args) {
+    return deliveryCharge.reserve(pool, args);
+}
+
+async function cancelDeliveryCharge(serverId, reason = 'cancelled_before_delivery') {
+    return deliveryCharge.cancel(pool, serverId, reason);
+}
+
+async function getPendingDeliveryChargeTotal(telegramId, excludeServerId = null) {
+    return deliveryCharge.getPendingTotal(pool, telegramId, excludeServerId);
 }
 
 async function creditUser(telegramId, amount) {
@@ -937,7 +962,7 @@ async function changePurchaseCycleAtomic({
     await conn.beginTransaction();
 
     const [purchaseRows] = await conn.execute(
-      `SELECT duration, status
+      `SELECT duration, status, datacenter, delivered_at
        FROM purchases
        WHERE telegram_id = ?
          AND server_id = ?
@@ -963,6 +988,13 @@ async function changePurchaseCycleAtomic({
     ) {
       const error = new Error('PURCHASE_CYCLE_CHANGED');
       error.code = 'PURCHASE_CYCLE_CHANGED';
+      throw error;
+    }
+
+    const purchaseDc = String(purchaseRows[0].datacenter || datacenter || '').toLowerCase();
+    if ((purchaseDc === 'hetzner' || purchaseDc.startsWith('hetzner-')) && !purchaseRows[0].delivered_at) {
+      const error = new Error('SERVER_NOT_DELIVERED');
+      error.code = 'SERVER_NOT_DELIVERED';
       throw error;
     }
 
@@ -1702,6 +1734,9 @@ async function markDeleted(
     [String(telegramId), String(serverId), String(datacenter)]
   );
 
+  if (result.affectedRows > 0) {
+    await cancelDeliveryCharge(serverId, 'server_deleted_before_delivery').catch(() => false);
+  }
   return result.affectedRows > 0;
 }
 
@@ -1822,28 +1857,81 @@ async function markDelivered(
   datacenter,
   publicIp
 ) {
-  const [result] = await pool.execute(
-    `UPDATE purchases
-     SET status = 'active',
-         public_ip = COALESCE(?, public_ip),
-         delivered_at = NOW(),
-         last_billed_at = NOW(),
-         lifecycle_error_code = NULL,
-         lifecycle_updated_at = NOW(),
-         updated_at = NOW()
-     WHERE telegram_id = ?
-       AND server_id = ?
-       AND datacenter = ?
-       AND delivered_at IS NULL`,
-    [
-      publicIp || null,
-      String(telegramId),
-      String(serverId),
-      String(datacenter)
-    ]
-  );
+  await deliveryCharge.ensureSchema(pool);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [purchases] = await conn.execute(
+      `SELECT delivered_at
+         FROM purchases
+        WHERE telegram_id = ?
+          AND server_id = ?
+          AND datacenter = ?
+        LIMIT 1 FOR UPDATE`,
+      [String(telegramId), String(serverId), String(datacenter)]
+    );
+    if (!purchases.length) {
+      await conn.rollback();
+      return false;
+    }
+    if (purchases[0].delivered_at) {
+      await conn.commit();
+      return false;
+    }
 
-  return result.affectedRows === 1;
+    const deliveryChargeResult = await deliveryCharge.settlePendingOnDelivery(conn, {
+      telegramId,
+      serverId,
+      datacenter
+    });
+
+    const [result] = await conn.execute(
+      `UPDATE purchases
+       SET status = 'active',
+           public_ip = COALESCE(?, public_ip),
+           delivered_at = NOW(),
+           last_billed_at = NOW(),
+           lifecycle_error_code = NULL,
+           lifecycle_updated_at = NOW(),
+           updated_at = NOW()
+       WHERE telegram_id = ?
+         AND server_id = ?
+         AND datacenter = ?
+         AND delivered_at IS NULL`,
+      [
+        publicIp || null,
+        String(telegramId),
+        String(serverId),
+        String(datacenter)
+      ]
+    );
+
+    if (result.affectedRows !== 1) {
+      await conn.rollback();
+      return false;
+    }
+    await conn.commit();
+    if (deliveryChargeResult.status === 'charged') {
+      console.log('[DELIVERY_CHARGE_COMMITTED]', {
+        telegram_id: String(telegramId),
+        server_id: String(serverId),
+        datacenter: String(datacenter),
+        amount: deliveryChargeResult.charged
+      });
+    }
+    return true;
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    console.error('[MARK_DELIVERED_TRANSACTION_FAILED]', {
+      telegram_id: String(telegramId),
+      server_id: String(serverId),
+      datacenter: String(datacenter),
+      code: error?.code || error?.message
+    });
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 
@@ -2002,6 +2090,9 @@ module.exports = {
     getUser,
     getUserWallet,
     debitUser,
+    reserveDeliveryCharge,
+    cancelDeliveryCharge,
+    getPendingDeliveryChargeTotal,
     creditUser,
     recordPurchase,
     setPurchaseAutoRenew,
