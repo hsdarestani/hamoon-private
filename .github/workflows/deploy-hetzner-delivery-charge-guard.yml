@@ -1,0 +1,129 @@
+name: Deploy Hetzner Delivery Charge Guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'delivery-charge.js'
+      - 'db.js'
+      - 'index-core.js'
+      - 'customer-api.js'
+      - 'billing-settlement.js'
+      - 'loyalty-club-bootstrap.js'
+      - 'services/hetzner-lifecycle.js'
+      - 'scripts/validate-delivery-charge-guard.js'
+      - '.github/workflows/deploy-hetzner-delivery-charge-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-production-delivery-charge-guard
+  cancel-in-progress: true
+
+jobs:
+  validate-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check delivery-charge.js
+          node --check db.js
+          node --check index-core.js
+          node --check customer-api.js
+          node --check billing-settlement.js
+          node --check loyalty-club-bootstrap.js
+          node --check scripts/validate-delivery-charge-guard.js
+          node scripts/validate-delivery-charge-guard.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and verify production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+
+          fetched=0
+          for attempt in 1 2 3 4 5 6; do
+            if git fetch origin main; then fetched=1; break; fi
+            echo "git fetch collision; retry $attempt/6"
+            sleep 3
+          done
+          test "$fetched" = 1
+          git checkout main
+          git merge --ff-only origin/main
+
+          node --check delivery-charge.js
+          node --check db.js
+          node --check index-core.js
+          node --check customer-api.js
+          node --check billing-settlement.js
+          node --check loyalty-club-bootstrap.js
+          node scripts/validate-delivery-charge-guard.js
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const guard=require('./delivery-charge');
+          (async()=>{
+            await guard.ensureSchema(db.pool);
+            const [cols]=await db.pool.query("SHOW COLUMNS FROM pending_delivery_charges");
+            const names=cols.map(x=>x.Field);
+            for(const required of ['server_id','telegram_id','amount','status','charged_at','cancelled_at']){
+              if(!names.includes(required)) throw new Error('PENDING_DELIVERY_SCHEMA_MISSING:'+required);
+            }
+            console.log('PENDING_DELIVERY_SCHEMA=ok');
+            await db.pool.end();
+          })().catch(async e=>{console.error(e);try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 6
+          PM2_STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
+          echo "HAMOONBOT_STATUS=$PM2_STATUS"
+          test "$PM2_STATUS" = "online"
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [target]=await db.pool.query(
+              "SELECT telegram_id,wallet FROM users WHERE telegram_id='7293732698' LIMIT 1"
+            );
+            const [refunds]=await db.pool.query(
+              "SELECT COALESCE(SUM(amount),0) total,COUNT(*) count FROM wallet_logs WHERE telegram_id='7293732698' AND type='predelivery_refund'"
+            );
+            console.log('TARGET_POST_DEPLOY='+JSON.stringify({user:target[0]||null,refunds:refunds[0]||null}));
+            const [pending]=await db.pool.query(
+              "SELECT COUNT(*) count,COALESCE(SUM(amount),0) total FROM pending_delivery_charges WHERE status='pending'"
+            );
+            console.log('PENDING_DELIVERY_RESERVATIONS='+JSON.stringify(pending[0]||null));
+            await db.pool.end();
+          })().catch(async e=>{console.error(e);try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+
+          echo "PRODUCTION_SHA=$(git rev-parse HEAD)"
+          REMOTE
