@@ -272,6 +272,8 @@ const {
     getUser,
     getUserWallet,
     debitUser,
+    reserveDeliveryCharge,
+    cancelDeliveryCharge,
     creditUser,
     recordPurchase,
     setPurchaseAutoRenew,
@@ -2623,20 +2625,52 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
       }
     }
 
-    await debitUser(userId, finalPrice);
     const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';
     const purchaseBootMethod = isTebyan ? (effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image') : 'volume';
-    await recordPurchase(
-      userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle,
-      DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY,
-      purchaseBootMethod === 'volume' ? srv.id : null, purchaseBootMethod, selectedImage.label,
-      0, 0, 0, 0, 0,
-      isHetzner ? hetznerKeyId : null,
-      initialStatus,
-      isHetzner ? 2 : 1,
-      { providerActionId: isHetzner ? (srv.action?.id || null) : null }
-    );
-    await recordWalletLog(userId, -finalPrice, `خرید سرور ${serverName} (${effectiveDc.name})`, 'purchase');
+    const purchaseDescription = `خرید سرور ${serverName} (${effectiveDc.name})`;
+
+    if (isHetzner) {
+      // Keep the customer's visible wallet untouched until the server crosses
+      // the delivery barrier (clean IP + stable SSH). The amount is only
+      // reserved internally so it cannot be double-spent during provisioning.
+      const reservation = await reserveDeliveryCharge({
+        telegramId: userId,
+        serverId: srv.id,
+        datacenter: effectiveDc.key,
+        amount: finalPrice,
+        logType: 'purchase',
+        description: purchaseDescription
+      });
+      if (!['reserved', 'already_reserved', 'already_charged'].includes(String(reservation?.status || ''))) {
+        await openstackApi.deleteServer(effectiveDc, null, srv.id).catch(() => null);
+        const reserveError = new Error('موجودی قابل استفاده برای این خرید کافی نیست.');
+        reserveError.code = 'DELIVERY_CHARGE_RESERVATION_FAILED';
+        throw reserveError;
+      }
+    } else {
+      const debited = await debitUser(userId, finalPrice);
+      if (!debited) throw new Error('موجودی کیف پول هم‌زمان تغییر کرده و برای خرید کافی نیست.');
+    }
+
+    try {
+      await recordPurchase(
+        userId, srv.id, effectiveDc.key, serverName, selectedFlavor.id, amountForDb, selectedCycle,
+        DEFAULT_PRICE_PER_GB, DEFAULT_DOWNLOAD_ONLY,
+        purchaseBootMethod === 'volume' ? srv.id : null, purchaseBootMethod, selectedImage.label,
+        0, 0, 0, 0, 0,
+        isHetzner ? hetznerKeyId : null,
+        initialStatus,
+        isHetzner ? 2 : 1,
+        { providerActionId: isHetzner ? (srv.action?.id || null) : null }
+      );
+    } catch (recordError) {
+      if (isHetzner) await cancelDeliveryCharge(srv.id, 'purchase_record_failed').catch(() => false);
+      throw recordError;
+    }
+
+    if (!isHetzner) {
+      await recordWalletLog(userId, -finalPrice, purchaseDescription, 'purchase');
+    }
     purchaseRecorded = true;
 
     let ip = extractServerIp(srv);
