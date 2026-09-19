@@ -91,6 +91,7 @@ async function verifyCleanCandidate(ip, args = {}) {
     return {
       ok: false,
       definitive: Boolean(quality?.definitive),
+      rangeRejected: true,
       reason: quality?.reason || 'quality_inconclusive',
       ssh: null,
       quality
@@ -126,10 +127,12 @@ async function verifyCleanCandidate(ip, args = {}) {
     }
 
     if (!quality?.ok) {
+      const globallyReady = qualityGlobalReady(quality);
       return {
         ok: false,
-        definitive: Boolean(quality?.definitive && qualityGlobalReady(quality)),
-        reason: qualityGlobalReady(quality)
+        definitive: Boolean(quality?.definitive && globallyReady),
+        rangeRejected: globallyReady,
+        reason: globallyReady
           ? (quality?.reason || 'failed_threshold')
           : 'quality_after_network_inconclusive',
         ssh,
