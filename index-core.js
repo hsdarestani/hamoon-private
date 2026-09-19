@@ -407,6 +407,55 @@ function formatToman(n) {
   return Number(n || 0).toLocaleString('en-US');
 }
 
+function formatRuntimeCoverageHours(hours) {
+  const value = Number(hours || 0);
+  if (!(value > 0) || !Number.isFinite(value)) return 'کمتر از ۱ ساعت';
+  if (value < 24) return `حدود ${Math.max(1, Math.floor(value))} ساعت`;
+  const days = Math.floor(value / 24);
+  const remainingHours = Math.floor(value % 24);
+  return remainingHours > 0
+    ? `حدود ${days} روز و ${remainingHours} ساعت`
+    : `حدود ${days} روز`;
+}
+
+async function getServerRuntimeCoverage(userId) {
+  const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
+  const purchases = await getUserActivePurchases(userId).catch(() => []);
+  let activeCount = 0;
+  let hourlyBurn = 0;
+
+  for (const purchase of purchases || []) {
+    if (Number(purchase.auto_renew ?? 1) !== 1) continue;
+    if (String(purchase.status || '').toLowerCase() !== 'active') continue;
+
+    const cycle = String(purchase.duration || 'hourly');
+    const cycleHours = Number(HOURS_IN_CYCLE[cycle] || 0);
+    if (!(cycleHours > 0)) continue;
+
+    const dcConfig =
+      getUserEffectiveDCs(userId)?.[purchase.datacenter] ||
+      baseDatacenters[purchase.datacenter] ||
+      baseDatacenters[String(purchase.datacenter || '').split('__')[0]] ||
+      null;
+
+    if (isHetznerDc(dcConfig) && !hetznerLifecycle.isBillablePurchase(purchase)) continue;
+
+    const cycleAmount = Number(normalizeStoredCycleAmount(purchase, dcConfig) || 0);
+    const effectiveHourly = cycleAmount / cycleHours;
+    if (!(effectiveHourly > 0) || !Number.isFinite(effectiveHourly)) continue;
+
+    activeCount += 1;
+    hourlyBurn += effectiveHourly;
+  }
+
+  return {
+    wallet,
+    activeCount,
+    hourlyBurn,
+    remainingHours: hourlyBurn > 0 ? wallet / hourlyBurn : null
+  };
+}
+
 
 function buildTebyanRootPasswordCloudInit(rootPassword) {
   const pwd = String(rootPassword).replace(/\\/g, '\\\\').replace(/"/g, '\"');
@@ -789,6 +838,11 @@ bot.on('message', async (msg) => {
 
 case '👛 کیف پول': {
   const logs = await getWalletLogs(effectiveUserId, 10);
+  const runtimeCoverage = await getServerRuntimeCoverage(effectiveUserId);
+  const runtimeCoverageText = runtimeCoverage.activeCount > 0
+    ? `\n\n⏳ پوشش تقریبی ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور روشن با موجودی فعلی: ${escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours))}\n` +
+      `🔥 هزینه مؤثر مجموع: ${escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn)))} تومان/ساعت`
+    : '';
 
   const history = logs.map(l => {
     const amountValue = parseFloat(l.amount);
@@ -806,13 +860,15 @@ case '👛 کیف پول': {
     const remainingTotal = Math.max(0, topupsTotal - globalCost);
 
     messageText =
-      `💰 موجودی: ${escapeMarkdownV2(remainingTotal.toFixed(0))} تومان\n\n` +
+      `💰 موجودی: ${escapeMarkdownV2(remainingTotal.toFixed(0))} تومان` +
+      runtimeCoverageText + `\n\n` +
       `📜 سابقه \\(۱۰ مورد اخیر\\):\n${history}`;
   } else {
     // کاربر عادی (بدون پروژه)
     const balance = await getUserWallet(effectiveUserId);
     messageText =
-      `💰 موجودی: ${escapeMarkdownV2(balance.toFixed(0))} تومان\n\n` +
+      `💰 موجودی: ${escapeMarkdownV2(balance.toFixed(0))} تومان` +
+      runtimeCoverageText + `\n\n` +
       `📜 سابقه \\(۱۰ مورد اخیر\\):\n${history}`;
   }
 
@@ -2991,6 +3047,14 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
         ? '🔁 تمدید خودکار: روشن\n'
         : '⏸ تمدید خودکار: خاموش\n';
     }
+
+    const runtimeCoverage = await getServerRuntimeCoverage(userId);
+    if (runtimeCoverage.activeCount > 0) {
+      messageText +=
+        `⏳ پوشش تقریبی کیف پول برای ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور روشن: ${escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours))}\n` +
+        `🔥 هزینه مؤثر مجموع: ${escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn)))} تومان/ساعت\n`;
+    }
+
     if (hetznerDeliveryPending) {
       messageText += '⏳ تحویل: در حال بررسی روشن بودن، SSH و دسترسی IP از ایران و نقاط خارجی\n';
     }
