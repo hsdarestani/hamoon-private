@@ -1,0 +1,163 @@
+name: Refund Predelivery Charges 30d
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refund-predelivery-charges-30d.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  refund:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Refund production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const TelegramBot=require('node-telegram-bot-api');
+          const db=require('./db');
+          const eligibleUndelivered=new Set(['purchase','server_api_purchase','purchase_recovery','billing','billing_cycle_change','hetzner_traffic_overage']);
+          const eligibleDelivered=new Set(['billing','billing_cycle_change','hetzner_traffic_overage']);
+          function exactMatch(l,p){
+            const d=String(l.description||'');
+            const n=String(p.server_name||'');
+            const id=String(p.server_id||'');
+            return (
+              d.includes('server_id='+id) ||
+              d.includes('API server purchase '+id+';') ||
+              d.includes('خرید سرور '+n+' (') ||
+              d.includes('خرید سرور '+n+' ') ||
+              d.includes('تمدید اتمیک سرور '+n+'؛') ||
+              d === 'کسر هزینه سرور '+n ||
+              d.startsWith('کسر هزینه سرور '+n+'؛') ||
+              d.includes('تغییر دوره سرور '+n+' از ') ||
+              d.includes('تمدید و فعال‌سازی مجدد سرور '+n) ||
+              d.includes('هزینه ترافیک مازاد Hetzner سرور '+n+'؛')
+            );
+          }
+          const money=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:2});
+          (async()=>{
+            await db.pool.query(`
+              CREATE TABLE IF NOT EXISTS predelivery_refund_events (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                refund_key VARCHAR(191) NOT NULL UNIQUE,
+                telegram_id VARCHAR(64) NOT NULL,
+                server_id VARCHAR(191) NOT NULL,
+                amount DECIMAL(18,6) NOT NULL,
+                reason VARCHAR(255) NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_predelivery_refund_user (telegram_id,created_at)
+              )
+            `);
+            const [ps]=await db.pool.query(`
+              SELECT telegram_id,server_id,server_name,datacenter,status,duration,amount,created_at,delivered_at,deleted_at
+              FROM purchases
+              WHERE (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%')
+                AND created_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)
+              ORDER BY created_at ASC
+            `);
+            const byUser=new Map();
+            let grand=0, count=0, skipped=0;
+            for(const p of ps){
+              const end=p.delivered_at?new Date(p.delivered_at):new Date();
+              const [logs]=await db.pool.query(`
+                SELECT id,amount,description,type,timestamp
+                FROM wallet_logs
+                WHERE telegram_id=? AND timestamp>=? AND timestamp<=?
+                ORDER BY timestamp ASC,id ASC
+              `,[String(p.telegram_id),new Date(p.created_at),end]);
+              const eligibleSet=p.delivered_at?eligibleDelivered:eligibleUndelivered;
+              const debits=logs.filter(l=>Number(l.amount)<0 && eligibleSet.has(String(l.type)) && exactMatch(l,p));
+              const gross=debits.reduce((s,l)=>s+Math.abs(Number(l.amount||0)),0);
+              if(!(gross>0)) continue;
+              let existing=0;
+              if(!p.delivered_at){
+                existing=logs.filter(l=>Number(l.amount)>0 && ['server_deletion_refund','predelivery_refund'].includes(String(l.type)) && exactMatch(l,p))
+                  .reduce((s,l)=>s+Number(l.amount||0),0);
+              } else {
+                existing=logs.filter(l=>Number(l.amount)>0 && String(l.type)==='predelivery_refund' && exactMatch(l,p))
+                  .reduce((s,l)=>s+Number(l.amount||0),0);
+              }
+              const due=Math.max(0,Math.round((gross-existing)*100)/100);
+              if(!(due>0)) continue;
+              const refundKey='predelivery30d:'+String(p.server_id);
+              const conn=await db.pool.getConnection();
+              let applied=false,newWallet=null;
+              try{
+                await conn.beginTransaction();
+                const [seen]=await conn.execute('SELECT id FROM predelivery_refund_events WHERE refund_key=? LIMIT 1 FOR UPDATE',[refundKey]);
+                if(seen.length){await conn.rollback();skipped++;continue;}
+                const [users]=await conn.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1 FOR UPDATE',[String(p.telegram_id)]);
+                if(!users.length) throw new Error('USER_NOT_FOUND:'+p.telegram_id);
+                const before=Number(users[0].wallet||0);
+                await conn.execute('UPDATE users SET wallet=wallet+?,updated_at=CURRENT_TIMESTAMP WHERE telegram_id=?',[due,String(p.telegram_id)]);
+                const desc='بازگشت وجه بابت برداشت قبل از تحویل نهایی سرور '+String(p.server_name||p.server_id)+'؛ server_id='+String(p.server_id);
+                await conn.execute('INSERT INTO wallet_logs (telegram_id,amount,description,type) VALUES (?,?,?,?)',[String(p.telegram_id),due,desc,'predelivery_refund']);
+                await conn.execute(
+                  'INSERT INTO predelivery_refund_events (refund_key,telegram_id,server_id,amount,reason) VALUES (?,?,?,?,?)',
+                  [refundKey,String(p.telegram_id),String(p.server_id),due,p.delivered_at?'pre_delivery_billing':'never_delivered_or_still_undelivered']
+                );
+                await conn.commit();
+                applied=true; newWallet=before+due;
+              }catch(e){await conn.rollback().catch(()=>{});throw e}finally{conn.release()}
+              if(!applied) continue;
+              grand+=due;count++;
+              const key=String(p.telegram_id);
+              const cur=byUser.get(key)||{telegram_id:key,total:0,servers:[],newWallet:null};
+              cur.total+=due;
+              cur.servers.push({server_id:String(p.server_id),server_name:p.server_name,amount:due});
+              cur.newWallet=newWallet;
+              byUser.set(key,cur);
+              console.log('REFUND_APPLIED='+JSON.stringify({telegram_id:key,server_id:String(p.server_id),server_name:p.server_name,amount:due,newWallet}));
+            }
+
+            const token=process.env.TELEGRAM_BOT_TOKEN;
+            const bot=token?new TelegramBot(token,{polling:false}):null;
+            for(const u of byUser.values()){
+              if(!bot) break;
+              const names=u.servers.slice(0,8).map(x=>'• '+x.server_name+' — '+money(x.amount)+' تومان').join('\n');
+              const more=u.servers.length>8?'\n• و '+(u.servers.length-8)+' مورد دیگر':'';
+              const msg=
+                '✅ بازگشت وجه انجام شد.\n\n'+
+                'در بررسی ۳۰ روز اخیر مشخص شد بخشی از هزینه‌ها زمانی از کیف پول شما کسر شده که سرویس Hetzner هنوز با IP سالم و دسترسی نهایی تحویل نشده بود.\n\n'+
+                names+more+'\n\n'+
+                '💰 مبلغ بازگشتی: '+money(u.total)+' تومان\n'+
+                '👛 موجودی جدید کیف پول: '+money(u.newWallet)+' تومان\n\n'+
+                'این اصلاح به‌صورت خودکار در کیف پول شما ثبت شده است.';
+              try{
+                const sent=await bot.sendMessage(u.telegram_id,msg);
+                console.log('NOTIFY_SENT='+JSON.stringify({telegram_id:u.telegram_id,message_id:sent?.message_id||null,total:u.total}));
+              }catch(e){
+                console.log('NOTIFY_FAILED='+JSON.stringify({telegram_id:u.telegram_id,error:String(e?.message||e),total:u.total}));
+              }
+            }
+            console.log('REFUND_SUMMARY='+JSON.stringify({count,users:byUser.size,total:Math.round(grand*100)/100,skipped}));
+            console.log('TARGET_SUMMARY='+JSON.stringify(byUser.get('7293732698')||null));
+            await db.pool.end();
+          })().catch(async e=>{console.error('REFUND_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
