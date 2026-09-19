@@ -8,6 +8,7 @@ on:
       - 'public/dashboard/**'
       - 'dashboard-api.js'
       - 'customer-api.js'
+      - 'reseller-api-extensions.js'
       - 'external-payments.js'
       - 'services/hetzner-lifecycle.js'
       - 'server.js'
@@ -55,6 +56,7 @@ jobs:
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
+          node --check reseller-api-extensions.js
           node --check external-payments.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
@@ -111,6 +113,7 @@ jobs:
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check customer-api.js
+          node --check reseller-api-extensions.js
           node --check external-payments.js
           node --check services/hetzner-lifecycle.js
           node --check db.js
