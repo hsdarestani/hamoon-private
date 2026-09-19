@@ -1,0 +1,73 @@
+name: Inspect Current Undelivered Hetzner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-current-undelivered-hetzner.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const cloud=require('./cloud-api');
+          (async()=>{
+            const [rows]=await db.pool.query(`
+              SELECT p.*,u.wallet
+              FROM purchases p JOIN users u ON u.telegram_id=p.telegram_id
+              WHERE (LOWER(p.datacenter)='hetzner' OR LOWER(p.datacenter) LIKE 'hetzner-%')
+                AND p.delivered_at IS NULL
+                AND p.deleted_at IS NULL
+                AND p.status NOT IN ('deleted','provider_missing','deletion_pending','provisioning_failed')
+              ORDER BY p.created_at ASC
+            `);
+            const out=[];
+            for(const p of rows){
+              const dc=dcs[p.datacenter]||dcs[String(p.datacenter||'').split('__')[0]];
+              let provider=null;
+              try{
+                const s=await cloud.getServer(dc,null,p.server_id);
+                provider={exists:true,status:s?.status||s?.state||null,ip:s?.public_net?.ipv4?.ip||s?.public_ip||s?.addresses?.public?.find?.(a=>Number(a.version)===4)?.addr||null,location:s?.location?.name||s?.datacenter?.location?.name||null};
+              }catch(e){provider={exists:false,error:String(e?.status||e?.response?.status||e?.message||e)}}
+              out.push({
+                telegram_id:String(p.telegram_id),server_id:String(p.server_id),server_name:p.server_name,status:p.status,
+                amount:Number(p.amount||0),duration:p.duration,billing_amount_version:Number(p.billing_amount_version||1),
+                pricing_mode:p.pricing_mode||null,monthly_basis_price:p.monthly_basis_price==null?null:Number(p.monthly_basis_price),
+                wallet:Number(p.wallet||0),created_at:p.created_at,last_billed_at:p.last_billed_at,provider
+              });
+            }
+            console.log('CURRENT_UNDELIVERED='+JSON.stringify(out));
+            await db.pool.end();
+          })().catch(async e=>{console.error('INSPECT_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
