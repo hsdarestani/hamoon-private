@@ -29,5 +29,15 @@ assert(source.includes("error.code = 'NO_CLEAN_IPV4_AVAILABLE'"));
 assert(source.includes('error.attempts = maxAttempts'));
 assert(source.includes('IP قبلی حفظ شد'));
 assert(source.includes('هیچ IP سالمی در لوکیشن فعلی پیدا نشد'));
+assert(source.includes('rangeRejected: true'), 'definitive Iran failure must mark the IPv4 range as bad');
+
+const baseSource = fs.readFileSync(
+  path.join(__dirname, '../services/hetzner-change-ip.js'),
+  'utf8'
+);
+assert(baseSource.includes('hetzner_bad_ipv4_ranges'), 'bad IPv4 range cache table missing');
+assert(baseSource.includes('same_or_recently_bad_range'), 'same/bad range fast rejection missing');
+assert(baseSource.includes('NO_DIFFERENT_IPV4_RANGE_AVAILABLE'), 'different-range exhaustion guard missing');
+assert(baseSource.includes('blockedRanges.add(oldRange)'), 'manual Change-IP must leave the current /24 range');
 
 console.log('validate-manual-change-ip-cap: ok');
