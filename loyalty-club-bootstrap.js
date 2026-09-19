@@ -120,7 +120,22 @@ case '👛 کیف پول': {`,
 
   source = replaceOnce(
     source,
-    `    const balance = await getUserWallet(userId);\n    if (balance < finalPrice) {\n      return sendMessage(chatId, \`❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: \${formatToman(finalPrice)} تومان\\n💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.\`, mainMenu);\n    }`,
+    `    const balance = await getUserWallet(userId);
+    const pendingDeliveryReserved = isHetzner
+      ? Number(await getPendingDeliveryChargeTotal(userId).catch(() => 0) || 0)
+      : 0;
+    const spendableBalance = balance - pendingDeliveryReserved;
+    if (spendableBalance < finalPrice) {
+      return sendMessage(
+        chatId,
+        \`❌ موجودی قابل استفاده شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: \${formatToman(finalPrice)} تومان\\n\` +
+        (pendingDeliveryReserved > 0
+          ? \`⏳ \${formatToman(pendingDeliveryReserved)} تومان برای سرورهای در حال تحویل رزرو شده و هنوز از کیف پول کسر نشده است.\\n\`
+          : '') +
+        '💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.',
+        mainMenu
+      );
+    }`,
     `    const loyaltyCheckoutPreview = await loyaltyClub.getRedemptionPreview(userId, finalPrice).catch(() => ({
       creditUsable: 0,
       walletCharge: finalPrice,
@@ -128,18 +143,32 @@ case '👛 کیف پول': {`,
     }));
     const expectedWalletCharge = Math.max(0, Number(loyaltyCheckoutPreview.walletCharge ?? finalPrice));
     const balance = await getUserWallet(userId);
-    if (balance < expectedWalletCharge) {
+    const pendingDeliveryReserved = isHetzner
+      ? Number(await getPendingDeliveryChargeTotal(userId).catch(() => 0) || 0)
+      : 0;
+    const spendableBalance = balance - pendingDeliveryReserved;
+    if (spendableBalance < expectedWalletCharge) {
       const creditHint = Number(loyaltyCheckoutPreview.creditUsable || 0) > 0
         ? \`\\n🎁 \${formatToman(loyaltyCheckoutPreview.creditUsable)} تومان از اعتبار باشگاه در این خرید قابل استفاده است.\`
         : '';
-      return sendMessage(chatId, \`❌ موجودی کیف پول برای این خرید کافی نیست. مبلغ مورد نیاز از کیف پول: \${formatToman(expectedWalletCharge)} تومان\${creditHint}\\n💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.\`, mainMenu);
+      return sendMessage(
+        chatId,
+        \`❌ موجودی قابل استفاده کیف پول برای این خرید کافی نیست. مبلغ مورد نیاز از کیف پول: \${formatToman(expectedWalletCharge)} تومان\${creditHint}\\n\` +
+        (pendingDeliveryReserved > 0
+          ? \`⏳ \${formatToman(pendingDeliveryReserved)} تومان برای سرورهای در حال تحویل رزرو شده و هنوز از کیف پول کسر نشده است.\\n\`
+          : '') +
+        '💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.',
+        mainMenu
+      );
     }`,
     'purchase balance check with loyalty credit'
   );
 
   source = replaceOnce(
     source,
-    `    await debitUser(userId, finalPrice);\n    const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';`,
+    `    const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';
+    const purchaseBootMethod = isTebyan ? (effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image') : 'volume';
+    const purchaseDescription = \`خرید سرور \${serverName} (\${effectiveDc.name})\`;`,
     `    let redemption = null;
     try {
       redemption = await loyaltyClub.consumeCredit({
@@ -155,32 +184,88 @@ case '👛 کیف پول': {`,
       loyaltyCreditUsed = 0;
       loyaltyWalletCharge = finalPrice;
       loyaltyRedemptionApplied = false;
-      const fullBalance = await getUserWallet(userId);
-      if (fullBalance < finalPrice) {
-        throw new Error('اعتبار باشگاه موقتاً قابل استفاده نیست و موجودی کیف پول برای مبلغ کامل خرید کافی نیست. لطفاً دوباره تلاش کنید.');
-      }
     }
 
-    const debitOk = loyaltyWalletCharge > 0 ? await debitUser(userId, loyaltyWalletCharge) : true;
-    if (!debitOk) {
-      if (loyaltyRedemptionApplied) {
-        await loyaltyClub.refundRedemption({ telegramId: userId, referenceId: srv.id }).catch(() => {});
-        loyaltyRedemptionApplied = false;
-      }
-      throw new Error('موجودی کیف پول برای تکمیل خرید کافی نیست.');
-    }
-    loyaltyWalletDebited = loyaltyWalletCharge > 0;
-
-    const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';`,
-    'loyalty credit consumption before debit'
+    const initialStatus = (isHetzner || isTebyan) ? 'provisioning' : 'active';
+    const purchaseBootMethod = isTebyan ? (effectiveDc.TEBYAN_ENABLE_BOOT_FROM_VOLUME === true ? 'volume' : 'image') : 'volume';
+    const loyaltyPart = loyaltyCreditUsed > 0 ? \` + \${formatToman(loyaltyCreditUsed)} تومان اعتبار باشگاه\` : '';
+    const purchaseDescription = \`خرید سرور \${serverName} (\${effectiveDc.name})\${loyaltyPart}\`;`,
+    'loyalty credit consumption before deferred charge'
   );
 
   source = replaceOnce(
     source,
-    `    await recordWalletLog(userId, -finalPrice, \`خرید سرور \${serverName} (\${effectiveDc.name})\`, 'purchase');\n    purchaseRecorded = true;`,
-    `    if (loyaltyWalletCharge > 0) {
-      const loyaltyPart = loyaltyCreditUsed > 0 ? \` + \${formatToman(loyaltyCreditUsed)} تومان اعتبار باشگاه\` : '';
-      await recordWalletLog(userId, -loyaltyWalletCharge, \`خرید سرور \${serverName} (\${effectiveDc.name})\${loyaltyPart}\`, 'purchase');
+    `        amount: finalPrice,
+        logType: 'purchase',
+        description: purchaseDescription`,
+    `        amount: loyaltyWalletCharge,
+        logType: 'purchase',
+        description: purchaseDescription`,
+    'deferred reservation amount'
+  );
+
+  source = replaceOnce(
+    source,
+    `      if (!['reserved', 'already_reserved', 'already_charged'].includes(String(reservation?.status || ''))) {
+        const failedServerId = srv.id;
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);
+        srv = null;
+        const reserveError = new Error('موجودی قابل استفاده برای این خرید کافی نیست.');
+        reserveError.code = 'DELIVERY_CHARGE_RESERVATION_FAILED';
+        throw reserveError;
+      }`,
+    `      if (!['reserved', 'already_reserved', 'already_charged'].includes(String(reservation?.status || ''))) {
+        const failedServerId = srv.id;
+        if (loyaltyRedemptionApplied) {
+          await loyaltyClub.refundRedemption({ telegramId: userId, referenceId: failedServerId }).catch(() => {});
+          loyaltyRedemptionApplied = false;
+        }
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);
+        srv = null;
+        const reserveError = new Error('موجودی قابل استفاده برای این خرید کافی نیست.');
+        reserveError.code = 'DELIVERY_CHARGE_RESERVATION_FAILED';
+        throw reserveError;
+      }`,
+    'reservation loyalty rollback'
+  );
+
+  source = replaceOnce(
+    source,
+    `      const debited = await debitUser(userId, finalPrice);
+      if (!debited) throw new Error('موجودی کیف پول هم‌زمان تغییر کرده و برای خرید کافی نیست.');`,
+    `      const debited = loyaltyWalletCharge > 0 ? await debitUser(userId, loyaltyWalletCharge) : true;
+      if (!debited) {
+        if (loyaltyRedemptionApplied) {
+          await loyaltyClub.refundRedemption({ telegramId: userId, referenceId: srv.id }).catch(() => {});
+          loyaltyRedemptionApplied = false;
+        }
+        throw new Error('موجودی کیف پول هم‌زمان تغییر کرده و برای خرید کافی نیست.');
+      }
+      loyaltyWalletDebited = loyaltyWalletCharge > 0;`,
+    'non-Hetzner loyalty wallet debit'
+  );
+
+  source = replaceOnce(
+    source,
+    `        await cancelDeliveryCharge(failedServerId, 'purchase_record_failed').catch(() => false);
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);`,
+    `        await cancelDeliveryCharge(failedServerId, 'purchase_record_failed').catch(() => false);
+        if (loyaltyRedemptionApplied) {
+          await loyaltyClub.refundRedemption({ telegramId: userId, referenceId: failedServerId }).catch(() => {});
+          loyaltyRedemptionApplied = false;
+        }
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);`,
+    'record failure loyalty rollback'
+  );
+
+  source = replaceOnce(
+    source,
+    `    if (!isHetzner) {
+      await recordWalletLog(userId, -finalPrice, purchaseDescription, 'purchase');
+    }
+    purchaseRecorded = true;`,
+    `    if (!isHetzner && loyaltyWalletCharge > 0) {
+      await recordWalletLog(userId, -loyaltyWalletCharge, purchaseDescription, 'purchase');
     }
     purchaseRecorded = true;
 
@@ -195,7 +280,8 @@ case '👛 کیف پول': {`,
       metadata: {
         datacenter: effectiveDc.key,
         server_name: serverName,
-        loyalty_credit_used: loyaltyCreditUsed
+        loyalty_credit_used: loyaltyCreditUsed,
+        payment_deferred_until_delivery: isHetzner
       }
     }).catch((loyaltyError) => {
       console.error('[LOYALTY] purchase earning failed without blocking delivery:', loyaltyError.message || loyaltyError);
