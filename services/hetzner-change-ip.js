@@ -31,6 +31,13 @@ function normalizeIpv4(value) {
   return net.isIP(ip) === 4 ? ip : null;
 }
 
+function ipv4Range24(value) {
+  const ip = normalizeIpv4(value);
+  if (!ip) return null;
+  const parts = ip.split('.');
+  return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+}
+
 function currentIpv4(server) {
   return normalizeIpv4(server?.public_net?.ipv4?.ip || server?.public_ip || server?.ip);
 }
@@ -74,6 +81,70 @@ async function ensureHistoryTable(db) {
       KEY idx_server_ip_history_owner (telegram_id, datacenter, server_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+}
+
+async function ensureBadRangeTable(db) {
+  if (!db?.pool?.query) throw Object.assign(new Error('DB_POOL_UNAVAILABLE'), { code: 'DB_POOL_UNAVAILABLE' });
+  await db.pool.query(`
+    CREATE TABLE IF NOT EXISTS hetzner_bad_ipv4_ranges (
+      location VARCHAR(32) NOT NULL,
+      range_prefix VARCHAR(32) NOT NULL,
+      failure_count INT UNSIGNED NOT NULL DEFAULT 1,
+      last_reason VARCHAR(96) NULL,
+      first_bad_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      last_bad_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      PRIMARY KEY (location, range_prefix),
+      KEY idx_hetzner_bad_range_time (last_bad_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
+async function rememberBadRange(db, { location, ip, reason }) {
+  const range = ipv4Range24(ip);
+  const normalizedLocation = String(location || '').trim().toLowerCase();
+  if (!range || !normalizedLocation) return false;
+  await ensureBadRangeTable(db);
+  await db.pool.query(
+    `INSERT INTO hetzner_bad_ipv4_ranges
+      (location, range_prefix, failure_count, last_reason)
+     VALUES (?, ?, 1, ?)
+     ON DUPLICATE KEY UPDATE
+       failure_count = failure_count + 1,
+       last_reason = VALUES(last_reason),
+       last_bad_at = CURRENT_TIMESTAMP(3)`,
+    [normalizedLocation, range, String(reason || 'iran_quality_failed').slice(0, 96)]
+  );
+  console.warn('[HETZNER_BAD_IPV4_RANGE_RECORDED]', {
+    location: normalizedLocation,
+    range,
+    ip: normalizeIpv4(ip),
+    reason: String(reason || 'iran_quality_failed').slice(0, 96)
+  });
+  return true;
+}
+
+async function recentBadRanges(db, { location, now = Date.now() }) {
+  const normalizedLocation = String(location || '').trim().toLowerCase();
+  const ranges = new Set();
+  if (!normalizedLocation) return ranges;
+  await ensureBadRangeTable(db);
+  const cooldownMs = positiveMs(
+    process.env.HETZNER_CHANGE_IP_BAD_RANGE_COOLDOWN_MS,
+    6 * 60 * 60 * 1000
+  );
+  const [rows] = await db.pool.query(
+    `SELECT range_prefix, last_bad_at
+       FROM hetzner_bad_ipv4_ranges
+      WHERE location = ?`,
+    [normalizedLocation]
+  );
+  const nowMs = Number(now instanceof Date ? now.getTime() : now) || Date.now();
+  for (const row of rows || []) {
+    const seenMs = new Date(row?.last_bad_at || 0).getTime();
+    const ageMs = Number.isFinite(seenMs) && seenMs > 0 ? Math.max(0, nowMs - seenMs) : Infinity;
+    if (ageMs <= cooldownMs && row?.range_prefix) ranges.add(String(row.range_prefix));
+  }
+  return ranges;
 }
 
 async function rememberIp(db, { telegramId, datacenter, serverId, ip, event }) {
@@ -177,22 +248,35 @@ async function deletePrimaryIpWithRetry(dc, primaryIpId, attempts = 4) {
 async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, serverId, location, oldIp }) {
   const maxAttempts = Math.max(1, Math.min(20, Number(process.env.HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS || 8)));
   const used = await usedIps(db, { datacenter, serverId });
+  const blockedRanges = await recentBadRanges(db, { location });
+  const oldRange = ipv4Range24(oldIp);
+
+  // A manual Change-IP should actually move the customer to another network
+  // range. If the current /24 is filtered in Iran, allocating another address
+  // from the same /24 just repeats the incident.
+  if (oldRange) blockedRanges.add(oldRange);
+
   if (oldIp) {
     used.add(oldIp);
     await rememberIp(db, { telegramId, datacenter, serverId, ip: oldIp, event: 'current_before_change' });
   }
 
   let duplicateCandidates = 0;
+  let rangeRejectedCandidates = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let candidate;
     try {
       candidate = await cloud.createPrimaryIpv4(dc, null, location);
     } catch (cause) {
-      if (duplicateCandidates > 0) {
-        const error = new Error('NO_UNUSED_PRIMARY_IPV4_AVAILABLE');
-        error.code = 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
+      if (duplicateCandidates > 0 || rangeRejectedCandidates > 0) {
+        const code = rangeRejectedCandidates > 0
+          ? 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE'
+          : 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
+        const error = new Error(code);
+        error.code = code;
         error.cause = cause;
         error.duplicateCandidates = duplicateCandidates;
+        error.rangeRejectedCandidates = rangeRejectedCandidates;
         throw error;
       }
       throw cause;
@@ -205,27 +289,49 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
       throw Object.assign(new Error('INVALID_PRIMARY_IPV4_CANDIDATE'), { code: 'INVALID_PRIMARY_IPV4_CANDIDATE' });
     }
 
-    if (!used.has(candidateIp)) {
+    const candidateRange = ipv4Range24(candidateIp);
+    const rangeBlocked = candidateRange && blockedRanges.has(candidateRange);
+    if (!used.has(candidateIp) && !rangeBlocked) {
       await rememberIp(db, { telegramId, datacenter, serverId, ip: candidateIp, event: 'reserved_unique_candidate' });
-      console.log('[HETZNER_CHANGE_IP_UNIQUE_CANDIDATE]', { server_id: String(serverId), attempt, ip: candidateIp });
+      console.log('[HETZNER_CHANGE_IP_UNIQUE_CANDIDATE]', {
+        server_id: String(serverId),
+        attempt,
+        ip: candidateIp,
+        range: candidateRange,
+        location: String(location)
+      });
       return { ...candidate, id: candidateId, ip: candidateIp };
     }
 
-    duplicateCandidates += 1;
     used.add(candidateIp);
-    await rememberIp(db, { telegramId, datacenter, serverId, ip: candidateIp, event: 'duplicate_candidate_rejected' });
+    if (rangeBlocked) rangeRejectedCandidates += 1;
+    else duplicateCandidates += 1;
+
+    await rememberIp(db, {
+      telegramId,
+      datacenter,
+      serverId,
+      ip: candidateIp,
+      event: rangeBlocked ? 'blocked_range_candidate_rejected' : 'duplicate_candidate_rejected'
+    });
     console.warn('[HETZNER_CHANGE_IP_CANDIDATE_REJECTED]', {
       server_id: String(serverId),
       attempt,
       ip: candidateIp,
-      reason: 'cooldown_or_current_ip'
+      range: candidateRange,
+      location: String(location),
+      reason: rangeBlocked ? 'same_or_recently_bad_range' : 'cooldown_or_current_ip'
     });
     await deletePrimaryIpWithRetry(dc, candidateId);
   }
 
-  const error = new Error('NO_UNUSED_PRIMARY_IPV4_AVAILABLE');
-  error.code = 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
+  const code = rangeRejectedCandidates > 0
+    ? 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE'
+    : 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE';
+  const error = new Error(code);
+  error.code = code;
   error.duplicateCandidates = duplicateCandidates;
+  error.rangeRejectedCandidates = rangeRejectedCandidates;
   throw error;
 }
 
@@ -363,6 +469,14 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
           event: verification?.definitive ? 'candidate_verification_rejected' : 'candidate_verification_inconclusive'
         }).catch(() => {});
 
+        if (verification?.rangeRejected) {
+          await rememberBadRange(db, {
+            location,
+            ip: ready.ip,
+            reason: verification?.reason || 'iran_quality_failed'
+          }).catch(() => {});
+        }
+
         rollbackDone = await rollbackSwap(dc, {
           serverId,
           oldPrimaryId,
@@ -377,6 +491,7 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
         error.code = rollbackDone ? 'CANDIDATE_REJECTED' : 'CANDIDATE_REJECTED_ROLLBACK_FAILED';
         error.candidateIp = ready.ip;
         error.oldIp = oldIp;
+        error.location = location;
         error.verification = verification;
         error.rollbackDone = rollbackDone;
         throw error;
@@ -424,6 +539,9 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
 
 function userMessageForError(error) {
   const code = String(error?.code || error?.message || '');
+  if (code === 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE') {
+    return 'Hetzner در این تلاش از همین لوکیشن رنج IPv4 متفاوتی برنگرداند. برای جلوگیری از دادن IP از همان رنج نامناسب، IP فعلی بدون تغییر حفظ شد؛ لطفاً کمی بعد دوباره تلاش کنید.';
+  }
   if (code === 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE') {
     return 'Hetzner در این تلاش IP قابل استفاده‌ای خارج از cooldown برنگرداند. IP فعلی سرور بدون تغییر حفظ شد؛ لطفاً چند دقیقه بعد دوباره تلاش کنید.';
   }
@@ -439,7 +557,11 @@ function userMessageForError(error) {
 
 module.exports = {
   normalizeIpv4,
+  ipv4Range24,
   ensureHistoryTable,
+  ensureBadRangeTable,
+  rememberBadRange,
+  recentBadRanges,
   rememberIp,
   usedIps,
   reserveUniquePrimaryIpv4,
