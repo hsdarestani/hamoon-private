@@ -956,6 +956,7 @@ async function changePurchaseCycleAtomic({
   walletDifference,
   serverName
 }) {
+  await deliveryCharge.ensureSchema(pool);
   const conn = await pool.getConnection();
 
   try {
@@ -1017,10 +1018,14 @@ async function changePurchaseCycleAtomic({
       Number(walletDifference || 0)
     );
     const currentWallet = Number(userRows[0].wallet || 0);
+    const pendingReserved = await deliveryCharge.pendingTotalForUser(conn, telegramId);
+    const spendableWallet = currentWallet - pendingReserved;
 
-    if (difference > 0 && currentWallet < difference) {
+    if (difference > 0 && spendableWallet + 1e-9 < difference) {
       const error = new Error('INSUFFICIENT_WALLET');
       error.code = 'INSUFFICIENT_WALLET';
+      error.pendingReserved = pendingReserved;
+      error.spendableWallet = spendableWallet;
       throw error;
     }
 
