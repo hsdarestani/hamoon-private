@@ -580,6 +580,109 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
               continue;
             }
 
+            // Before parking an undelivered VM in manual_review, rotate its
+            // primary IPv4 once and rerun the full readiness barrier. This
+            // prevents a failed SSH delivery from getting stuck forever on the
+            // same address after a power-cycle.
+            if (readiness.status === 'pending_ssh') {
+              try {
+                const rotated = await rotateProvisioningIp({
+                  dc,
+                  serverId: purchase.server_id,
+                  db,
+                  telegramId: purchase.telegram_id,
+                  datacenter: purchase.datacenter
+                });
+                await db.updatePublicIp?.(
+                  purchase.telegram_id,
+                  purchase.server_id,
+                  purchase.datacenter,
+                  rotated.newIp
+                );
+                await db.updateScopedStatus?.(
+                  purchase.telegram_id,
+                  purchase.server_id,
+                  purchase.datacenter,
+                  'pending_ssh'
+                );
+
+                readiness = await waitForReadiness(dc, purchase.server_id, {
+                  timeoutMs: Math.max(
+                    30000,
+                    Number(process.env.HETZNER_PENDING_SSH_IP_ROTATION_TIMEOUT_MS || 90000)
+                  )
+                });
+
+                if (readiness.quality && db.updateIpQualityResult) {
+                  await db.updateIpQualityResult(
+                    purchase.telegram_id,
+                    purchase.server_id,
+                    purchase.datacenter,
+                    qualitySummary(readiness.quality),
+                    false
+                  );
+                }
+
+                console.log('[HETZNER_PENDING_SSH_IP_ROTATION]', {
+                  server_id: String(purchase.server_id),
+                  old_ip: rotated.oldIp || null,
+                  new_ip: rotated.newIp || null,
+                  status: readiness.status,
+                  ready: Boolean(readiness.ready)
+                });
+
+                if (readiness.ready) {
+                  const newlyDelivered = Boolean(await db.markDelivered?.(
+                    purchase.telegram_id,
+                    purchase.server_id,
+                    purchase.datacenter,
+                    readiness.ip || rotated.newIp
+                  ));
+                  results.push({
+                    server_id: purchase.server_id,
+                    telegram_id: purchase.telegram_id,
+                    datacenter: purchase.datacenter,
+                    previous_status: purchase.status,
+                    status: 'active',
+                    ready: true,
+                    newly_delivered: newlyDelivered,
+                    ip: readiness.ip || rotated.newIp,
+                    quality: readiness.quality,
+                    ssh_recovered: true,
+                    ip_rotated_after_ssh_failure: true
+                  });
+                  continue;
+                }
+
+                if (readiness.status === 'pending_ip_quality') {
+                  await db.updateScopedStatus?.(
+                    purchase.telegram_id,
+                    purchase.server_id,
+                    purchase.datacenter,
+                    'pending_ip_quality'
+                  );
+                  results.push({
+                    server_id: purchase.server_id,
+                    telegram_id: purchase.telegram_id,
+                    datacenter: purchase.datacenter,
+                    previous_status: purchase.status,
+                    status: 'pending_ip_quality',
+                    ready: false,
+                    ip: readiness.ip || rotated.newIp,
+                    quality: readiness.quality,
+                    ip_rotated_after_ssh_failure: true,
+                    reason: 'ssh_ip_rotated_quality_pending'
+                  });
+                  continue;
+                }
+              } catch (rotationError) {
+                console.warn('[HETZNER_PENDING_SSH_IP_ROTATION_FAILED]', {
+                  server_id: String(purchase.server_id),
+                  error: String(rotationError?.message || rotationError).slice(0, 120)
+                });
+              }
+            }
+
             await db.updateScopedStatus?.(
               purchase.telegram_id,
               purchase.server_id,
@@ -594,7 +697,9 @@ async function reconcileProvisioning({ db, resolveDatacenter, timeoutMs = 15000,
               status: 'manual_review',
               ready: false,
               ip: readiness.ip || null,
-              reason: 'ssh_unreachable_after_powercycle'
+              reason: readiness.status === 'pending_ssh'
+                ? 'ssh_unreachable_after_powercycle_and_ip_rotation'
+                : 'ssh_unreachable_after_powercycle'
             });
             continue;
           } catch (recoveryError) {
