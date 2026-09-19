@@ -340,10 +340,23 @@ async function handleStartMySuspendedServers(chatId, userId) {
 
     const runtimeCoverage = await getServerRuntimeCoverage(userId);
     if (runtimeCoverage.activeCount > 0) {
-      messageText +=
-        '⏳ پوشش تقریبی کیف پول برای ' + escapeMarkdownV2(String(runtimeCoverage.activeCount)) +
-        ' سرور روشن: ' + escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours)) + '\\n' +
-        '🔥 هزینه مؤثر مجموع: ' + escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn))) + ' تومان/ساعت\\n';
+      if (runtimeCoverage.riskAt) {
+        messageText +=
+          '💳 پوشش تمدید ' + escapeMarkdownV2(String(runtimeCoverage.activeCount)) +
+          ' سرور با موجودی فعلی: تا ' +
+          escapeMarkdownV2(runtimeCoverage.riskAt.toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' })) + '\\n' +
+          '⏳ زمان تا اولین کسری تمدید: ' +
+          escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours)) + '\\n' +
+          '⚠️ حداقل شارژ لازم در آن موعد: ' +
+          escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.shortfall))) + ' تومان\\n';
+      } else {
+        messageText +=
+          '✅ موجودی فعلی تمدید ' + escapeMarkdownV2(String(runtimeCoverage.activeCount)) +
+          ' سرور را در بازه پیش‌بینی پوشش می‌دهد\\n';
+      }
+      if (runtimeCoverage.hasPrepaidCycles) {
+        messageText += 'ℹ️ پلن‌های ماهانه/هفتگی فقط در موعد تمدید از کیف پول کسر می‌شوند، نه به‌صورت ساعتی\\n';
+      }
     }
 
     if (hetznerDeliveryPending) {`;
@@ -355,7 +368,9 @@ async function handleStartMySuspendedServers(chatId, userId) {
     'async function resumePurchaseWithBillingGuard(',
     'تا قبل از پایان دوره فعلی، صرفاً کم بودن کیف پول باعث قطع سرور نمی‌شود.',
     "[RESUME_BILLING_GUARD_FAILED]",
-    '💳 هزینه تمدید:'
+    '💳 هزینه تمدید:',
+    'زمان تا اولین کسری تمدید:',
+    'نه به‌صورت ساعتی'
   ];
   for (const marker of requiredMarkers) {
     if (!out.includes(marker)) throw new Error('BILLING_RENEWAL_GUARD_PATCH_FAILED:' + marker);
