@@ -144,6 +144,24 @@ function createResellerApiExtensionsRouter() {
     } catch (error) { next(error); }
   });
 
+  router.get('/images', auth, async (req, res, next) => {
+    try {
+      const serverType = String(req.query.server_type || req.query.serverType || '').trim().toLowerCase();
+      if (!serverType) return apiError(res, 400, 'SERVER_TYPE_REQUIRED', 'نوع سرور برای دریافت سیستم‌عامل‌ها الزامی است.');
+      if (!isAllowed(req.apiClient.allowed_plans, serverType)) {
+        return apiError(res, 403, 'NOT_ALLOWED', 'این پلن برای این حساب فعال نیست.');
+      }
+      const dc = datacenters.hetzner;
+      if (!dc || !isHetznerDc(dc)) return apiError(res, 503, 'HETZNER_UNAVAILABLE', 'دیتاسنتر Hetzner فعال نیست.');
+      const images = await listCompatibleImages(dc, serverType);
+      const allowed = images.filter(image =>
+        isAllowed(req.apiClient.allowed_images, image.id) ||
+        isAllowed(req.apiClient.allowed_images, image.name)
+      );
+      return res.json({ ok: true, server_type: serverType, images: allowed.slice(0, 80) });
+    } catch (error) { next(error); }
+  });
+
   router.get('/servers/:id/rebuild-images', auth, ownedPurchase, async (req, res, next) => {
     try {
       const images = await listCompatibleImages(req.dc, req.purchase.flavor_id);
