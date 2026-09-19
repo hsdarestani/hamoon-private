@@ -30,7 +30,8 @@ must(db, 'SERVER_NOT_DELIVERED', 'cycle_change_predelivery_guard');
 must(core, 'reserveDeliveryCharge({', 'telegram_reservation');
 must(core, 'getPendingDeliveryChargeTotal(userId)', 'telegram_spendable_precheck');
 must(core, "if (!isHetzner) {", 'telegram_non_hetzner_immediate_log');
-mustNot(core, 'await debitUser(userId, finalPrice);', 'telegram_immediate_hetzner_debit');
+must(core, "if (isHetzner) {\n      // Keep the customer's visible wallet untouched", 'telegram_deferred_branch');
+must(core, "} else {\n      const debited = await debitUser(userId, finalPrice);", 'telegram_immediate_only_non_hetzner');
 
 must(customerApi, 'db.reserveDeliveryCharge({', 'api_reservation');
 must(customerApi, 'pending_delivery_reserved', 'api_spendable_precheck');
@@ -45,6 +46,7 @@ const composed = applyPatches(core);
 must(composed, 'reserveDeliveryCharge({', 'runtime_telegram_reservation');
 must(composed, 'loyaltyWalletCharge', 'runtime_loyalty_deferred_charge');
 must(composed, 'payment_deferred_until_delivery: isHetzner', 'runtime_loyalty_marker');
-mustNot(composed, 'await debitUser(userId, finalPrice);', 'runtime_immediate_hetzner_debit');
+must(composed, "if (isHetzner) {\n      // Keep the customer's visible wallet untouched", 'runtime_deferred_branch');
+must(composed, "} else {\n      const debited = loyaltyWalletCharge > 0 ? await debitUser(userId, loyaltyWalletCharge) : true;", 'runtime_immediate_only_non_hetzner');
 
 console.log('validate-delivery-charge-guard: ok');
