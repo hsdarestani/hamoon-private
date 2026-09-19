@@ -3,6 +3,7 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 const { PRICING_MODE_MONTHLY_PRORATED, resolvePurchaseCycleAmount, roundMoney } = require('./api-pricing');
+const deliveryCharge = require('./delivery-charge');
 
 const HOURS_IN_CYCLE = Object.freeze({ hourly: 1, daily: 24, weekly: 168, monthly: 720 });
 const HETZNER_TRAFFIC_BLOCK_BYTES = 100_000_000; // Hetzner bills overage in 100 MB blocks.
@@ -94,13 +95,14 @@ async function settleServerRenewalAtomic({
   now = new Date()
 }) {
   await ensureBillingSettlementSchema();
+  await deliveryCharge.ensureSchema(pool);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
 
     const [purchaseRows] = await conn.execute(
       `SELECT telegram_id, server_id, datacenter, server_name, amount, duration, pricing_mode, monthly_basis_price, status,
-              auto_renew, last_billed_at, created_at, last_billed_traffic_gb
+              auto_renew, last_billed_at, created_at, last_billed_traffic_gb, delivered_at
        FROM purchases
        WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
        LIMIT 1 FOR UPDATE`,
@@ -112,6 +114,11 @@ async function settleServerRenewalAtomic({
     }
 
     const purchase = purchaseRows[0];
+    const purchaseDc = String(purchase.datacenter || '').toLowerCase();
+    if ((purchaseDc === 'hetzner' || purchaseDc.startsWith('hetzner-')) && !purchase.delivered_at) {
+      await conn.commit();
+      return { status: 'undelivered_no_charge', charged: 0 };
+    }
     const cycle = String(purchase.duration || '');
     const cycleHours = HOURS_IN_CYCLE[cycle] || 0;
     if (!cycleHours) {
@@ -166,9 +173,19 @@ async function settleServerRenewalAtomic({
     }
 
     const balance = Number(userRows[0].wallet || 0);
-    if (balance < total) {
+    const pendingReserved = await deliveryCharge.pendingTotalForUser(conn, telegramId);
+    const spendableBalance = balance - pendingReserved;
+    if (spendableBalance + 1e-9 < total) {
       await conn.commit();
-      return { status: 'insufficient', charged: 0, required: total, balance, missing: Math.max(0, total - balance) };
+      return {
+        status: 'insufficient',
+        charged: 0,
+        required: total,
+        balance,
+        pendingReserved,
+        spendableBalance,
+        missing: Math.max(0, total - spendableBalance)
+      };
     }
 
     await conn.execute(
@@ -237,6 +254,7 @@ async function settleHetznerTrafficOverage({
   currency = 'EUR'
 }) {
   await ensureBillingSettlementSchema();
+  await deliveryCharge.ensureSchema(pool);
   const outgoing = Math.max(0, Math.floor(Number(outgoingBytes || 0)));
   const included = Math.max(0, Math.floor(Number(includedBytes || 0)));
   const providerPricePerTb = Math.max(0, Number(pricePerTb || 0));
@@ -250,6 +268,15 @@ async function settleHetznerTrafficOverage({
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+
+    const [purchaseRows] = await conn.execute(
+      'SELECT delivered_at FROM purchases WHERE telegram_id=? AND server_id=? AND datacenter=? LIMIT 1 FOR UPDATE',
+      [String(telegramId), String(serverId), String(datacenter)]
+    );
+    if (!purchaseRows.length || !purchaseRows[0].delivered_at) {
+      await conn.commit();
+      return { status: 'undelivered_no_charge', charged: 0 };
+    }
 
     await conn.execute(
       `INSERT INTO hetzner_traffic_billing
@@ -293,9 +320,20 @@ async function settleHetznerTrafficOverage({
       return { status: 'user_missing', charged: 0 };
     }
     const balance = Number(userRows[0].wallet || 0);
-    if (balance < amount) {
+    const pendingReserved = await deliveryCharge.pendingTotalForUser(conn, telegramId);
+    const spendableBalance = balance - pendingReserved;
+    if (spendableBalance + 1e-9 < amount) {
       await conn.commit();
-      return { status: 'insufficient', charged: 0, required: amount, balance, missing: Math.max(0, amount - balance), deltaBytes };
+      return {
+        status: 'insufficient',
+        charged: 0,
+        required: amount,
+        balance,
+        pendingReserved,
+        spendableBalance,
+        missing: Math.max(0, amount - spendableBalance),
+        deltaBytes
+      };
     }
 
     await conn.execute(
