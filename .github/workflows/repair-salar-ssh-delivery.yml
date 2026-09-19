@@ -1,0 +1,135 @@
+name: Repair Salar SSH Delivery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-salar-ssh-delivery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Reset false delivery, rebuild and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const cloud=require('./cloud-api');
+          const api=require('./Hetzner/hetzner-api');
+          const lifecycle=require('./services/hetzner-lifecycle');
+
+          (async()=>{
+            const [rows]=await db.pool.execute(
+              "SELECT * FROM purchases WHERE server_name='Srv-HET-5e6860' ORDER BY created_at DESC LIMIT 1"
+            );
+            const p=rows[0];
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            if(String(p.server_id)!=='166552013') throw new Error('SERVER_ID_MISMATCH');
+
+            const dc=dcs[p.datacenter]||dcs[String(p.datacenter).split('__')[0]];
+            const server=(await api.hetznerRequest(dc,'GET','/servers/'+p.server_id)).server;
+            const ip=server?.public_net?.ipv4?.ip||p.public_ip||null;
+            console.log('REPAIR_BEFORE='+JSON.stringify({
+              status:p.status,delivered_at:p.delivered_at,db_ip:p.public_ip,
+              provider_status:server?.status,provider_ip:ip,image:server?.image?.name
+            }));
+
+            const quality=ip
+              ? await lifecycle.checkIpQuality(ip,{polls:15,pollDelayMs:1200})
+              : null;
+            console.log('REPAIR_QUALITY_BEFORE='+lifecycle.qualitySummary(quality));
+            if(!ip||!quality?.ok) throw new Error('CURRENT_IP_NOT_CLEAN_ABORT_REBUILD');
+
+            await db.pool.execute(
+              `UPDATE purchases
+                  SET status='rebuilding',
+                      delivered_at=NULL,
+                      last_billed_at=NULL,
+                      lifecycle_error_code=NULL,
+                      lifecycle_updated_at=NOW(),
+                      updated_at=NOW()
+                WHERE telegram_id=? AND server_id=? AND datacenter=?`,
+              [String(p.telegram_id),String(p.server_id),String(p.datacenter)]
+            );
+
+            const rebuilt=await cloud.rebuildServer(dc,null,p.server_id,'ubuntu-24.04');
+            console.log('REBUILD='+JSON.stringify({
+              action_id:rebuilt?.action?.id||rebuilt?.id||null,
+              password_received:Boolean(rebuilt?.root_password)
+            }));
+            if(!rebuilt?.root_password) throw new Error('REBUILD_PASSWORD_MISSING');
+
+            await db.upsertServerSecret({
+              telegramId:p.telegram_id,
+              serverId:p.server_id,
+              datacenter:p.datacenter,
+              secretType:'root_password',
+              secretValue:rebuilt.root_password
+            });
+
+            const actionId=rebuilt?.action?.id||rebuilt?.id;
+            if(actionId) await cloud.waitHetznerAction(dc,actionId,240000);
+            await db.updateScopedStatus(p.telegram_id,p.server_id,p.datacenter,'pending_ssh');
+
+            const ready=await lifecycle.waitForReadiness(dc,p.server_id,{timeoutMs:180000});
+            console.log('REPAIR_READINESS='+JSON.stringify({
+              ready:ready.ready,status:ready.status,ip:ready.ip||null,
+              quality:lifecycle.qualitySummary(ready.quality)
+            }));
+
+            if(!ready.ready){
+              await db.updateScopedStatus(p.telegram_id,p.server_id,p.datacenter,ready.status);
+              throw new Error('REBUILD_NOT_READY:'+ready.status);
+            }
+
+            // Leave it pending so the normal production reconciler performs the
+            // canonical markDelivered() and sends the refreshed credentials.
+            await db.updatePublicIp(p.telegram_id,p.server_id,p.datacenter,ready.ip);
+            await db.updateIpQualityResult?.(
+              p.telegram_id,p.server_id,p.datacenter,
+              lifecycle.qualitySummary(ready.quality),false
+            ).catch(()=>{});
+            await db.updateScopedStatus(p.telegram_id,p.server_id,p.datacenter,'pending_ssh');
+
+            const [after]=await db.pool.execute(
+              "SELECT status,public_ip,delivered_at,last_billed_at FROM purchases WHERE server_id=?",
+              [String(p.server_id)]
+            );
+            console.log('REPAIR_READY_FOR_RECONCILE='+JSON.stringify(after[0]||null));
+            await db.pool.end();
+          })().catch(async e=>{
+            console.error('REPAIR_FAILED='+String(e?.message||e));
+            try{await db.pool.end()}catch{}
+            process.exit(1);
+          });
+          NODE
+          REMOTE
