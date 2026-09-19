@@ -274,6 +274,7 @@ const {
     debitUser,
     reserveDeliveryCharge,
     cancelDeliveryCharge,
+    getPendingDeliveryChargeTotal,
     creditUser,
     recordPurchase,
     setPurchaseAutoRenew,
@@ -2509,8 +2510,20 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
     console.log('[PURCHASE]', { dcKey: effectiveDc.key, provider: effectiveDc.provider, apiType: effectiveDc.apiType, selectedFlavor: selectedFlavor?.id || selectedFlavor?.name, selectedCycle, finalPrice });
 
     const balance = await getUserWallet(userId);
-    if (balance < finalPrice) {
-      return sendMessage(chatId, `❌ موجودی شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${formatToman(finalPrice)} تومان\n💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.`, mainMenu);
+    const pendingDeliveryReserved = isHetzner
+      ? Number(await getPendingDeliveryChargeTotal(userId).catch(() => 0) || 0)
+      : 0;
+    const spendableBalance = balance - pendingDeliveryReserved;
+    if (spendableBalance < finalPrice) {
+      return sendMessage(
+        chatId,
+        `❌ موجودی قابل استفاده شما برای خرید این سرور کافی نیست. حداقل موجودی مورد نیاز: ${formatToman(finalPrice)} تومان\n` +
+        (pendingDeliveryReserved > 0
+          ? `⏳ ${formatToman(pendingDeliveryReserved)} تومان برای سرورهای در حال تحویل رزرو شده و هنوز از کیف پول کسر نشده است.\n`
+          : '') +
+        '💰 لطفاً از منوی «افزایش اعتبار» کیف پول خود را شارژ کنید.',
+        mainMenu
+      );
     }
 
     const serverName = `Srv-${getServerNamePrefix(effectiveDc)}-${crypto.randomBytes(3).toString('hex')}`;
@@ -2642,7 +2655,9 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
         description: purchaseDescription
       });
       if (!['reserved', 'already_reserved', 'already_charged'].includes(String(reservation?.status || ''))) {
-        await openstackApi.deleteServer(effectiveDc, null, srv.id).catch(() => null);
+        const failedServerId = srv.id;
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);
+        srv = null;
         const reserveError = new Error('موجودی قابل استفاده برای این خرید کافی نیست.');
         reserveError.code = 'DELIVERY_CHARGE_RESERVATION_FAILED';
         throw reserveError;
@@ -2664,7 +2679,12 @@ async function handlePurchaseConfirmation(chatId, userId, messageId, dcConfig) {
         { providerActionId: isHetzner ? (srv.action?.id || null) : null }
       );
     } catch (recordError) {
-      if (isHetzner) await cancelDeliveryCharge(srv.id, 'purchase_record_failed').catch(() => false);
+      if (isHetzner && srv?.id) {
+        const failedServerId = srv.id;
+        await cancelDeliveryCharge(failedServerId, 'purchase_record_failed').catch(() => false);
+        await openstackApi.deleteServer(effectiveDc, null, failedServerId).catch(() => null);
+        srv = null;
+      }
       throw recordError;
     }
 
