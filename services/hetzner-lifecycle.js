@@ -91,12 +91,27 @@ function filterSellablePlans(plans, { location, image, allowedTypes, disabledTyp
 
 async function waitTcp22(ip, timeoutMs = 300000, dial = net.createConnection) {
   const start = Date.now();
+  const requiredStableSuccesses = Math.max(
+    1,
+    Math.min(5, Number(process.env.HETZNER_SSH_STABLE_SUCCESSES || 3))
+  );
+  let consecutiveSuccesses = 0;
+
   while (Date.now() - start < timeoutMs) {
-    if (await new Promise(resolve => {
+    const reachable = await new Promise(resolve => {
       const s = dial({ host: ip, port: 22, timeout: 2500 }, () => { s.destroy(); resolve(true); });
       s.on('error', () => resolve(false));
       s.on('timeout', () => { s.destroy(); resolve(false); });
-    })) return true;
+    });
+
+    if (reachable) {
+      consecutiveSuccesses += 1;
+      if (consecutiveSuccesses >= requiredStableSuccesses) return true;
+      await sleep(1200);
+      continue;
+    }
+
+    consecutiveSuccesses = 0;
     await sleep(1000);
   }
   return false;
