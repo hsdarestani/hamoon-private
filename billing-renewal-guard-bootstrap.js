@@ -337,6 +337,15 @@ async function handleStartMySuspendedServers(chatId, userId) {
       messageText += '📅 موعد تمدید: ' + escapeMarkdownV2(dueText) + '\\n';
       if (renewal.cycleAmount > 0) messageText += '💳 هزینه تمدید: ' + escapeMarkdownV2(formatToman(Math.round(renewal.cycleAmount))) + ' تومان\\n';
     }
+
+    const runtimeCoverage = await getServerRuntimeCoverage(userId);
+    if (runtimeCoverage.activeCount > 0) {
+      messageText +=
+        '⏳ پوشش تقریبی کیف پول برای ' + escapeMarkdownV2(String(runtimeCoverage.activeCount)) +
+        ' سرور روشن: ' + escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours)) + '\\n' +
+        '🔥 هزینه مؤثر مجموع: ' + escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn))) + ' تومان/ساعت\\n';
+    }
+
     if (hetznerDeliveryPending) {`;
   if (!out.includes(managementMarker)) throw new Error('BILLING_RENEWAL_GUARD_MANAGEMENT_MARKER_MISSING');
   out = out.replace(managementMarker, managementReplacement);
