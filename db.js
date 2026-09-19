@@ -636,6 +636,7 @@ async function getUserActivePurchases(telegramId) {
         const [rows] = await conn.execute(
             `SELECT * FROM purchases
              WHERE telegram_id = ?
+               AND deleted_at IS NULL
                AND (status IS NULL OR status NOT IN ('deleted','cancelled','provider_missing'))
              ORDER BY created_at DESC`,
             [String(telegramId)]
@@ -757,7 +758,7 @@ async function deleteTestServer(serverId) {
 async function getAllPurchases() {
     const conn = await pool.getConnection();
     try {
-        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status != 'deleted'");
+        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status != 'deleted' AND deleted_at IS NULL");
         return rows;
     } finally {
         conn.release();
@@ -826,6 +827,12 @@ async function updatePurchaseStatus(
 
     sql += ' WHERE server_id = ?';
     params.push(serverId);
+
+    // Rows with deleted_at are terminal. Generic lifecycle/status updates must
+    // not resurrect a server after its provider VM has already been removed.
+    if (!['deleted', 'provider_missing'].includes(normalizedStatus)) {
+      sql += ' AND deleted_at IS NULL';
+    }
 
     await conn.execute(sql, params);
   } finally {
@@ -1522,6 +1529,7 @@ async function getUserRestartablePurchases(telegramId) {
     SELECT *
     FROM purchases
     WHERE telegram_id = ?
+      AND deleted_at IS NULL
       AND status IN (
         'suspended',
         'stopped',
@@ -1874,6 +1882,7 @@ async function getAllActivePurchases() {
         const [rows] = await conn.execute(
             `SELECT * FROM purchases
              WHERE status = 'active'
+               AND deleted_at IS NULL
              ORDER BY created_at DESC`
         );
         return rows;
