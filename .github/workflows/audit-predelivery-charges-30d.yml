@@ -1,0 +1,109 @@
+name: Audit Predelivery Charges 30d
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-predelivery-charges-30d.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Audit production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [purchases]=await db.pool.query(`
+              SELECT p.telegram_id,p.server_id,p.server_name,p.datacenter,p.status,p.duration,p.amount,
+                     p.created_at,p.delivered_at,p.last_billed_at,p.deleted_at,
+                     TIMESTAMPDIFF(SECOND,p.created_at,COALESCE(p.delivered_at,NOW())) waiting_seconds
+              FROM purchases p
+              WHERE (LOWER(p.datacenter)='hetzner' OR LOWER(p.datacenter) LIKE 'hetzner-%')
+                AND p.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+              ORDER BY p.created_at ASC
+            `);
+            console.log('PURCHASE_COUNT='+purchases.length);
+            let totalPreDeliveryNegative=0,totalBillingLike=0,totalPurchaseLike=0;
+            const affected=new Map();
+            for(const p of purchases){
+              const end=p.delivered_at?new Date(p.delivered_at):new Date();
+              const [logs]=await db.pool.query(`
+                SELECT id,amount,description,type,timestamp
+                FROM wallet_logs
+                WHERE telegram_id=?
+                  AND amount < 0
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                  AND (description LIKE ? OR description LIKE ?)
+                ORDER BY timestamp ASC,id ASC
+              `,[
+                String(p.telegram_id), new Date(p.created_at), end,
+                '%'+String(p.server_name||'__never__')+'%',
+                '%'+String(p.server_id||'__never__')+'%'
+              ]);
+              const sum=logs.reduce((s,l)=>s+Math.abs(Number(l.amount||0)),0);
+              const billingLike=logs.filter(l=>['billing','hetzner_traffic_overage','billing_cycle_change'].includes(String(l.type))).reduce((s,l)=>s+Math.abs(Number(l.amount||0)),0);
+              const purchaseLike=logs.filter(l=>['purchase','purchase_recovery'].includes(String(l.type))).reduce((s,l)=>s+Math.abs(Number(l.amount||0)),0);
+              totalPreDeliveryNegative+=sum; totalBillingLike+=billingLike; totalPurchaseLike+=purchaseLike;
+              if(logs.length||String(p.telegram_id)==='7293732698'){
+                console.log('PURCHASE_AUDIT='+JSON.stringify({
+                  telegram_id:String(p.telegram_id),server_id:String(p.server_id),server_name:p.server_name,
+                  status:p.status,duration:p.duration,amount:Number(p.amount||0),created_at:p.created_at,
+                  delivered_at:p.delivered_at,waiting_seconds:Number(p.waiting_seconds||0),
+                  pre_delivery_negative:sum,billing_like:billingLike,purchase_like:purchaseLike,
+                  logs:logs.map(l=>({id:l.id,amount:Number(l.amount),type:l.type,timestamp:l.timestamp,description:l.description}))
+                }));
+              }
+              if(billingLike>0){
+                const key=String(p.telegram_id);
+                const cur=affected.get(key)||{telegram_id:key,refund:0,servers:[]};
+                cur.refund+=billingLike;
+                cur.servers.push({server_id:String(p.server_id),server_name:p.server_name,refund:billingLike});
+                affected.set(key,cur);
+              }
+            }
+            const [targetLogs]=await db.pool.query(`
+              SELECT id,amount,description,type,timestamp FROM wallet_logs
+              WHERE telegram_id='7293732698' AND timestamp>=DATE_SUB(NOW(),INTERVAL 30 DAY)
+              ORDER BY timestamp ASC,id ASC
+            `);
+            const [targetPurchases]=await db.pool.query(`
+              SELECT telegram_id,server_id,server_name,datacenter,status,duration,amount,created_at,delivered_at,last_billed_at,deleted_at
+              FROM purchases WHERE telegram_id='7293732698' AND created_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)
+              ORDER BY created_at ASC
+            `);
+            console.log('TARGET_PURCHASES='+JSON.stringify(targetPurchases));
+            console.log('TARGET_WALLET_LOGS='+JSON.stringify(targetLogs.map(l=>({...l,amount:Number(l.amount)}))));
+            console.log('AFFECTED_BILLING_REFUNDS='+JSON.stringify([...affected.values()]));
+            console.log('TOTALS='+JSON.stringify({totalPreDeliveryNegative,totalBillingLike,totalPurchaseLike}));
+            await db.pool.end();
+          })().catch(async e=>{console.error('AUDIT_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
