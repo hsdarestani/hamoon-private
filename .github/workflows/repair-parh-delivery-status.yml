@@ -1,0 +1,62 @@
+name: Repair PArh Delivery Status
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-parh-delivery-status.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Repair production status
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [rows]=await db.pool.query(
+              "SELECT telegram_id,server_id,server_name,status,delivered_at,public_ip FROM purchases WHERE telegram_id='7293732698' AND server_id='166471044' LIMIT 1"
+            );
+            const p=rows[0];
+            if(!p) throw new Error('TARGET_PURCHASE_NOT_FOUND');
+            console.log('BEFORE='+JSON.stringify(p));
+            if(!p.delivered_at && String(p.status).toLowerCase()==='active'){
+              await db.updateScopedStatus(p.telegram_id,p.server_id,'hetzner','pending_ssh');
+            }
+            const [after]=await db.pool.query(
+              "SELECT telegram_id,server_id,server_name,status,delivered_at,public_ip FROM purchases WHERE telegram_id='7293732698' AND server_id='166471044' LIMIT 1"
+            );
+            console.log('AFTER='+JSON.stringify(after[0]||null));
+            await db.pool.end();
+          })().catch(async e=>{console.error('REPAIR_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');console.log('HAMOONBOT_STATUS='+(p?.pm2_env?.status||'missing'));if(p?.pm2_env?.status!=='online')process.exit(1)})"
+          REMOTE
