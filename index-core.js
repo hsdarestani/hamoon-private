@@ -418,11 +418,16 @@ function formatRuntimeCoverageHours(hours) {
     : `حدود ${days} روز`;
 }
 
-async function getServerRuntimeCoverage(userId) {
+async function getServerRuntimeCoverage(userId, now = new Date()) {
   const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
   const purchases = await getUserActivePurchases(userId).catch(() => []);
+  const effectiveDCs = getUserEffectiveDCs(userId) || {};
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const renewalQueue = [];
   let activeCount = 0;
-  let hourlyBurn = 0;
+  let totalOneCycleCost = 0;
+  let hasPrepaidCycles = false;
 
   for (const purchase of purchases || []) {
     if (Number(purchase.auto_renew ?? 1) !== 1) continue;
@@ -433,7 +438,7 @@ async function getServerRuntimeCoverage(userId) {
     if (!(cycleHours > 0)) continue;
 
     const dcConfig =
-      getUserEffectiveDCs(userId)?.[purchase.datacenter] ||
+      effectiveDCs[purchase.datacenter] ||
       baseDatacenters[purchase.datacenter] ||
       baseDatacenters[String(purchase.datacenter || '').split('__')[0]] ||
       null;
@@ -441,18 +446,85 @@ async function getServerRuntimeCoverage(userId) {
     if (isHetznerDc(dcConfig) && !hetznerLifecycle.isBillablePurchase(purchase)) continue;
 
     const cycleAmount = Number(normalizeStoredCycleAmount(purchase, dcConfig) || 0);
-    const effectiveHourly = cycleAmount / cycleHours;
-    if (!(effectiveHourly > 0) || !Number.isFinite(effectiveHourly)) continue;
+    if (!(cycleAmount > 0) || !Number.isFinite(cycleAmount)) continue;
+
+    const base = new Date(purchase.last_billed_at || purchase.created_at || safeNowMs);
+    if (Number.isNaN(base.getTime())) continue;
+
+    const cycleMs = cycleHours * 3600000;
+    const rawDueMs = base.getTime() + cycleMs;
+    const dueAtMs = Math.max(rawDueMs, safeNowMs);
 
     activeCount += 1;
-    hourlyBurn += effectiveHourly;
+    totalOneCycleCost += cycleAmount;
+    if (cycle !== 'hourly') hasPrepaidCycles = true;
+    renewalQueue.push({
+      serverId: String(purchase.server_id || ''),
+      dueAtMs,
+      cycleMs,
+      cycleAmount
+    });
+  }
+
+  if (!renewalQueue.length) {
+    return {
+      wallet,
+      activeCount: 0,
+      totalOneCycleCost: 0,
+      hasPrepaidCycles: false,
+      nextRenewalAt: null,
+      riskAt: null,
+      remainingHours: null,
+      shortfall: 0,
+      balanceBeforeRisk: wallet
+    };
+  }
+
+  const initialNextRenewalMs = Math.min(...renewalQueue.map(item => item.dueAtMs));
+  let projectedBalance = wallet;
+  let riskAtMs = null;
+  let shortfall = 0;
+  let balanceBeforeRisk = wallet;
+  let riskAmount = 0;
+
+  // Simulate actual renewal events instead of converting monthly/weekly plans
+  // into a fake hourly burn. Billing only debits the wallet at each cycle boundary.
+  const maxEvents = Math.max(100, Math.min(10000, Number(process.env.WALLET_RENEWAL_FORECAST_MAX_EVENTS || 5000)));
+  const forecastHorizonMs = safeNowMs + Math.max(
+    30 * 24 * 3600000,
+    Number(process.env.WALLET_RENEWAL_FORECAST_HORIZON_MS || 3 * 365 * 24 * 3600000)
+  );
+
+  for (let eventIndex = 0; eventIndex < maxEvents && renewalQueue.length; eventIndex += 1) {
+    renewalQueue.sort((a, b) => a.dueAtMs - b.dueAtMs);
+    const item = renewalQueue.shift();
+    if (!item || item.dueAtMs > forecastHorizonMs) break;
+
+    if (projectedBalance + 1e-9 < item.cycleAmount) {
+      riskAtMs = item.dueAtMs;
+      balanceBeforeRisk = projectedBalance;
+      riskAmount = item.cycleAmount;
+      shortfall = Math.max(0, Math.ceil(item.cycleAmount - projectedBalance));
+      break;
+    }
+
+    projectedBalance -= item.cycleAmount;
+    item.dueAtMs += item.cycleMs;
+    renewalQueue.push(item);
   }
 
   return {
     wallet,
     activeCount,
-    hourlyBurn,
-    remainingHours: hourlyBurn > 0 ? wallet / hourlyBurn : null
+    totalOneCycleCost,
+    hasPrepaidCycles,
+    nextRenewalAt: new Date(initialNextRenewalMs),
+    riskAt: riskAtMs == null ? null : new Date(riskAtMs),
+    remainingHours: riskAtMs == null ? null : Math.max(0, (riskAtMs - safeNowMs) / 3600000),
+    shortfall,
+    balanceBeforeRisk,
+    riskAmount,
+    projectedBalance
   };
 }
 
@@ -840,8 +912,13 @@ case '👛 کیف پول': {
   const logs = await getWalletLogs(effectiveUserId, 10);
   const runtimeCoverage = await getServerRuntimeCoverage(effectiveUserId);
   const runtimeCoverageText = runtimeCoverage.activeCount > 0
-    ? `\n\n⏳ پوشش تقریبی ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور روشن با موجودی فعلی: ${escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours))}\n` +
-      `🔥 هزینه مؤثر مجموع: ${escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn)))} تومان/ساعت`
+    ? (runtimeCoverage.riskAt
+        ? `\n\n💳 پوشش تمدید ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور با موجودی فعلی: تا ${escapeMarkdownV2(runtimeCoverage.riskAt.toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' }))}\n` +
+          `⏳ زمان تا اولین کسری تمدید: ${escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours))}\n` +
+          `⚠️ حداقل شارژ لازم در آن موعد: ${escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.shortfall)))} تومان` +
+          (runtimeCoverage.hasPrepaidCycles ? `\nℹ️ پلن‌های ماهانه/هفتگی فقط در موعد تمدید از کیف پول کسر می‌شوند، نه به‌صورت ساعتی` : '')
+        : `\n\n✅ موجودی فعلی تمدید ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور را در بازه پیش‌بینی پوشش می‌دهد` +
+          (runtimeCoverage.hasPrepaidCycles ? `\nℹ️ پلن‌های ماهانه/هفتگی فقط در موعد تمدید از کیف پول کسر می‌شوند، نه به‌صورت ساعتی` : ''))
     : '';
 
   const history = logs.map(l => {
