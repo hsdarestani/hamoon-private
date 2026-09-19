@@ -1,0 +1,107 @@
+name: Exact Predelivery Refund Plan 30d
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/exact-predelivery-refund-plan-30d.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Build exact plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const eligibleUndelivered=new Set(['purchase','server_api_purchase','purchase_recovery','billing','billing_cycle_change','hetzner_traffic_overage']);
+          const eligibleDelivered=new Set(['billing','billing_cycle_change','hetzner_traffic_overage']);
+          function exactMatch(l,p){
+            const d=String(l.description||'');
+            const n=String(p.server_name||'');
+            const id=String(p.server_id||'');
+            return (
+              d.includes('server_id='+id) ||
+              d.includes('API server purchase '+id+';') ||
+              d.includes('خرید سرور '+n+' (') ||
+              d.includes('خرید سرور '+n+' ') ||
+              d.includes('تمدید اتمیک سرور '+n+'؛') ||
+              d === 'کسر هزینه سرور '+n ||
+              d.startsWith('کسر هزینه سرور '+n+'؛') ||
+              d.includes('تغییر دوره سرور '+n+' از ') ||
+              d.includes('تمدید و فعال‌سازی مجدد سرور '+n) ||
+              d.includes('هزینه ترافیک مازاد Hetzner سرور '+n+'؛')
+            );
+          }
+          (async()=>{
+            const [ps]=await db.pool.query(`
+              SELECT telegram_id,server_id,server_name,datacenter,status,duration,amount,created_at,delivered_at,deleted_at
+              FROM purchases
+              WHERE (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%')
+                AND created_at>=DATE_SUB(NOW(),INTERVAL 30 DAY)
+              ORDER BY created_at ASC
+            `);
+            const plan=[];
+            for(const p of ps){
+              const end=p.delivered_at?new Date(p.delivered_at):new Date();
+              const [logs]=await db.pool.query(`
+                SELECT id,amount,description,type,timestamp
+                FROM wallet_logs
+                WHERE telegram_id=? AND timestamp>=? AND timestamp<=?
+                ORDER BY timestamp ASC,id ASC
+              `,[String(p.telegram_id),new Date(p.created_at),end]);
+              const eligibleSet=p.delivered_at?eligibleDelivered:eligibleUndelivered;
+              const debits=logs.filter(l=>Number(l.amount)<0 && eligibleSet.has(String(l.type)) && exactMatch(l,p));
+              const gross=debits.reduce((s,l)=>s+Math.abs(Number(l.amount||0)),0);
+              if(!(gross>0)) continue;
+              let existing=0;
+              if(!p.delivered_at){
+                existing=logs.filter(l=>Number(l.amount)>0 && ['server_deletion_refund','predelivery_refund'].includes(String(l.type)) && exactMatch(l,p))
+                  .reduce((s,l)=>s+Number(l.amount||0),0);
+              } else {
+                existing=logs.filter(l=>Number(l.amount)>0 && String(l.type)==='predelivery_refund' && exactMatch(l,p))
+                  .reduce((s,l)=>s+Number(l.amount||0),0);
+              }
+              const due=Math.max(0,Math.round((gross-existing)*100)/100);
+              if(!(due>0)) continue;
+              plan.push({
+                telegram_id:String(p.telegram_id),server_id:String(p.server_id),server_name:p.server_name,
+                delivered:!!p.delivered_at,status:p.status,gross,existing,refundDue:due,
+                debitLogs:debits.map(l=>({id:l.id,amount:Number(l.amount),type:l.type,timestamp:l.timestamp,description:l.description}))
+              });
+            }
+            const byUser={}; let total=0;
+            for(const x of plan){total+=x.refundDue;(byUser[x.telegram_id]??={refund:0,servers:[]});byUser[x.telegram_id].refund+=x.refundDue;byUser[x.telegram_id].servers.push({server_id:x.server_id,server_name:x.server_name,refund:x.refundDue});}
+            console.log('EXACT_PLAN='+JSON.stringify(plan));
+            console.log('BY_USER='+JSON.stringify(byUser));
+            console.log('TOTAL_REFUND='+total.toFixed(2));
+            console.log('TARGET='+JSON.stringify(plan.filter(x=>x.telegram_id==='7293732698')));
+            await db.pool.end();
+          })().catch(async e=>{console.error('PLAN_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
