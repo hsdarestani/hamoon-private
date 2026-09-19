@@ -245,8 +245,17 @@ function createCustomerApiRouter() {
       if (!Number.isFinite(price) || price <= 0) return apiError(res, 503, 'PRICE_UNAVAILABLE', 'قیمت این پلن در حال حاضر در دسترس نیست.');
       const wallet = Number(await db.getUserWallet(client.telegram_id) || 0);
       const reserve = Math.max(0, Number(client.min_wallet_balance || 0));
+      const pendingDeliveryReserved = Number(await db.getPendingDeliveryChargeTotal(client.telegram_id).catch(() => 0) || 0);
+      const spendableWallet = wallet - pendingDeliveryReserved;
       const requiredBalance = price + reserve;
-      if (wallet < requiredBalance) return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی کیف پول برای ایجاد این سرور کافی نیست.', { balance: wallet, required_balance: requiredBalance, server_price: price, reserved_balance: reserve });
+      if (spendableWallet < requiredBalance) return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی قابل استفاده کیف پول برای ایجاد این سرور کافی نیست.', {
+        balance: wallet,
+        pending_delivery_reserved: pendingDeliveryReserved,
+        spendable_balance: spendableWallet,
+        required_balance: requiredBalance,
+        server_price: price,
+        reserved_balance: reserve
+      });
       const maxMonthlySpend = finitePositive(client.max_monthly_spend);
       if (maxMonthlySpend) {
         const currentSpend = Number(await db.getApiClientMonthlySpend(client.id) || 0);
@@ -301,32 +310,27 @@ function createCustomerApiRouter() {
         throw passwordError;
       }
 
-      // API purchases are prepaid exactly like Telegram purchases. The debit
-      // and its financial log are committed atomically, so deletion refunds can
-      // prove that the current cycle was actually paid.
-      const deletionRefunds = require('./server-deletion-refund');
-      const initialCharge = await deletionRefunds.chargeApiInitialCycle({
-        db,
+      // Do not debit a reseller/customer API wallet until clean delivery.
+      // Reserve the amount internally now; db.markDelivered() commits the debit
+      // atomically only after IP quality + stable SSH have passed.
+      const initialReservation = await db.reserveDeliveryCharge({
         telegramId: client.telegram_id,
         serverId,
+        datacenter: dcKey,
         amount: price,
-        reserve,
-        pricingMode: pricing.pricingMode
+        logType: 'server_api_purchase',
+        description: `API server purchase ${serverId}; pricing_mode=${pricing.pricingMode}`,
+        minWalletReserve: reserve
       });
-      if (!['charged', 'already_charged'].includes(initialCharge.status)) {
+      if (!['reserved', 'already_reserved', 'already_charged'].includes(String(initialReservation?.status || ''))) {
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
-        return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی کیف پول هم‌زمان تغییر کرده و برای ساخت سرور کافی نیست.');
+        return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی قابل استفاده کیف پول هم‌زمان تغییر کرده و برای ساخت سرور کافی نیست.');
       }
       try {
         await db.recordPurchase(client.telegram_id, serverId, dcKey, createdServer.name || name, plan.id, price, duration, 0, 0, null, 'api', image, 0, 0, 0, 0, 0, keyId, 'provisioning', pricing.pricingMode === 'monthly_prorated' ? 2 : 1, { pricingMode: pricing.pricingMode, monthlyBasisPrice: pricing.monthlyBasisPrice });
         if (ip && db.updatePublicIp) await db.updatePublicIp(client.telegram_id, serverId, dcKey, ip).catch(() => {});
       } catch (recordError) {
-        await deletionRefunds.rollbackApiInitialCycle({
-          db,
-          telegramId: client.telegram_id,
-          serverId,
-          amount: price
-        }).catch(() => {});
+        await db.cancelDeliveryCharge(serverId, 'api_purchase_record_failed').catch(() => {});
         await cloud.deleteServer(dc, null, serverId).catch(() => {});
         throw recordError;
       }
