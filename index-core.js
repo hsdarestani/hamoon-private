@@ -3047,14 +3047,6 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
         ? '🔁 تمدید خودکار: روشن\n'
         : '⏸ تمدید خودکار: خاموش\n';
     }
-
-    const runtimeCoverage = await getServerRuntimeCoverage(userId);
-    if (runtimeCoverage.activeCount > 0) {
-      messageText +=
-        `⏳ پوشش تقریبی کیف پول برای ${escapeMarkdownV2(String(runtimeCoverage.activeCount))} سرور روشن: ${escapeMarkdownV2(formatRuntimeCoverageHours(runtimeCoverage.remainingHours))}\n` +
-        `🔥 هزینه مؤثر مجموع: ${escapeMarkdownV2(formatToman(Math.round(runtimeCoverage.hourlyBurn)))} تومان/ساعت\n`;
-    }
-
     if (hetznerDeliveryPending) {
       messageText += '⏳ تحویل: در حال بررسی روشن بودن، SSH و دسترسی IP از ایران و نقاط خارجی\n';
     }
