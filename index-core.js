@@ -3350,50 +3350,124 @@ async function askForDeletionConfirmation(chatId, userId, serverId, dcConfig) {
 }
 
 async function handleServerDeletion(chatId, userId, serverId, dcConfig) {
-    sendMessage(chatId, `🗑️ در حال حذف سرور از ${dcConfig.name}...`);
-    try {
-        const tok = await openstackApi.getToken(dcConfig);
-        const purchase = isHetznerDc(dcConfig)
-      ? (await getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null) || await getPurchaseByServerId(serverId))
-      : await getPurchaseByServerId(serverId);
-        const isTestServer = !purchase;
+    await sendMessage(chatId, `🗑️ در حال حذف امن سرور از ${dcConfig?.name || 'دیتاسنتر'}...`);
+    const dbModule = require('./db');
+    const deletionSafety = require('./services/server-deletion-safety');
+    let purchase = null;
+    let testServer = null;
 
-        await openstackApi.deleteServer(dcConfig, tok, serverId).catch(e => {
-            if (e.response?.status !== 404) throw e;
-            console.warn(`Server ${serverId} not found on OpenStack ${dcConfig.name}, proceeding with DB cleanup.`);
+    try {
+        if (!dcConfig?.key) {
+            const error = new Error('DATACENTER_CONFIG_MISSING');
+            error.code = 'DATACENTER_CONFIG_MISSING';
+            throw error;
+        }
+
+        // Never trust a callback server_id by itself. The target must belong to
+        // the requesting user in the same datacenter before any provider DELETE.
+        purchase = await dbModule.getPurchaseForUserServer(
+            userId,
+            serverId,
+            dcConfig.key
+        ).catch(() => null);
+
+        if (!purchase) {
+            const tests = await dbModule.getUserActiveTestServers(userId).catch(() => []);
+            testServer = (tests || []).find(row =>
+                String(row.server_id) === String(serverId) &&
+                String(row.datacenter) === String(dcConfig.key)
+            ) || null;
+        }
+
+        if (!purchase && !testServer) {
+            const error = new Error('SERVER_OWNERSHIP_MISMATCH');
+            error.code = 'SERVER_OWNERSHIP_MISMATCH';
+            throw error;
+        }
+
+        const tok = await openstackApi.getToken(dcConfig);
+
+        // Fail closed:
+        // 1) capture boot-volume IDs before destroying an OpenStack VM,
+        // 2) quarantine the DB row as deletion_pending,
+        // 3) issue provider DELETE,
+        // 4) wait until the provider returns a definite 404,
+        // 5) verify/delete boot volumes, then and only then finalize DB deletion.
+        const verified = await deletionSafety.secureDeleteServerResources({
+            db: dbModule,
+            cloud: openstackApi,
+            dc: dcConfig,
+            token: tok,
+            telegramId: userId,
+            serverId,
+            purchase,
+            testServer
         });
-const isHetzner = isHetznerDc(dcConfig);
-        const kp = await getKeyPair(serverId);
-        if (!isHetzner && kp) {
-            await openstackApi.deleteKeyPair(dcConfig, tok, kp.key_name).catch(e => console.warn(`Could not delete keypair ${kp.key_name} from ${dcConfig.name}: ${e.message}`));
-            await deleteKeyPairFromDb(serverId);
-        }else {
-  // Hetzner: پرایوت‌کی‌ای نزد ما نیست که پاک شود
-  await deleteKeyPairFromDb(serverId).catch(()=>{});
-}
+
+        await deletionSafety.purgeStoredCredentials({
+            db: dbModule,
+            cloud: openstackApi,
+            dc: dcConfig,
+            token: tok,
+            telegramId: userId,
+            serverId
+        });
 
         let deletionRefund = null;
-        if (isTestServer) {
-            await deleteTestServer(serverId);
+        if (testServer) {
+            await dbModule.deleteTestServer(serverId);
         } else {
-            deletionRefund = await require('./server-deletion-refund').refundUnusedServerCycle({
-                db: require('./db'),
+            deletionRefund = await deletionSafety.finalizePurchasedDeletion({
+                db: dbModule,
                 telegramId: userId,
                 serverId,
                 datacenter: dcConfig.key
             });
-            await updatePurchaseStatus(serverId, 'deleted');
         }
 
         const refundAmount = Number(deletionRefund?.refunded || 0);
         const refundText = refundAmount > 0
           ? `\n💰 مبلغ ${refundAmount.toLocaleString('fa-IR')} تومان بابت مانده دوره به کیف پول شما برگشت داده شد.`
           : '';
-        sendMessage(chatId, `✅ سرور با موفقیت حذف شد.${refundText}`);
-        logServerEvent({ type: 'server_deleted', server_id: serverId, user_id: userId, datacenter: dcConfig.key });
+
+        await sendMessage(
+            chatId,
+            `✅ سرور با موفقیت و به‌صورت امن حذف شد. حذف VM${verified.bootVolumeIds?.length ? ' و دیسک بوت' : ''} در Provider تأیید شد.${refundText}`
+        );
+        logServerEvent({
+            type: 'server_deleted_verified',
+            server_id: serverId,
+            user_id: userId,
+            datacenter: dcConfig.key,
+            boot_volume_ids: verified.bootVolumeIds || []
+        });
     } catch (e) {
-        console.error(`Deletion Error for ${serverId} in ${dcConfig.name}:`, e);
-        sendMessage(chatId, `❌ خطا در حذف سرور: ${escapeMarkdownV2(e.message)}`);
+        console.error(`Deletion Error for ${serverId} in ${dcConfig?.name || dcConfig?.key || 'unknown'}:`, e);
+
+        const current = purchase
+          ? await dbModule.getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null)
+          : null;
+        const quarantined = String(current?.status || '').toLowerCase() === 'deletion_pending';
+
+        if (quarantined) {
+            await sendMessage(
+                chatId,
+                '⏳ درخواست حذف ثبت شد اما تأیید نهایی پاک‌شدن VM/دیسک هنوز کامل نشده است. برای امنیت، این سرور در حالت قرنطینه قرار گرفته و تا تأیید کامل دوباره فعال یا واگذار نمی‌شود. سیستم به‌صورت خودکار پاک‌سازی را دوباره بررسی می‌کند.'
+            );
+            logServerEvent({
+                type: 'server_deletion_quarantined',
+                server_id: serverId,
+                user_id: userId,
+                datacenter: dcConfig.key,
+                error: e.code || e.message
+            });
+            return;
+        }
+
+        const userError = e?.code === 'SERVER_OWNERSHIP_MISMATCH'
+          ? 'این سرور متعلق به حساب شما نیست یا قبلاً حذف شده است.'
+          : `خطا در حذف امن سرور: ${e.message}`;
+        await sendMessage(chatId, `❌ ${escapeMarkdownV2(userError)}`);
     }
 }
 
