@@ -8,6 +8,7 @@ on:
       - 'runtime-bootstrap.js'
       - 'db.js'
       - 'services/server-deletion-safety.js'
+      - 'server-display-names-bootstrap.js'
       - 'scripts/validate-server-deletion-safety.js'
       - 'package.json'
       - 'services/hetzner-lifecycle.js'
