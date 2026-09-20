@@ -54,7 +54,7 @@ jobs:
             try{
               const [[u]]=await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]);
               const [clients]=await c.execute('SELECT id,name,monthly_prorated_pricing,min_wallet_balance,max_servers FROM api_clients WHERE telegram_id=? ORDER BY id',[userId]);
-              const [targetRows]=await c.execute(`SELECT server_id,server_name,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,monthly_basis_price,created_at,updated_at FROM purchases WHERE telegram_id=? AND server_id=? ORDER BY id DESC`,[userId,target]);
+              const [targetRows]=await c.execute(`SELECT server_id,server_name,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,monthly_basis_price,created_at FROM purchases WHERE telegram_id=? AND server_id=? ORDER BY id DESC`,[userId,target]);
               const [recentPurchases]=await c.execute(`SELECT server_id,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,created_at FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20`,[userId]);
               const [logs]=await c.execute(`SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC,id DESC LIMIT 80`,[userId]);
               console.log('WALLET='+Number(u?.wallet||0));
