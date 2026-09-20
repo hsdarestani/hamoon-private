@@ -25,6 +25,7 @@ const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmat
 const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootstrap');
 const { applyServerPowerControlPatches } = require('./server-power-controls-bootstrap');
 const { installServerDeletionConsistency } = require('./server-deletion-consistency-bootstrap');
+const { scheduleDeletionPendingReconcile } = require('./services/server-deletion-safety');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
 const { installSafeLifecycleModule } = require('./services/hetzner-lifecycle-safe-bootstrap');
 const { installFastLocationFallbackModule } = require('./services/hetzner-location-fallback-fast-bootstrap');
@@ -208,6 +209,11 @@ function run() {
   require.cache[corePath] = child;
   child._compile(source, corePath);
 
+  // Purchased servers remain quarantined as deletion_pending until both the
+  // provider VM and any tracked boot storage are definitively gone. Retry any
+  // interrupted deletions after startup and periodically thereafter.
+  scheduleDeletionPendingReconcile();
+
   return child.exports;
 }
 
@@ -218,5 +224,6 @@ module.exports = {
   installDeliveredStatusRepair,
   installSafeLifecycleModule,
   installFastLocationFallbackModule,
+  scheduleDeletionPendingReconcile,
   run
 };
