@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - 'index-core.js'
+      - 'runtime-bootstrap.js'
+      - 'db.js'
+      - 'services/server-deletion-safety.js'
+      - 'scripts/validate-server-deletion-safety.js'
+      - 'package.json'
       - 'services/hetzner-lifecycle.js'
       - 'services/hetzner-lifecycle-safe-bootstrap.js'
       - '.github/workflows/deploy-hetzner-ssh-delivery-recovery.yml'
@@ -40,6 +45,11 @@ jobs:
         run: |
           set -euo pipefail
           node --check index-core.js
+          node --check runtime-bootstrap.js
+          node --check db.js
+          node --check services/server-deletion-safety.js
+          node --check scripts/validate-server-deletion-safety.js
+          node scripts/validate-server-deletion-safety.js
           node --check services/hetzner-lifecycle.js
           node scripts/validate-hetzner-lifecycle.js
           node - <<'NODE'
@@ -90,6 +100,11 @@ jobs:
           node scripts/restore-server-secret-key.js .env >/dev/null
 
           node --check index-core.js
+          node --check runtime-bootstrap.js
+          node --check db.js
+          node --check services/server-deletion-safety.js
+          node --check scripts/validate-server-deletion-safety.js
+          node scripts/validate-server-deletion-safety.js
           node --check services/hetzner-lifecycle.js
           node scripts/validate-hetzner-lifecycle.js
 
@@ -104,6 +119,16 @@ jobs:
           if (!fs.readFileSync('services/hetzner-lifecycle.js','utf8').includes('[HETZNER_PENDING_SSH_RECOVERY]')) {
             throw new Error('SSH_RECOVERY_NOT_DEPLOYED');
           }
+          const deletionSafety=fs.readFileSync('services/server-deletion-safety.js','utf8');
+          for (const marker of [
+            'SERVER_DELETE_NOT_CONFIRMED',
+            'BOOT_VOLUME_DELETE_NOT_CONFIRMED',
+            'server_deletion_jobs',
+            'scheduleDeletionPendingReconcile'
+          ]) {
+            if (!deletionSafety.includes(marker)) throw new Error('DELETION_SAFETY_MARKER_MISSING:'+marker);
+          }
+          if (!core.includes('secureDeleteServerResources')) throw new Error('SECURE_DELETE_HANDLER_NOT_DEPLOYED');
           console.log('PRODUCTION_RUNTIME=ok');
           NODE
 
