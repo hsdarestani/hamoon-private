@@ -1,0 +1,170 @@
+name: Audit Mahan historical overcharge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-mahan-overcharge-20260920.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Calculate historical Mahan overcharge candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const userId='1478447415';
+
+          function num(v){ const n=Number(v||0); return Number.isFinite(n)?n:0; }
+          function sidFromText(text){
+            const s=String(text||'');
+            const m=s.match(/(?:server_id=|purchase\s+|سرور\s+)(\d{6,})/i);
+            return m?m[1]:'';
+          }
+
+          (async()=>{
+            const c=await mysql.createConnection({
+              host:process.env.DB_HOST||'127.0.0.1',
+              user:process.env.DB_USER,
+              password:process.env.DB_PASSWORD,
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            try {
+              const [purchases]=await c.execute('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at',[userId]);
+              const [logs]=await c.execute('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY id',[userId]);
+              const [events]=await c.execute('SELECT * FROM billing_events WHERE telegram_id=? ORDER BY id',[userId]).catch(()=>[[]]);
+
+              const byId=new Map(purchases.map(p=>[String(p.server_id),p]));
+              const byName=new Map();
+              for(const p of purchases) if(p.server_name) byName.set(String(p.server_name),p);
+
+              const negatives=logs.filter(l=>num(l.amount)<0);
+              const positives=logs.filter(l=>num(l.amount)>0);
+
+              let exactSaleLeak=0, amountMismatchCount=0;
+              const mismatches=[];
+              for(const l of negatives) {
+                const type=String(l.type||'');
+                if(!['server_api_purchase','billing'].includes(type)) continue;
+                const desc=String(l.description||'');
+                let p=null;
+                const sid=sidFromText(desc);
+                if(sid) p=byId.get(sid)||null;
+                if(!p){
+                  for(const [name,row] of byName) {
+                    if(name && desc.includes(name)){ p=row; break; }
+                  }
+                }
+                if(!p) continue;
+                const charged=Math.abs(num(l.amount));
+                const expected=num(p.amount);
+                let renewalPart=null;
+                const rm=desc.match(/هزینه دوره=([0-9.]+)/);
+                if(rm) renewalPart=num(rm[1]);
+                const comparable=type==='server_api_purchase' ? charged : (renewalPart==null ? charged : renewalPart);
+                if(expected>0 && comparable>expected+0.001) {
+                  const excess=comparable-expected;
+                  exactSaleLeak+=excess;
+                  amountMismatchCount++;
+                  mismatches.push({id:l.id,server_id:String(p.server_id),type,charged,renewal_part:renewalPart,expected,excess});
+                }
+              }
+
+              let undeliveredNet=0;
+              const undelivered=[];
+              for(const p of purchases) {
+                if(p.delivered_at) continue;
+                const sid=String(p.server_id);
+                const initialCharges=logs.filter(l=>
+                  num(l.amount)<0 &&
+                  ['purchase','server_api_purchase'].includes(String(l.type||'')) &&
+                  String(l.description||'').includes(sid)
+                ).reduce((s,l)=>s+Math.abs(num(l.amount)),0);
+
+                const rollbacks=positives.filter(l=>
+                  ['server_api_purchase_rollback','server_deletion_refund'].includes(String(l.type||'')) &&
+                  String(l.description||'').includes(sid)
+                ).reduce((s,l)=>s+num(l.amount),0);
+
+                const renewalCharges=negatives.filter(l=>
+                  String(l.type||'')==='billing' &&
+                  String(l.description||'').includes(String(p.server_name||sid))
+                ).reduce((s,l)=>s+Math.abs(num(l.amount)),0);
+
+                const net=Math.max(0,initialCharges+renewalCharges-rollbacks);
+                if(net>0.001){
+                  undeliveredNet+=net;
+                  undelivered.push({server_id:sid,status:p.status,amount:num(p.amount),initial_charges:initialCharges,renewal_charges:renewalCharges,refunds:rollbacks,net});
+                }
+              }
+
+              const duplicateCandidates=[];
+              const billingByServer=new Map();
+              for(const e of events){
+                if(String(e.event_type||'')!=='renewal') continue;
+                const sid=String(e.server_id||'');
+                const arr=billingByServer.get(sid)||[];
+                arr.push(e);
+                billingByServer.set(sid,arr);
+              }
+              for(const [sid,arr] of billingByServer){
+                arr.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+                const p=byId.get(sid);
+                const hours={hourly:1,daily:24,weekly:168,monthly:720}[String(p?.duration||'')]||1;
+                const minGap=hours*3600*1000*0.85;
+                for(let i=1;i<arr.length;i++){
+                  const gap=new Date(arr[i].created_at)-new Date(arr[i-1].created_at);
+                  if(gap>=0 && gap<minGap) duplicateCandidates.push({server_id:sid,prev:arr[i-1].id,current:arr[i].id,gap_minutes:Math.round(gap/60000),amount:num(arr[i].amount_toman)});
+                }
+              }
+              const duplicateCandidateTotal=duplicateCandidates.reduce((s,x)=>s+x.amount,0);
+
+              const result={
+                wallet:Number((await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]))[0][0]?.wallet||0),
+                total_negative:negatives.reduce((s,l)=>s+Math.abs(num(l.amount)),0),
+                total_positive:positives.reduce((s,l)=>s+num(l.amount),0),
+                amount_mismatch_excess:exactSaleLeak,
+                amount_mismatch_count:amountMismatchCount,
+                undelivered_unrefunded:undeliveredNet,
+                undelivered_count:undelivered.length,
+                duplicate_candidate_total:duplicateCandidateTotal,
+                duplicate_candidate_count:duplicateCandidates.length,
+                total_candidate_overcharge:exactSaleLeak+undeliveredNet+duplicateCandidateTotal
+              };
+              console.log('SUMMARY='+JSON.stringify(result));
+              console.log('AMOUNT_MISMATCHES='+JSON.stringify(mismatches.slice(0,100)));
+              console.log('UNDELIVERED_UNREFUNDED='+JSON.stringify(undelivered.slice(0,100)));
+              console.log('DUPLICATE_CANDIDATES='+JSON.stringify(duplicateCandidates.slice(0,100)));
+            } finally { await c.end(); }
+          })().catch(e=>{console.error('AUDIT_FAILED='+String(e.code||e.message));process.exit(1);});
+          NODE
+          REMOTE
