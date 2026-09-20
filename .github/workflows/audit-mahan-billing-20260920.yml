@@ -53,15 +53,49 @@ jobs:
             });
             try{
               const [[u]]=await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]);
-              const [clients]=await c.execute('SELECT id,name,monthly_prorated_pricing,min_wallet_balance,max_servers FROM api_clients WHERE telegram_id=? ORDER BY id',[userId]);
-              const [targetRows]=await c.execute(`SELECT server_id,server_name,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,monthly_basis_price,created_at FROM purchases WHERE telegram_id=? AND server_id=? ORDER BY id DESC`,[userId,target]);
-              const [recentPurchases]=await c.execute(`SELECT server_id,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,created_at FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20`,[userId]);
-              const [logs]=await c.execute(`SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC,id DESC LIMIT 80`,[userId]);
+              const [clients]=await c.execute('SELECT * FROM api_clients WHERE telegram_id=? ORDER BY id',[userId]);
+              const [targetRows]=await c.execute('SELECT * FROM purchases WHERE telegram_id=? AND server_id=? ORDER BY created_at DESC',[userId,target]);
+              const [recentPurchases]=await c.execute('SELECT * FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 30',[userId]);
+              const [logs]=await c.execute('SELECT * FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC LIMIT 300',[userId]);
+
+              const pickPurchase=r=>({
+                server_id:String(r.server_id||''),
+                flavor_id:r.flavor_id,
+                duration:r.duration,
+                amount:Number(r.amount||0),
+                status:r.status,
+                delivered:!!r.delivered_at,
+                pricing_mode:r.pricing_mode||'legacy',
+                last_billed_at:r.last_billed_at
+              });
+              const clientSummary=clients.map(r=>({
+                id:r.id,
+                name:r.name,
+                monthly_prorated_pricing:Number(r.monthly_prorated_pricing||0),
+                min_wallet_balance:Number(r.min_wallet_balance||0),
+                max_servers:Number(r.max_servers||0)
+              }));
+              const negative=logs.filter(r=>Number(r.amount)<0);
+              const amountCounts={};
+              const typeTotals={};
+              for(const row of negative){
+                const amount=Math.abs(Number(row.amount||0));
+                const key=String(amount);
+                amountCounts[key]=(amountCounts[key]||0)+1;
+                const type=String(row.type||'unknown');
+                typeTotals[type]=(typeTotals[type]||0)+amount;
+              }
+              const targetLogSummary=logs
+                .filter(r=>String(r.description||'').includes(target))
+                .map(r=>({amount:Number(r.amount||0),type:r.type,timestamp:r.timestamp}));
+
               console.log('WALLET='+Number(u?.wallet||0));
-              console.log('API_CLIENTS='+JSON.stringify(clients));
-              console.log('TARGET_PURCHASE='+JSON.stringify(targetRows));
-              console.log('RECENT_PURCHASES='+JSON.stringify(recentPurchases));
-              console.log('RECENT_WALLET_LOGS='+JSON.stringify(logs));
+              console.log('API_CLIENTS='+JSON.stringify(clientSummary));
+              console.log('TARGET_PURCHASE='+JSON.stringify(targetRows.map(pickPurchase)));
+              console.log('RECENT_PURCHASES='+JSON.stringify(recentPurchases.map(pickPurchase)));
+              console.log('NEGATIVE_AMOUNT_COUNTS='+JSON.stringify(amountCounts));
+              console.log('NEGATIVE_TOTALS_BY_TYPE='+JSON.stringify(typeTotals));
+              console.log('TARGET_WALLET_LOGS='+JSON.stringify(targetLogSummary));
             } finally { await c.end(); }
           })().catch(e=>{console.error('AUDIT_FAILED='+String(e.code||e.message));process.exit(1);});
           NODE
