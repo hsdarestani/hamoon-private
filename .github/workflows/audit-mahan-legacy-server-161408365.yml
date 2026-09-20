@@ -1,0 +1,56 @@
+name: Audit Mahan legacy server 161408365
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-mahan-legacy-server-161408365.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect target
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          (async()=>{
+            const c=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            try{
+              const sid='161408365', uid='1478447415';
+              const [p]=await c.execute('SELECT * FROM purchases WHERE telegram_id=? AND server_id=?',[uid,sid]);
+              const name=p[0]?.server_name||sid;
+              const [logs]=await c.execute('SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? AND (description LIKE ? OR description LIKE ?) ORDER BY timestamp,id',[uid,'%'+sid+'%','%'+name+'%']);
+              const [events]=await c.execute('SELECT * FROM billing_events WHERE telegram_id=? AND server_id=? ORDER BY created_at',[uid,sid]).catch(()=>[[]]);
+              console.log('PURCHASE='+JSON.stringify(p.map(x=>({server_id:x.server_id,server_name:x.server_name,datacenter:x.datacenter,status:x.status,duration:x.duration,amount:Number(x.amount||0),boot_method:x.boot_method,public_ip:x.public_ip,created_at:x.created_at,delivered_at:x.delivered_at,deleted_at:x.deleted_at,last_billed_at:x.last_billed_at}))));
+              console.log('LOGS='+JSON.stringify(logs));
+              console.log('EVENTS='+JSON.stringify(events.map(e=>({id:e.id,event_key:e.event_key,event_type:e.event_type,amount_toman:Number(e.amount_toman||0),period_start:e.period_start,period_end:e.period_end,created_at:e.created_at}))));
+            }finally{await c.end();}
+          })().catch(e=>{console.error(e.stack||e);process.exit(1)});
+          NODE
+          REMOTE
