@@ -662,7 +662,7 @@ async function getUserActivePurchases(telegramId) {
             `SELECT * FROM purchases
              WHERE telegram_id = ?
                AND deleted_at IS NULL
-               AND (status IS NULL OR status NOT IN ('deleted','cancelled','provider_missing'))
+               AND (status IS NULL OR status NOT IN ('deleted','cancelled','provider_missing','deletion_pending'))
              ORDER BY created_at DESC`,
             [String(telegramId)]
         );
@@ -783,7 +783,7 @@ async function deleteTestServer(serverId) {
 async function getAllPurchases() {
     const conn = await pool.getConnection();
     try {
-        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status != 'deleted' AND deleted_at IS NULL");
+        const [rows] = await conn.execute("SELECT * FROM purchases WHERE status NOT IN ('deleted','deletion_pending','cancelled','provider_missing') AND deleted_at IS NULL");
         return rows;
     } finally {
         conn.release();
@@ -853,10 +853,11 @@ async function updatePurchaseStatus(
     sql += ' WHERE server_id = ?';
     params.push(serverId);
 
-    // Rows with deleted_at are terminal. Generic lifecycle/status updates must
-    // not resurrect a server after its provider VM has already been removed.
-    if (!['deleted', 'provider_missing'].includes(normalizedStatus)) {
-      sql += ' AND deleted_at IS NULL';
+    // Rows that entered deletion_pending are quarantined. Generic lifecycle
+    // updates must never resurrect or redeliver them while provider/storage
+    // deletion is being verified.
+    if (!['deleted', 'provider_missing', 'deletion_pending'].includes(normalizedStatus)) {
+      sql += " AND deleted_at IS NULL AND (status IS NULL OR status <> 'deletion_pending')";
     }
 
     await conn.execute(sql, params);
@@ -1779,22 +1780,26 @@ async function updateScopedStatus(
   datacenter,
   status
 ) {
-  const [result] = await pool.execute(
-    `UPDATE purchases
+  const normalizedStatus = String(status || '').toLowerCase();
+  let sql = `UPDATE purchases
      SET status = ?,
          lifecycle_updated_at = NOW(),
          updated_at = NOW()
      WHERE telegram_id = ?
        AND server_id = ?
-       AND datacenter = ?`,
-    [
-      String(status),
-      String(telegramId),
-      String(serverId),
-      String(datacenter)
-    ]
-  );
+       AND datacenter = ?`;
+  const params = [
+    String(status),
+    String(telegramId),
+    String(serverId),
+    String(datacenter)
+  ];
 
+  if (!['deleted', 'provider_missing', 'deletion_pending'].includes(normalizedStatus)) {
+    sql += " AND deleted_at IS NULL AND (status IS NULL OR status <> 'deletion_pending')";
+  }
+
+  const [result] = await pool.execute(sql, params);
   return result.affectedRows > 0;
 }
 
@@ -1867,7 +1872,7 @@ async function markDelivered(
   try {
     await conn.beginTransaction();
     const [purchases] = await conn.execute(
-      `SELECT delivered_at
+      `SELECT delivered_at, status, deleted_at
          FROM purchases
         WHERE telegram_id = ?
           AND server_id = ?
@@ -1879,7 +1884,11 @@ async function markDelivered(
       await conn.rollback();
       return false;
     }
-    if (purchases[0].delivered_at) {
+    if (
+      purchases[0].delivered_at ||
+      purchases[0].deleted_at ||
+      ['deleted', 'provider_missing', 'deletion_pending'].includes(String(purchases[0].status || '').toLowerCase())
+    ) {
       await conn.commit();
       return false;
     }
@@ -1902,7 +1911,9 @@ async function markDelivered(
        WHERE telegram_id = ?
          AND server_id = ?
          AND datacenter = ?
-         AND delivered_at IS NULL`,
+         AND delivered_at IS NULL
+         AND deleted_at IS NULL
+         AND (status IS NULL OR status <> 'deletion_pending')`,
       [
         publicIp || null,
         String(telegramId),
