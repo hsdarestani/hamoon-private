@@ -3371,6 +3371,14 @@ async function handleServerDeletion(chatId, userId, serverId, dcConfig) {
             dcConfig.key
         ).catch(() => null);
 
+        if (
+            purchase &&
+            (purchase.deleted_at || ['deleted', 'provider_missing'].includes(String(purchase.status || '').toLowerCase()))
+        ) {
+            await sendMessage(chatId, '✅ این سرور قبلاً حذف شده و دیگر در چرخه سرویس فعال نیست.');
+            return;
+        }
+
         if (!purchase) {
             const tests = await dbModule.getUserActiveTestServers(userId).catch(() => []);
             testServer = (tests || []).find(row =>
