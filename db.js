@@ -601,7 +601,9 @@ async function setPurchaseAutoRenew(telegramId, serverId, datacenter, enabled) {
              renewal_stopped_at = NULL,
              suspend_reason = NULL,
              updated_at = CURRENT_TIMESTAMP
-         WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`
+         WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
+           AND deleted_at IS NULL
+           AND (status IS NULL OR status <> 'deletion_pending')`
       : `UPDATE purchases
          SET auto_renew = 0,
              auto_renew_disabled_at = COALESCE(auto_renew_disabled_at, NOW()),
@@ -623,7 +625,9 @@ async function setPurchaseRenewalStopped(serverId, reason = 'auto_renew_disabled
            renewal_stopped_at = NOW(),
            suspend_reason = ?,
            updated_at = CURRENT_TIMESTAMP
-       WHERE server_id = ?`,
+       WHERE server_id = ?
+         AND deleted_at IS NULL
+         AND (status IS NULL OR status <> 'deletion_pending')`,
       [reason, serverId]
     );
     return result.affectedRows > 0;
@@ -698,7 +702,9 @@ async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, am
                  status = 'active',
                  lifecycle_updated_at = CURRENT_TIMESTAMP,
                  updated_at = CURRENT_TIMESTAMP
-             WHERE telegram_id = ? AND server_id = ? AND datacenter = ?`,
+             WHERE telegram_id = ? AND server_id = ? AND datacenter = ?
+               AND deleted_at IS NULL
+               AND (status IS NULL OR status <> 'deletion_pending')`,
             [flavorId, amount, pricingMode, monthlyBasisPrice, monthlyBasisPrice, String(telegramId), String(serverId), datacenter]
         );
         return res.affectedRows > 0;
@@ -710,8 +716,13 @@ async function updatePurchasePlan(telegramId, serverId, datacenter, flavorId, am
 async function setPurchaseStatusForUser(telegramId, serverId, datacenter, status) {
     const conn = await pool.getConnection();
     try {
+        const normalizedStatus = String(status || '').toLowerCase();
+        let sql = 'UPDATE purchases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ? AND server_id = ? AND datacenter = ?';
+        if (!['deleted', 'provider_missing', 'deletion_pending'].includes(normalizedStatus)) {
+            sql += " AND deleted_at IS NULL AND (status IS NULL OR status <> 'deletion_pending')";
+        }
         const [res] = await conn.execute(
-            'UPDATE purchases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ? AND server_id = ? AND datacenter = ?',
+            sql,
             [status, String(telegramId), String(serverId), datacenter]
         );
         return res.affectedRows > 0;
@@ -1713,7 +1724,9 @@ async function markDeletionPending(
          updated_at = NOW()
      WHERE telegram_id = ?
        AND server_id = ?
-       AND datacenter = ?`,
+       AND datacenter = ?
+       AND deleted_at IS NULL
+       AND (status IS NULL OR status NOT IN ('deleted','provider_missing'))`,
     [String(telegramId), String(serverId), String(datacenter)]
   );
 
