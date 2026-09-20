@@ -539,6 +539,7 @@ function createCustomerApiRouter() {
     if (err.code === 'NOT_FOUND' || providerStatus === 404) return apiError(res, 404, 'SERVER_NOT_FOUND', 'سرور یا منبع موردنظر پیدا نشد.');
     if (err.code === 'OPERATION_IN_PROGRESS' || providerStatus === 423) return apiError(res, 409, 'OPERATION_IN_PROGRESS', changeIpUserMessage(err));
     if (err.code === 'INVALID_SERVER_STATE') return apiError(res, 409, 'SERVER_STATE_CONFLICT', changeIpUserMessage(err));
+    if (err.code === 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE') return apiError(res, 409, 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE', changeIpUserMessage(err));
     if (err.code === 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE') return apiError(res, 409, 'NO_UNUSED_PRIMARY_IPV4_AVAILABLE', changeIpUserMessage(err));
     if (err.code === 'PRIMARY_IPV4_NOT_FOUND') return apiError(res, 502, 'PRIMARY_IPV4_NOT_FOUND', changeIpUserMessage(err));
     if (err.code === 'NEW_IP_NOT_READY') return apiError(res, 504, 'NEW_IP_NOT_READY', changeIpUserMessage(err));
