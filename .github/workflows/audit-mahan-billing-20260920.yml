@@ -1,0 +1,68 @@
+name: Audit Mahan reseller billing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-mahan-billing-20260920.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect Mahan wallet charges and target server
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const userId='1478447415';
+          const target='166621727';
+          (async()=>{
+            const c=await mysql.createConnection({
+              host:process.env.DB_HOST||'127.0.0.1',
+              user:process.env.DB_USER,
+              password:process.env.DB_PASSWORD,
+              database:process.env.DB_NAME||'hamooncloud_db'
+            });
+            try{
+              const [[u]]=await c.execute('SELECT wallet FROM users WHERE telegram_id=? LIMIT 1',[userId]);
+              const [clients]=await c.execute('SELECT id,name,monthly_prorated_pricing,min_wallet_balance,max_servers FROM api_clients WHERE telegram_id=? ORDER BY id',[userId]);
+              const [targetRows]=await c.execute(`SELECT server_id,server_name,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,monthly_basis_price,created_at,updated_at FROM purchases WHERE telegram_id=? AND server_id=? ORDER BY id DESC`,[userId,target]);
+              const [recentPurchases]=await c.execute(`SELECT server_id,flavor_id,duration,amount,status,public_ip,delivered_at,last_billed_at,pricing_mode,created_at FROM purchases WHERE telegram_id=? ORDER BY created_at DESC LIMIT 20`,[userId]);
+              const [logs]=await c.execute(`SELECT id,amount,description,type,timestamp FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp DESC,id DESC LIMIT 80`,[userId]);
+              console.log('WALLET='+Number(u?.wallet||0));
+              console.log('API_CLIENTS='+JSON.stringify(clients));
+              console.log('TARGET_PURCHASE='+JSON.stringify(targetRows));
+              console.log('RECENT_PURCHASES='+JSON.stringify(recentPurchases));
+              console.log('RECENT_WALLET_LOGS='+JSON.stringify(logs));
+            } finally { await c.end(); }
+          })().catch(e=>{console.error('AUDIT_FAILED='+String(e.code||e.message));process.exit(1);});
+          NODE
+          REMOTE
