@@ -123,3 +123,5 @@ jobs:
           })().catch(async e=>{console.error('DIAG_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
           NODE
           REMOTE
+
+# post-b720 verification
