@@ -660,6 +660,12 @@ function formatRemainingTime(lastBilledAt, duration) {
     return result;
 }
 
+function telegramPlainFallbackText(text) {
+    return String(text ?? '')
+        .replace(/<[^>]+>/g, '')
+        .replaceAll(String.fromCharCode(92), '');
+}
+
 async function sendMessage(chatId, text, options) {
     try {
         return await bot.sendMessage(chatId, text, options);
@@ -667,6 +673,26 @@ async function sendMessage(chatId, text, options) {
         console.error(`Error sending message to ${chatId}:`, error.message);
         if (error.response && error.response.body) {
              console.error('Telegram API Error Body:', error.response.body);
+        }
+
+        const description = String(error?.response?.body?.description || error?.message || '');
+        if (options?.parse_mode && /can't parse entities/i.test(description)) {
+            const fallbackOptions = { ...options };
+            delete fallbackOptions.parse_mode;
+            const fallbackText = telegramPlainFallbackText(text);
+            console.warn('[TELEGRAM_PARSE_FALLBACK]', {
+                chat_id: String(chatId),
+                parse_mode: options.parse_mode,
+                description
+            });
+            try {
+                return await bot.sendMessage(chatId, fallbackText, fallbackOptions);
+            } catch (fallbackError) {
+                console.error('[TELEGRAM_PARSE_FALLBACK_FAILED]', {
+                    chat_id: String(chatId),
+                    message: fallbackError?.message || String(fallbackError)
+                });
+            }
         }
         return null;
     }
@@ -1538,7 +1564,13 @@ async function handleBuildSnapshotConfirm(chatId, userId, dcConfig, snapshotId, 
 
 // --- Main Callback Query Handler ---
 bot.on('callback_query', async q => {
-  await bot.answerCallbackQuery(q.id);
+  await bot.answerCallbackQuery(q.id).catch(error => {
+    console.warn('[CALLBACK_ACK_FAILED]', {
+      user_id: String(q.from?.id || ''),
+      callback: String(q.data || ''),
+      message: error?.message || String(error)
+    });
+  });
 
   const adminId = String(q.from.id);
   const isImpersonating = adminId === String(SUPPORT_ID) && adminState.impersonating;
@@ -1550,6 +1582,15 @@ bot.on('callback_query', async q => {
 
   const directManagePayload = parseDirectManageCb(data);
   const payload = directManagePayload || readShortCb(effectiveUserId, data);
+
+  if (payload?.action === 'M') {
+    console.log('[MANAGE_CALLBACK_RECEIVED]', {
+      user_id: effectiveUserId,
+      dc: payload.dcKey,
+      server_id: payload.serverId,
+      direct: !!directManagePayload
+    });
+  }
 
   if (!payload && /^C[0-9a-f]{6}$/i.test(String(data || ''))) {
     console.warn('[STALE_CALLBACK]', { user_id: effectiveUserId, callback: data });
