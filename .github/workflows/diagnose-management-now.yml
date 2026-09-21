@@ -1,0 +1,54 @@
+name: Diagnose Management Now
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-management-now.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Read live callback trace
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== VERSION ==='
+          git rev-parse HEAD
+
+          echo '=== CALLBACKS SINCE DEPLOY ==='
+          pm2 logs hamoonbot --nostream --lines 7000 2>&1 | grep -E -i "CALLBACK_QUERY_IN|MANAGE_CALLBACK_RECEIVED|MANAGE_PLAIN_TEXT_SEND|CALLBACK_ACK_FAILED|STALE_CALLBACK|TELEGRAM_PARSE_FALLBACK|TELEGRAM_PARSE_FALLBACK_FAILED|Manage Server Error|Error sending message|Telegram API Error Body|ETELEGRAM|Unhandled|TypeError|ReferenceError" | tail -1200 || true
+
+          echo '=== LAST 250 RAW ==='
+          pm2 logs hamoonbot --nostream --lines 250 2>&1 | tail -250 || true
+
+          echo '=== PROCESSES ==='
+          pm2 jlist > /tmp/p.json
+          node -e "const a=require('/tmp/p.json'); console.log(JSON.stringify(a.map(p=>({name:p.name,pid:p.pid,status:p.pm2_env?.status,script:p.pm2_env?.pm_exec_path,cwd:p.pm2_env?.pm_cwd,restarts:p.pm2_env?.restart_time})),null,2))"
+          REMOTE
