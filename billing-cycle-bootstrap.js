@@ -227,12 +227,33 @@ function applyBillingCyclePatches(source) {
     } catch (error) {
       if (error?.code === 'INSUFFICIENT_WALLET') {
         const wallet = Number(await getUserWallet(userId).catch(() => 0) || 0);
-        const required = Math.max(0, difference - wallet);
+        const pendingReserved = Math.max(0, Number(error?.pendingReserved || 0));
+        const spendableWallet = Number.isFinite(Number(error?.spendableWallet))
+          ? Number(error.spendableWallet)
+          : Math.max(0, wallet - pendingReserved);
+        const required = Math.max(0, difference - spendableWallet);
+
+        console.warn('[BILLING_CYCLE_INSUFFICIENT]', {
+          server_id: String(serverId),
+          user_id: String(userId),
+          wallet,
+          pending_reserved: pendingReserved,
+          spendable_wallet: spendableWallet,
+          required_difference: difference,
+          topup_required: required
+        });
+
+        const reservedText = pendingReserved > 0
+          ? String.fromCharCode(10) + 'از موجودی شما ' + formatToman(Math.ceil(pendingReserved)) +
+            ' تومان برای سرورهای در حال تحویل رزرو شده است.'
+          : '';
+
         return editOrSendMessage(
           chatId,
           messageId,
-          '❌ موجودی کافی نیست. برای تغییر دوره به ' + getCycleLabel(newCycle) +
-          ' حداقل ' + formatToman(Math.ceil(required)) + ' تومان دیگر کیف پول خود را شارژ کنید.'
+          '❌ موجودی قابل‌استفاده کافی نیست. برای تغییر دوره به ' + getCycleLabel(newCycle) +
+          ' حداقل ' + formatToman(Math.ceil(required)) + ' تومان دیگر کیف پول خود را شارژ کنید.' +
+          reservedText
         );
       }
       if (error?.code === 'PURCHASE_CYCLE_CHANGED' || error?.code === 'PURCHASE_CYCLE_CONCURRENT_UPDATE') {
