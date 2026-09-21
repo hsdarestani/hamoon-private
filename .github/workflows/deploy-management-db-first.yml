@@ -6,6 +6,8 @@ on:
     paths:
       - 'index-core.js'
       - 'runtime-bootstrap.js'
+      - 'survey-service.js'
+      - 'survey-bootstrap.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
@@ -34,6 +36,8 @@ jobs:
         run: |
           set -euo pipefail
           node --check hetzner-management-scope-bootstrap.js
+          node --check survey-service.js
+          node --check survey-bootstrap.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
@@ -72,6 +76,8 @@ jobs:
           git merge --ff-only origin/main
 
           node --check hetzner-management-scope-bootstrap.js
+          node --check survey-service.js
+          node --check survey-bootstrap.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
