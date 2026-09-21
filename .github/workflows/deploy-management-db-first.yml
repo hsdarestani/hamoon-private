@@ -93,4 +93,30 @@ jobs:
           STATUS="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(p?.pm2_env?.status||'missing')})")"
           echo "PM2_STATUS=$STATUS"
           test "$STATUS" = "online"
+
+          sleep 12
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            const [[users]] = await conn.query('SELECT COUNT(*) AS total FROM users');
+            const [invites] = await conn.query("SELECT invite_status, COUNT(*) AS total FROM survey_invites WHERE survey_version='services_2026_09' GROUP BY invite_status ORDER BY invite_status");
+            const [[progress]] = await conn.query("SELECT COUNT(*) AS started, SUM(completed_at IS NOT NULL) AS completed, SUM(rewarded_at IS NOT NULL) AS rewarded FROM user_surveys WHERE survey_version='services_2026_09'");
+            console.log('SURVEY_USERS_TOTAL=' + Number(users.total || 0));
+            console.log('SURVEY_INVITES=' + JSON.stringify(invites));
+            console.log('SURVEY_PROGRESS=' + JSON.stringify(progress));
+            await conn.end();
+          })().catch(error => {
+            console.error('SURVEY_PRODUCTION_VERIFY_FAILED=' + (error?.message || error));
+            process.exit(1);
+          });
+          NODE
+
+          pm2 logs hamoonbot --lines 160 --nostream 2>/dev/null | grep -E 'SURVEY_BROADCAST_(PROGRESS|DONE|FAILED)' | tail -20 || true
           REMOTE
