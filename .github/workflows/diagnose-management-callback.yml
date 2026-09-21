@@ -46,28 +46,9 @@ jobs:
           git status --short | head -50 || true
 
           echo '=== PM2 ==='
-          pm2 jlist | node - <<'NODE'
-          let s='';
-          process.stdin.on('data',d=>s+=d).on('end',()=>{
-            const a=JSON.parse(s||'[]');
-            for (const p of a) {
-              if (p.name === 'hamoonbot') {
-                console.log(JSON.stringify({
-                  name:p.name,
-                  pid:p.pid,
-                  status:p.pm2_env?.status,
-                  exec_mode:p.pm2_env?.exec_mode,
-                  instances:p.pm2_env?.instances,
-                  pm_id:p.pm_id,
-                  restart_time:p.pm2_env?.restart_time,
-                  node_version:p.pm2_env?.node_version,
-                  cwd:p.pm2_env?.pm_cwd,
-                  script:p.pm2_env?.pm_exec_path
-                }, null, 2));
-              }
-            }
-          });
-          NODE
+          pm2 jlist > /tmp/hamoon-pm2.json
+          node -e "const a=require('/tmp/hamoon-pm2.json'); for(const p of a.filter(x=>x.name==='hamoonbot')) console.log(JSON.stringify({name:p.name,pid:p.pid,status:p.pm2_env?.status,exec_mode:p.pm2_env?.exec_mode,instances:p.pm2_env?.instances,pm_id:p.pm_id,restart_time:p.pm2_env?.restart_time,node_version:p.pm2_env?.node_version,cwd:p.pm2_env?.pm_cwd,script:p.pm2_env?.pm_exec_path},null,2))"
+          echo "HAMOONBOT_PROCESS_COUNT=$(node -e "const a=require('/tmp/hamoon-pm2.json'); process.stdout.write(String(a.filter(x=>x.name==='hamoonbot').length))")"
 
           echo '=== SOURCE MARKERS ==='
           grep -n "function makeDirectManageCb\|function parseDirectManageCb\|directManagePayload\|STALE_CALLBACK" index-core.js || true
@@ -92,7 +73,7 @@ jobs:
           NODE
 
           echo '=== RECENT HAMOONBOT ERRORS / CALLBACKS ==='
-          pm2 logs hamoonbot --nostream --lines 700 2>&1 | grep -E -i "callback|stale|manage|servermanagement|typeerror|referenceerror|unhandled|uncaught|error|invalid|telegram" | tail -300 || true
+          pm2 logs hamoonbot --nostream --lines 3000 2>&1 | grep -E -i "callback|stale|manage server error|handleservermanagement|polling|ETELEGRAM|409|conflict|query is too old|query_id_invalid|bad request|typeerror|referenceerror|unhandled|uncaught" | tail -600 || true
 
           echo '=== RECENT RAW TAIL ==='
           pm2 logs hamoonbot --nostream --lines 180 2>&1 | tail -180 || true
