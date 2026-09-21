@@ -48,6 +48,9 @@ const required = [
   'function parseDirectManageCb(data)',
   "directManagePayload || readShortCb(effectiveUserId, data)",
   "'⚠️ این دکمه مربوط به منوی قدیمی است",
+  "'[TELEGRAM_PARSE_FALLBACK]'",
+  "'[CALLBACK_ACK_FAILED]'",
+  "'[MANAGE_CALLBACK_RECEIVED]'",
 ];
 
 for (const marker of required) {
