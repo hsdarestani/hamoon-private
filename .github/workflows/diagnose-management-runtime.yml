@@ -1,0 +1,76 @@
+name: Diagnose Management Runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-management-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== RUNTIME MARKERS ==='
+          timeout 20 node - <<'NODE'
+          const fs=require('fs');
+          const {applyPatches}=require('./runtime-bootstrap');
+          const src=applyPatches(fs.readFileSync('index-core.js','utf8'));
+          for(const n of [
+            "bot.on('callback_query'",
+            "[CALLBACK_QUERY_IN]",
+            "[MANAGE_CALLBACK_RECEIVED]",
+            "[MANAGE_PLAIN_TEXT_SEND]",
+            "makeDirectManageCb(payload)",
+            "parseDirectManageCb(data)"
+          ]) console.log(JSON.stringify({needle:n,count:src.split(n).length-1}));
+          const i=src.indexOf("bot.on('callback_query'");
+          console.log('--- CALLBACK HANDLER ---');
+          console.log(src.slice(i,i+3200));
+          const all=[...src.matchAll(/callback_data:\s*makeShortCb\([^\n]+action:\s*'M'[^\n]+/g)].map(m=>m[0]);
+          console.log('--- M BUTTON EXPRESSIONS ---');
+          console.log(all.slice(0,20).join('\n'));
+          process.exit(0);
+          NODE
+
+          echo '=== BOT IDENTITY ==='
+          TOKEN="$(node -e "require('dotenv').config(); process.stdout.write(process.env.TELEGRAM_BOT_TOKEN||'')")"
+          if [ -z "$TOKEN" ]; then
+            echo TOKEN_MISSING
+          else
+            timeout 15 curl -fsS "https://api.telegram.org/bot${TOKEN}/getMe" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);const m=j.result||{};console.log(JSON.stringify({ok:j.ok,id:m.id,username:m.username,first_name:m.first_name},null,2));})"
+          fi
+          unset TOKEN
+
+          echo '=== NEW CALLBACK TRACE ONLY ==='
+          pm2 logs hamoonbot --nostream --lines 3000 2>&1 | grep -E "CALLBACK_QUERY_IN|MANAGE_CALLBACK_RECEIVED|MANAGE_PLAIN_TEXT_SEND|CALLBACK_ACK_FAILED|STALE_CALLBACK" | tail -300 || true
+          REMOTE
