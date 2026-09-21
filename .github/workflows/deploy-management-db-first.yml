@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths:
+      - 'index-core.js'
+      - 'runtime-bootstrap.js'
+      - 'hetzner-management-scope-bootstrap.js'
+      - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
   workflow_dispatch:
 
