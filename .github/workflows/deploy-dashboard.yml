@@ -55,10 +55,8 @@ jobs:
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
           node --check public/dashboard/survey-admin.js
-          node --check public/dashboard/survey-admin.js
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
-          node --check survey-dashboard.js
           node --check survey-dashboard.js
           node --check customer-api.js
           node --check reseller-api-extensions.js
@@ -115,8 +113,10 @@ jobs:
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
+          node --check public/dashboard/survey-admin.js
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
+          node --check survey-dashboard.js
           node --check customer-api.js
           node --check reseller-api-extensions.js
           node --check external-payments.js
@@ -140,6 +140,31 @@ jobs:
 
           echo '=== LIVE DASHBOARD READ-ONLY SMOKE ==='
           DASHBOARD_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-dashboard-live.js
+
+          echo '=== SURVEY DASHBOARD SMOKE ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const survey = require('./survey-dashboard');
+          const db = require('./db');
+          (async () => {
+            const overview = await survey.getOverview();
+            const raw = await survey.getRaw({ page: 1, pageSize: 10 });
+            if (!overview?.stats || !Array.isArray(overview?.questions) || overview.questions.length !== 4) {
+              throw new Error('SURVEY_OVERVIEW_INVALID');
+            }
+            if (!Array.isArray(raw?.rows)) throw new Error('SURVEY_RAW_INVALID');
+            console.log('SURVEY_DASHBOARD_OK', {
+              started: overview.stats.started,
+              completed: overview.stats.completed,
+              rewarded: overview.stats.rewarded,
+              raw_total: raw.total
+            });
+            await db.pool.end();
+          })().catch(error => {
+            console.error('SURVEY_DASHBOARD_SMOKE_FAILED', error?.stack || error);
+            process.exit(1);
+          });
+          NODE
 
           echo '=== LIVE RESELLER API ROUTE SMOKE ==='
           RESELLER_API_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-reseller-api-live.js
