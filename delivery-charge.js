@@ -224,13 +224,13 @@ async function reconcileStalePending(pool, { limit = 1000, orphanCancelHours = 2
 
   try {
     await conn.beginTransaction();
-    const [rows] = await conn.execute(
+    const safeLimit = Math.max(1, Math.min(5000, Math.floor(Number(limit || 1000))));
+    const [rows] = await conn.query(
       `SELECT *
          FROM pending_delivery_charges
         WHERE status = 'pending'
         ORDER BY created_at ASC
-        LIMIT ? FOR UPDATE`,
-      [Math.max(1, Math.min(5000, Number(limit || 1000)))]
+        LIMIT ${safeLimit} FOR UPDATE`
     );
 
     for (const row of rows) {
@@ -295,17 +295,6 @@ async function reconcileStalePending(pool, { limit = 1000, orphanCancelHours = 2
           }
         }
 
-        if (purchase?.delivered_at) {
-          const settled = await settlePendingOnDelivery(conn, {
-            telegramId: row.telegram_id,
-            serverId: row.server_id,
-            datacenter: row.datacenter
-          });
-          if (settled?.status === 'charged') summary.settled += 1;
-          else summary.untouched += 1;
-          continue;
-        }
-
         const purchaseStatus = String(purchase?.status || '').toLowerCase();
         if (purchase && ['deleted', 'deletion_pending'].includes(purchaseStatus)) {
           await conn.execute(
@@ -316,6 +305,17 @@ async function reconcileStalePending(pool, { limit = 1000, orphanCancelHours = 2
             [String(row.server_id)]
           );
           summary.cancelled += 1;
+          continue;
+        }
+
+        if (purchase?.delivered_at) {
+          const settled = await settlePendingOnDelivery(conn, {
+            telegramId: row.telegram_id,
+            serverId: row.server_id,
+            datacenter: row.datacenter
+          });
+          if (settled?.status === 'charged') summary.settled += 1;
+          else summary.untouched += 1;
           continue;
         }
 
