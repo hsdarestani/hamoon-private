@@ -209,6 +209,14 @@ function run() {
   require.cache[corePath] = child;
   child._compile(source, corePath);
 
+  setTimeout(() => {
+    const db = require('./db');
+    const deliveryCharge = require('./delivery-charge');
+    deliveryCharge.reconcileStalePending(db.pool)
+      .then(summary => console.log('[DELIVERY_CHARGE_RECONCILE]', summary))
+      .catch(error => console.error('[DELIVERY_CHARGE_RECONCILE_FAILED]', error?.message || error));
+  }, 2500).unref();
+
   // Purchased servers remain quarantined as deletion_pending until both the
   // provider VM and any tracked boot storage are definitively gone. Retry any
   // interrupted deletions after startup and periodically thereafter.
