@@ -8,6 +8,7 @@ on:
       - 'public/dashboard/**'
       - 'dashboard-api.js'
       - 'survey-dashboard.js'
+      - 'hetzner-account-dashboard.js'
       - 'customer-api.js'
       - 'reseller-api-extensions.js'
       - 'external-payments.js'
@@ -55,9 +56,13 @@ jobs:
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
           node --check public/dashboard/survey-admin.js
+          node --check public/dashboard/hetzner-limits-admin.js
+          node --check public/dashboard/hetzner-limits-admin.js
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
           node --check survey-dashboard.js
+          node --check hetzner-account-dashboard.js
+          node --check hetzner-account-dashboard.js
           node --check customer-api.js
           node --check reseller-api-extensions.js
           node --check external-payments.js
@@ -140,6 +145,28 @@ jobs:
 
           echo '=== LIVE DASHBOARD READ-ONLY SMOKE ==='
           DASHBOARD_SMOKE_BASE_URL=http://127.0.0.1:3000 node scripts/smoke-dashboard-live.js
+
+          echo '=== HETZNER LIMITS DASHBOARD SMOKE ==='
+          node - <<'NODE'
+          require('dotenv').config();
+          const usage = require('./hetzner-account-dashboard');
+          (async () => {
+            const data = await usage.getHetznerAccountUsage({ force: true });
+            const primary = data.resources.find(x => x.key === 'primary_ips');
+            const servers = data.resources.find(x => x.key === 'servers');
+            if (!primary || !servers) throw new Error('HETZNER_LIMITS_RESOURCE_MISSING');
+            if (!Number.isFinite(primary.used) || !Number.isFinite(servers.used)) throw new Error('HETZNER_LIMITS_USAGE_INVALID');
+            if (!data.api_rate_limit?.limit_per_hour) throw new Error('HETZNER_RATE_LIMIT_MISSING');
+            console.log('HETZNER_LIMITS_DASHBOARD_OK', {
+              servers: servers.used,
+              primary_ips: primary.used,
+              ipv4: data.primary_ips.ipv4,
+              ipv6: data.primary_ips.ipv6,
+              api_limit: data.api_rate_limit.limit_per_hour,
+              api_remaining: data.api_rate_limit.remaining
+            });
+          })().catch(error => { console.error(error?.stack || error); process.exit(1); });
+          NODE
 
           echo '=== SURVEY DASHBOARD SMOKE ==='
           node - <<'NODE'
