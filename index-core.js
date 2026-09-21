@@ -663,12 +663,23 @@ function formatRemainingTime(lastBilledAt, duration) {
 function telegramPlainFallbackText(text) {
     return String(text ?? '')
         .replace(/<[^>]+>/g, '')
-        .replaceAll(String.fromCharCode(92), '');
+        .replaceAll(String.fromCharCode(92), '')
+        .replaceAll('*', '');
 }
 
 async function sendMessage(chatId, text, options) {
+    let effectiveText = text;
+    let effectiveOptions = options;
+
+    if (options?.parse_mode === 'MarkdownV2' && String(text || '').includes('مدیریت سرور:')) {
+        effectiveText = telegramPlainFallbackText(text);
+        effectiveOptions = { ...options };
+        delete effectiveOptions.parse_mode;
+        console.log('[MANAGE_PLAIN_TEXT_SEND]', { chat_id: String(chatId) });
+    }
+
     try {
-        return await bot.sendMessage(chatId, text, options);
+        return await bot.sendMessage(chatId, effectiveText, effectiveOptions);
     } catch (error) {
         console.error(`Error sending message to ${chatId}:`, error.message);
         if (error.response && error.response.body) {
@@ -1564,7 +1575,12 @@ async function handleBuildSnapshotConfirm(chatId, userId, dcConfig, snapshotId, 
 
 // --- Main Callback Query Handler ---
 bot.on('callback_query', async q => {
-  await bot.answerCallbackQuery(q.id).catch(error => {
+  console.log('[CALLBACK_QUERY_IN]', {
+    user_id: String(q.from?.id || ''),
+    callback: String(q.data || '')
+  });
+
+  bot.answerCallbackQuery(q.id).catch(error => {
     console.warn('[CALLBACK_ACK_FAILED]', {
       user_id: String(q.from?.id || ''),
       callback: String(q.data || ''),
