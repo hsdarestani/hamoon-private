@@ -1,6 +1,7 @@
 'use strict';
 
 const cloud = require('../cloud-api');
+const deliveryCharge = require('../delivery-charge');
 
 const PENDING_STATUSES = new Set([
   'provisioning',
@@ -18,6 +19,7 @@ const MIGRATION_TABLES = [
   'hetzner_traffic_alerts',
   'hetzner_traffic_billing',
   'key_pairs',
+  'pending_delivery_charges',
   'server_display_names',
   'server_ip_history',
   'test_servers'
@@ -98,6 +100,7 @@ async function migrateServerIdAtomic({
   if (!db?.pool?.getConnection) {
     throw Object.assign(new Error('DB_POOL_UNAVAILABLE'), { code: 'DB_POOL_UNAVAILABLE' });
   }
+  await deliveryCharge.ensureSchema(db.pool);
   const conn = await db.pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -165,6 +168,19 @@ async function migrateServerIdAtomic({
     if (purchaseUpdate.affectedRows !== 1) {
       throw Object.assign(new Error('PURCHASE_MIGRATION_CONFLICT'), { code: 'PURCHASE_MIGRATION_CONFLICT' });
     }
+
+    const deliverySettlement = await deliveryCharge.settlePendingOnDelivery(conn, {
+      telegramId,
+      serverId: String(newServerId),
+      datacenter
+    });
+    console.log('[HETZNER_LOCATION_FALLBACK_DELIVERY_CHARGE]', {
+      user_id: String(telegramId),
+      old_server_id: String(oldServerId),
+      new_server_id: String(newServerId),
+      settlement: deliverySettlement?.status || 'unknown',
+      charged: Number(deliverySettlement?.charged || 0)
+    });
 
     // The replacement password has already been stored under newServerId.
     await conn.query(
