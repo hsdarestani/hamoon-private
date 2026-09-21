@@ -7,6 +7,7 @@ on:
     paths:
       - 'public/dashboard/**'
       - 'dashboard-api.js'
+      - 'survey-dashboard.js'
       - 'customer-api.js'
       - 'reseller-api-extensions.js'
       - 'external-payments.js'
@@ -53,8 +54,12 @@ jobs:
           node --check public/dashboard/app.js
           node --check public/dashboard/runtime-fix.js
           node --check public/dashboard/dashboard-v2.js
+          node --check public/dashboard/survey-admin.js
+          node --check public/dashboard/survey-admin.js
           node --check public/dashboard/reseller-api-admin.js
           node --check dashboard-api.js
+          node --check survey-dashboard.js
+          node --check survey-dashboard.js
           node --check customer-api.js
           node --check reseller-api-extensions.js
           node --check external-payments.js
