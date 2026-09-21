@@ -44,9 +44,6 @@ jobs:
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check loyalty-history-bootstrap.js
-          node --check services/loyalty-club.js
-          node --check loyalty-club-bootstrap.js
-          node --check loyalty-history-bootstrap.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
@@ -55,6 +52,8 @@ jobs:
           if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) {
             throw new Error('MANAGE_DB_FIRST_NOT_COMPOSED');
           }
+          if (!runtime.includes("case '🏆 باشگاه هامون'")) throw new Error('LOYALTY_MENU_NOT_COMPOSED');
+          if (!runtime.includes('[LOYALTY_CLUB_OPEN_OK]')) throw new Error('LOYALTY_RESPONSIVE_HANDLER_NOT_COMPOSED');
           new Function(runtime);
           console.log('MANAGE_DB_FIRST_COMPOSED=yes');
           NODE
@@ -87,12 +86,17 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check survey-service.js
           node --check survey-bootstrap.js
+          node --check services/loyalty-club.js
+          node --check loyalty-club-bootstrap.js
+          node --check loyalty-history-bootstrap.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
           const { applyPatches } = require('./runtime-bootstrap');
           const runtime = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) process.exit(1);
+          if (!runtime.includes("case '🏆 باشگاه هامون'")) process.exit(1);
+          if (!runtime.includes('[LOYALTY_CLUB_OPEN_OK]')) process.exit(1);
           new Function(runtime);
           console.log('PRODUCTION_MANAGE_DB_FIRST=yes');
           NODE
