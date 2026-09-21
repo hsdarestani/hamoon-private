@@ -28,19 +28,49 @@ function applyLoyaltyClubPatches(coreSource) {
     source,
     "case '👛 کیف پول': {",
     `case '🏆 باشگاه هامون': {
+  const loyaltyStartedAt = Date.now();
+  const loading = await sendMessage(effectiveChatId, '⏳ در حال آماده‌سازی اطلاعات باشگاه هامون...');
   try {
     const summary = await loyaltyClub.getSummary(effectiveUserId);
-    return sendMessage(effectiveChatId, loyaltyClub.renderSummary(summary), {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔄 بروزرسانی', callback_data: makeShortCb(effectiveUserId, { action: 'LOYALTY_REFRESH' }) }],
-          [{ text: 'ℹ️ قوانین و نحوه کار', url: LOYALTY_PUBLIC_URL }]
-        ]
-      }
+    const text = loyaltyClub.renderSummary(summary);
+    const replyMarkup = {
+      inline_keyboard: [
+        [{ text: '🔄 بروزرسانی', callback_data: makeShortCb(effectiveUserId, { action: 'LOYALTY_REFRESH' }) }],
+        [{ text: 'ℹ️ قوانین و نحوه کار', url: LOYALTY_PUBLIC_URL }]
+      ]
+    };
+    console.log('[LOYALTY_CLUB_OPEN_OK]', {
+      user_id: String(effectiveUserId),
+      duration_ms: Date.now() - loyaltyStartedAt
     });
+    if (loading?.message_id) {
+      return bot.editMessageText(text, {
+        chat_id: effectiveChatId,
+        message_id: loading.message_id,
+        reply_markup: replyMarkup
+      }).catch(() => sendMessage(effectiveChatId, text, { reply_markup: replyMarkup }));
+    }
+    return sendMessage(effectiveChatId, text, { reply_markup: replyMarkup });
   } catch (error) {
-    console.error('[LOYALTY_CLUB] summary failed:', error.message || error);
-    return sendMessage(effectiveChatId, '❌ اطلاعات باشگاه فعلاً در دسترس نیست. لطفاً کمی بعد دوباره امتحان کنید.');
+    console.error('[LOYALTY_CLUB_OPEN_FAILED]', {
+      user_id: String(effectiveUserId),
+      duration_ms: Date.now() - loyaltyStartedAt,
+      code: error?.code || null,
+      message: error?.message || String(error)
+    });
+    const fallback = {
+      reply_markup: {
+        inline_keyboard: [[{ text: 'ℹ️ قوانین باشگاه هامون', url: LOYALTY_PUBLIC_URL }]]
+      }
+    };
+    if (loading?.message_id) {
+      return bot.editMessageText('❌ اطلاعات باشگاه فعلاً در دسترس نیست. لطفاً دوباره امتحان کنید.', {
+        chat_id: effectiveChatId,
+        message_id: loading.message_id,
+        ...fallback
+      }).catch(() => sendMessage(effectiveChatId, '❌ اطلاعات باشگاه فعلاً در دسترس نیست. لطفاً دوباره امتحان کنید.', fallback));
+    }
+    return sendMessage(effectiveChatId, '❌ اطلاعات باشگاه فعلاً در دسترس نیست. لطفاً دوباره امتحان کنید.', fallback);
   }
 }
 
