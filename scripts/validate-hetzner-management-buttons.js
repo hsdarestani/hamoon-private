@@ -51,6 +51,8 @@ const required = [
   "'[TELEGRAM_PARSE_FALLBACK]'",
   "'[CALLBACK_ACK_FAILED]'",
   "'[MANAGE_CALLBACK_RECEIVED]'",
+  "'[CALLBACK_QUERY_IN]'",
+  "'[MANAGE_PLAIN_TEXT_SEND]'",
 ];
 
 for (const marker of required) {
