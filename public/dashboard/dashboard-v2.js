@@ -270,6 +270,7 @@
       if (section === 'servers') return await servers();
       if (section === 'wallet') return await wallet();
       if (section === 'purchases') return await purchases();
+      if (section === 'survey') return await surveyResults();
       if (section === 'datacenters') return await dcs();
       if (section === 'api') return await apiClients();
       if (section === 'logs') return await logs();
