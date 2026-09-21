@@ -136,6 +136,9 @@
             <div><span>کل Primary IP</span><b>${hFmt(primary.total)}</b></div>
             <div><span>IPv4</span><b>${primary.ipv4 == null ? '—' : hFmt(primary.ipv4)}</b></div>
             <div><span>IPv6</span><b>${primary.ipv6 == null ? '—' : hFmt(primary.ipv6)}</b></div>
+            <div><span>IP متصل به Server</span><b>${hFmt(primary.assigned)}</b></div>
+            <div><span>IP آزاد / Unassigned</span><b>${hFmt(primary.unassigned)}</b></div>
+            <div><span>Auto-delete فعال</span><b>${hFmt(primary.auto_delete)}</b></div>
             <div><span>قاعده سقف</span><b class="hz-formula">${esc(primary.formula || '')}</b></div>
             <div><span>Server limit ثبت‌شده</span><b>${primary.server_limit == null ? 'ثبت نشده' : hFmt(primary.server_limit)}</b></div>
           </div>
