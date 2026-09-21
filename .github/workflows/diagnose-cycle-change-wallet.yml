@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           echo '=== RECENT CYCLE LOGS ==='
-          pm2 logs hamoonbot --nostream --lines 6000 2>&1 | grep -E 'BILLING_CYCLE_CHANGE_FAILED|BILLING_CYCLE_CHANGE_SUCCESS|INSUFFICIENT_WALLET' | tail -300 || true
+          pm2 logs hamoonbot --nostream --lines 8000 2>&1 | grep -E -A10 -B2 'BILLING_CYCLE_CHANGE_FAILED|BILLING_CYCLE_CHANGE_SUCCESS|INSUFFICIENT_WALLET' | tail -800 || true
 
           echo '=== RECENT DB STATE ==='
           node - <<'NODE'
@@ -56,10 +56,11 @@ jobs:
               LIMIT 100
             `).catch(()=>[[]]);
             const [pendingUsers]=await db.pool.query(`
-              SELECT DISTINCT telegram_id
+              SELECT telegram_id, MAX(updated_at) AS last_updated
               FROM pending_delivery_charges
               WHERE status='pending'
-              ORDER BY updated_at DESC
+              GROUP BY telegram_id
+              ORDER BY last_updated DESC
               LIMIT 100
             `);
             const ids=[...new Set([...users,...pendingUsers].map(r=>String(r.telegram_id)))];
