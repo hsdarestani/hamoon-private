@@ -40,6 +40,9 @@ jobs:
           echo '=== RECENT CYCLE LOGS ==='
           pm2 logs hamoonbot --nostream --lines 8000 2>&1 | grep -E -A10 -B2 'BILLING_CYCLE_CHANGE_FAILED|BILLING_CYCLE_CHANGE_SUCCESS|INSUFFICIENT_WALLET' | tail -800 || true
 
+          echo '=== DELIVERY RECONCILE LOGS ==='
+          pm2 logs hamoonbot --nostream --lines 3000 2>&1 | grep -E -A8 -B2 'DELIVERY_CHARGE_RECONCILE|HETZNER_LOCATION_FALLBACK_DELIVERY_CHARGE|BILLING_CYCLE_INSUFFICIENT' | tail -500 || true
+
           echo '=== RECENT DB STATE ==='
           node - <<'NODE'
           require('dotenv').config();
@@ -98,6 +101,24 @@ jobs:
                 }));
               }
             }
+            const [stale]=await db.pool.query(`
+              SELECT pdc.server_id,pdc.telegram_id,pdc.datacenter,pdc.amount,pdc.created_at,
+                     p.server_id purchase_server_id,p.status purchase_status,p.delivered_at
+              FROM pending_delivery_charges pdc
+              LEFT JOIN purchases p
+                ON p.telegram_id=pdc.telegram_id
+               AND p.server_id=pdc.server_id
+               AND p.datacenter=pdc.datacenter
+              WHERE pdc.status='pending'
+                AND (p.server_id IS NULL OR p.delivered_at IS NOT NULL OR LOWER(COALESCE(p.status,'')) IN ('deleted','deletion_pending'))
+              ORDER BY pdc.created_at ASC
+              LIMIT 200
+            `);
+            console.log('STALE_PENDING_AFTER_RECONCILE='+JSON.stringify(stale.map(x=>({
+              server_id:String(x.server_id),telegram_id:String(x.telegram_id),datacenter:x.datacenter,
+              amount:Number(x.amount||0),created_at:x.created_at,purchase_server_id:x.purchase_server_id?String(x.purchase_server_id):null,
+              purchase_status:x.purchase_status,delivered_at:x.delivered_at
+            }))));
             await db.pool.end();
           })().catch(async e=>{console.error('DIAG_FAILED='+String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
           NODE
