@@ -113,6 +113,32 @@ function hetznerFamily(name) {
   return String(name || '').replace(/[0-9].*$/, '').toUpperCase() || 'OTHER';
 }
 
+function dedicatedCorePlansAllowed(config = {}) {
+  const raw = config.HETZNER_ALLOW_DEDICATED_CORE ?? process.env.HETZNER_ALLOW_DEDICATED_CORE;
+  return String(raw || '').toLowerCase() === 'true';
+}
+
+function isDedicatedCoreType(serverType = {}) {
+  const cpuType = String(serverType.cpu_type || '').trim().toLowerCase();
+  const family = hetznerFamily(serverType.name || serverType.id || '');
+  return cpuType === 'dedicated' || family === 'CCX';
+}
+
+function isDedicatedCoreLimitError(err) {
+  const status = Number(err?.response?.status || err?.status || 0);
+  const payload = err?.response?.data || err?.data || {};
+  const code = String(payload?.error?.code || err?.code || '').toLowerCase();
+  const message = String(payload?.error?.message || err?.message || '').toLowerCase();
+  return status === 403 && code === 'resource_limit_exceeded' && message.includes('dedicated core');
+}
+
+function dedicatedCoreLimitError(originalError) {
+  const err = new Error('ظرفیت پلن‌های Dedicated Core حساب Hetzner فعلاً تکمیل است. لطفاً یکی از پلن‌های Shared Core را انتخاب کنید.');
+  err.code = 'HETZNER_DEDICATED_CORE_LIMIT_EXCEEDED';
+  err.cause = originalError;
+  return err;
+}
+
 function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const eurToToman = Number(process.env.HETZNER_EUR_TO_TOMAN || process.env.EUR_TO_TOMAN || 70000);
   const baseMultiplier = Number(process.env.HETZNER_PRICE_MULTIPLIER || 1);
@@ -121,7 +147,15 @@ function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
   const minHourly = Number(process.env.HETZNER_MIN_HOURLY_TOMAN || 1);
   const minMonthly = Number(process.env.HETZNER_MIN_MONTHLY_TOMAN || 1);
   return (serverTypes || [])
-    .filter(st => st && st.name && !st.deprecated && (st.deprecation == null) && hasConfiguredLocationAvailability(st, config) && hasConfiguredLocationPrice(st, config))
+    .filter(st =>
+      st &&
+      st.name &&
+      !st.deprecated &&
+      (st.deprecation == null) &&
+      (dedicatedCorePlansAllowed(config) || !isDedicatedCoreType(st)) &&
+      hasConfiguredLocationAvailability(st, config) &&
+      hasConfiguredLocationPrice(st, config)
+    )
     .map(st => {
       const price = firstPrice(st, config);
       const hourlyEur = Number(price?.price_hourly?.gross || price?.price_hourly?.net || 0);
@@ -145,7 +179,9 @@ function normalizeHetznerServerTypes(serverTypes = [], config = {}) {
 }
 
 function normalizeStaticHetznerPlans(config = {}) {
-  return (config.flavors || []).map(f => ({
+  return (config.flavors || [])
+    .filter(f => dedicatedCorePlansAllowed(config) || !isDedicatedCoreType({ name: f.hetzner_type || f.id, cpu_type: f.cpu_type }))
+    .map(f => ({
     id: String(f.hetzner_type || f.id).toLowerCase(),
     hetzner_type: String(f.hetzner_type || f.id).toLowerCase(),
     server_type: String(f.hetzner_type || f.id).toLowerCase(),
@@ -485,6 +521,7 @@ for (const locCandidate of getHetznerFallbackLocations(dcConfig, loc)) {
     return server;
   } catch (e) {
     console.error('🚨 [Hetzner createServer error]', e.response?.status, e.response?.data || e.message);
+    if (isDedicatedCoreLimitError(e)) throw dedicatedCoreLimitError(e);
     if (!isHetznerPlacementUnavailableError(e)) throw e;
     lastPlacementError = e;
   }
