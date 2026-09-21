@@ -217,6 +217,145 @@ async function settlePendingOnDelivery(conn, { telegramId, serverId, datacenter 
   return { status: 'charged', charged: charge, newWallet: wallet - charge };
 }
 
+async function reconcileStalePending(pool, { limit = 1000, orphanCancelHours = 24 } = {}) {
+  await ensureSchema(pool);
+  const conn = await pool.getConnection();
+  const summary = { scanned: 0, migrated: 0, settled: 0, cancelled: 0, untouched: 0, errors: 0 };
+
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute(
+      `SELECT *
+         FROM pending_delivery_charges
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT ? FOR UPDATE`,
+      [Math.max(1, Math.min(5000, Number(limit || 1000)))]
+    );
+
+    for (const row of rows) {
+      summary.scanned += 1;
+      try {
+        const [exactRows] = await conn.execute(
+          `SELECT telegram_id,server_id,datacenter,status,delivered_at,created_at
+             FROM purchases
+            WHERE telegram_id=? AND server_id=? AND datacenter=?
+            LIMIT 1`,
+          [String(row.telegram_id), String(row.server_id), String(row.datacenter)]
+        );
+
+        let purchase = exactRows[0] || null;
+
+        if (!purchase) {
+          const [candidates] = await conn.execute(
+            `SELECT telegram_id,server_id,datacenter,status,delivered_at,created_at,
+                    ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) AS created_delta
+               FROM purchases
+              WHERE telegram_id=?
+                AND datacenter=?
+                AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 3
+              ORDER BY created_delta ASC, updated_at DESC
+              LIMIT 2`,
+            [
+              row.created_at,
+              String(row.telegram_id),
+              String(row.datacenter),
+              row.created_at
+            ]
+          );
+
+          if (candidates.length === 1) {
+            purchase = candidates[0];
+            const targetServerId = String(purchase.server_id);
+            const [targetRows] = await conn.execute(
+              'SELECT status FROM pending_delivery_charges WHERE server_id=? LIMIT 1',
+              [targetServerId]
+            );
+
+            if (!targetRows.length) {
+              await conn.execute(
+                `UPDATE pending_delivery_charges
+                    SET server_id=?, updated_at=NOW()
+                  WHERE server_id=? AND status='pending'`,
+                [targetServerId, String(row.server_id)]
+              );
+              row.server_id = targetServerId;
+              summary.migrated += 1;
+            } else {
+              await conn.execute(
+                `UPDATE pending_delivery_charges
+                    SET status='cancelled', cancel_reason='duplicate_after_server_id_migration',
+                        cancelled_at=NOW(), updated_at=NOW()
+                  WHERE server_id=? AND status='pending'`,
+                [String(row.server_id)]
+              );
+              summary.cancelled += 1;
+              continue;
+            }
+          }
+        }
+
+        if (purchase?.delivered_at) {
+          const settled = await settlePendingOnDelivery(conn, {
+            telegramId: row.telegram_id,
+            serverId: row.server_id,
+            datacenter: row.datacenter
+          });
+          if (settled?.status === 'charged') summary.settled += 1;
+          else summary.untouched += 1;
+          continue;
+        }
+
+        const purchaseStatus = String(purchase?.status || '').toLowerCase();
+        if (purchase && ['deleted', 'deletion_pending'].includes(purchaseStatus)) {
+          await conn.execute(
+            `UPDATE pending_delivery_charges
+                SET status='cancelled', cancel_reason='purchase_not_billable',
+                    cancelled_at=NOW(), updated_at=NOW()
+              WHERE server_id=? AND status='pending'`,
+            [String(row.server_id)]
+          );
+          summary.cancelled += 1;
+          continue;
+        }
+
+        if (!purchase) {
+          const ageMs = Date.now() - new Date(row.created_at).getTime();
+          const maxAgeMs = Math.max(1, Number(orphanCancelHours || 24)) * 3600000;
+          if (Number.isFinite(ageMs) && ageMs >= maxAgeMs) {
+            await conn.execute(
+              `UPDATE pending_delivery_charges
+                  SET status='cancelled', cancel_reason='orphan_without_purchase',
+                      cancelled_at=NOW(), updated_at=NOW()
+                WHERE server_id=? AND status='pending'`,
+              [String(row.server_id)]
+            );
+            summary.cancelled += 1;
+            continue;
+          }
+        }
+
+        summary.untouched += 1;
+      } catch (error) {
+        summary.errors += 1;
+        console.error('[DELIVERY_CHARGE_RECONCILE_ITEM_FAILED]', {
+          server_id: String(row.server_id),
+          telegram_id: String(row.telegram_id),
+          message: error?.message || String(error)
+        });
+      }
+    }
+
+    await conn.commit();
+    return summary;
+  } catch (error) {
+    await conn.rollback().catch(() => {});
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
 async function getPendingTotal(pool, telegramId, excludeServerId = null) {
   await ensureSchema(pool);
   const conn = await pool.getConnection();
@@ -232,6 +371,7 @@ module.exports = {
   reserve,
   cancel,
   settlePendingOnDelivery,
+  reconcileStalePending,
   getPendingTotal,
   pendingTotalForUser
 };
