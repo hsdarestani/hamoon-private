@@ -440,8 +440,16 @@ async function claimInvite(userId) {
     );
     return result.affectedRows > 0;
   } catch (error) {
-    if (error?.code === 'ER_DUP_ENTRY') return false;
-    throw error;
+    if (error?.code !== 'ER_DUP_ENTRY') throw error;
+    const [retry] = await db.pool.execute(
+      `UPDATE survey_invites
+       SET attempted_at = CURRENT_TIMESTAMP, error_text = NULL
+       WHERE telegram_id = ? AND survey_version = ?
+         AND invite_status = 'sending'
+         AND attempted_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 10 MINUTE)`,
+      [String(userId), SURVEY_VERSION]
+    );
+    return retry.affectedRows > 0;
   }
 }
 
@@ -484,6 +492,7 @@ async function broadcastInvites() {
        LEFT JOIN survey_invites i
          ON i.telegram_id = u.telegram_id AND i.survey_version = ?
        WHERE i.telegram_id IS NULL
+          OR (i.invite_status = 'sending' AND i.attempted_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 10 MINUTE))
        ORDER BY u.created_at ASC
        LIMIT ${BROADCAST_BATCH_SIZE}`,
       [SURVEY_VERSION]
@@ -511,15 +520,18 @@ async function broadcastInvites() {
 function startBroadcast() {
   if (broadcastScheduled) return false;
   broadcastScheduled = true;
-  const timer = setTimeout(() => {
-    broadcastInvites().catch(error => {
-      console.error('[SURVEY_BROADCAST_FAILED]', {
-        version: SURVEY_VERSION,
-        message: error?.message || String(error)
-      });
+
+  const run = () => broadcastInvites().catch(error => {
+    console.error('[SURVEY_BROADCAST_FAILED]', {
+      version: SURVEY_VERSION,
+      message: error?.message || String(error)
     });
-  }, 8000);
+  });
+
+  const timer = setTimeout(run, 8000);
   timer.unref();
+  const interval = setInterval(run, 15 * 60 * 1000);
+  interval.unref();
   return true;
 }
 
