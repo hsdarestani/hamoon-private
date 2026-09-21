@@ -349,7 +349,17 @@ if (!token) {
     process.exit(1);
 }
 
-const bot = new TelegramBot(token, { polling: true });
+const bot = new TelegramBot(token, {
+  polling: {
+    params: {
+      // Telegram reuses the previous allowed_updates value when this parameter
+      // is omitted. Explicitly reset it on every start so callback_query
+      // updates can never be silently excluded by an older polling session.
+      allowed_updates: JSON.stringify([])
+    }
+  }
+});
+console.log('[POLLING_ALLOWED_UPDATES_RESET]', { callback_query: true });
 
 // Global state to manage user interactions and admin actions
 const state = {};
