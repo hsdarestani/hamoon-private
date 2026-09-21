@@ -253,10 +253,13 @@ async function recordEvent({
 async function syncPurchases(telegramId) {
   await ensureProfile(telegramId);
   const [rows] = await pool.execute(
-    `SELECT server_id, datacenter, amount, duration, status, created_at
-       FROM purchases
-      WHERE telegram_id = ?
-      ORDER BY created_at ASC`,
+    `SELECT p.server_id, p.datacenter, p.amount, p.duration, p.status, p.created_at
+       FROM purchases p
+       LEFT JOIN loyalty_events e
+         ON e.event_key = CONCAT('purchase:', p.server_id)
+      WHERE p.telegram_id = ?
+        AND e.id IS NULL
+      ORDER BY p.created_at ASC`,
     [String(telegramId)]
   );
   let addedXp = 0;
@@ -275,7 +278,7 @@ async function syncPurchases(telegramId) {
         server_id: purchase.server_id,
         datacenter: purchase.datacenter,
         duration: purchase.duration,
-        source: 'purchase_backfill_v2'
+        source: 'purchase_backfill_v3_incremental'
       }
     });
     if (inserted) addedXp += xp;
@@ -287,13 +290,16 @@ async function syncHistoricalRenewals(telegramId) {
   const launch = new Date(LAUNCH_AT);
   if (Number.isNaN(launch.getTime())) return { renewals: 0, addedXp: 0 };
   const [rows] = await pool.execute(
-    `SELECT id, amount, description, timestamp
-       FROM wallet_logs
-      WHERE telegram_id = ?
-        AND amount < 0
-        AND LOWER(type) IN ('billing','upgrade','server_upgrade')
-        AND timestamp < ?
-      ORDER BY timestamp ASC`,
+    `SELECT w.id, w.amount, w.description, w.timestamp
+       FROM wallet_logs w
+       LEFT JOIN loyalty_events e
+         ON e.event_key = CONCAT('history:wallet:', w.id)
+      WHERE w.telegram_id = ?
+        AND w.amount < 0
+        AND LOWER(w.type) IN ('billing','upgrade','server_upgrade')
+        AND w.timestamp < ?
+        AND e.id IS NULL
+      ORDER BY w.timestamp ASC`,
     [String(telegramId), launch]
   );
   let addedXp = 0;
@@ -308,7 +314,7 @@ async function syncHistoricalRenewals(telegramId) {
       xpDelta: xp,
       spendAmount: amount,
       occurredAt: row.timestamp,
-      metadata: { source: 'billing_history_backfill_v1', description: row.description || null }
+      metadata: { source: 'billing_history_backfill_v2_incremental', description: row.description || null }
     });
     if (inserted) addedXp += xp;
   }
@@ -682,8 +688,14 @@ async function refundRedemption({ telegramId, referenceId }) {
 }
 
 async function getSummary(telegramId) {
-  await syncHistory(telegramId);
   await ensureProfile(telegramId);
+  await syncHistory(telegramId).catch((error) => {
+    console.error('[LOYALTY_SUMMARY_HISTORY_SYNC_FAILED]', {
+      user_id: String(telegramId),
+      code: error?.code || null,
+      message: error?.message || String(error)
+    });
+  });
 
   const [[profile]] = await pool.execute(
     `SELECT telegram_id, xp, lifetime_eligible_spend, reward_balance, updated_at
