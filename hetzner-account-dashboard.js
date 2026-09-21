@@ -72,9 +72,15 @@ async function fetchAllServers(http) {
   return { servers, headers: first.headers || {} };
 }
 
-async function fetchPrimaryIpTypeTotal(http, type) {
-  const response = await request(http, `/primary_ips?per_page=1&type=${encodeURIComponent(type)}`);
-  return Number(response.data?.meta?.pagination?.total_entries || 0);
+async function fetchAllPrimaryIps(http) {
+  const first = await request(http, '/primary_ips?per_page=50&page=1');
+  const primaryIps = [...(first.data?.primary_ips || [])];
+  const lastPage = Number(first.data?.meta?.pagination?.last_page || 1);
+  for (let page = 2; page <= lastPage; page += 1) {
+    const response = await request(http, `/primary_ips?per_page=50&page=${page}`);
+    primaryIps.push(...(response.data?.primary_ips || []));
+  }
+  return { primaryIps, headers: first.headers || {} };
 }
 
 function serverCpuStats(servers) {
@@ -115,7 +121,7 @@ async function getHetznerAccountUsage({ force = false } = {}) {
 
   const [
     serverResult,
-    primaryResult,
+    primaryIpResult,
     floatingResult,
     volumeResult,
     networkResult,
@@ -125,7 +131,7 @@ async function getHetznerAccountUsage({ force = false } = {}) {
     sshKeyResult
   ] = await Promise.all([
     fetchAllServers(http),
-    totalFor(http, '/primary_ips'),
+    fetchAllPrimaryIps(http),
     totalFor(http, '/floating_ips'),
     totalFor(http, '/volumes'),
     totalFor(http, '/networks'),
@@ -135,17 +141,12 @@ async function getHetznerAccountUsage({ force = false } = {}) {
     totalFor(http, '/ssh_keys')
   ]);
 
-  let ipv4 = null;
-  let ipv6 = null;
-  try {
-    [ipv4, ipv6] = await Promise.all([
-      fetchPrimaryIpTypeTotal(http, 'ipv4'),
-      fetchPrimaryIpTypeTotal(http, 'ipv6')
-    ]);
-  } catch (_) {
-    ipv4 = null;
-    ipv6 = null;
-  }
+  const primaryIps = primaryIpResult.primaryIps || [];
+  const ipv4 = primaryIps.filter(ip => String(ip?.type || '').toLowerCase() === 'ipv4').length;
+  const ipv6 = primaryIps.filter(ip => String(ip?.type || '').toLowerCase() === 'ipv6').length;
+  const assignedPrimaryIps = primaryIps.filter(ip => ip?.assignee_id != null).length;
+  const unassignedPrimaryIps = primaryIps.length - assignedPrimaryIps;
+  const autoDeletePrimaryIps = primaryIps.filter(ip => ip?.auto_delete === true).length;
 
   const servers = serverResult.servers || [];
   const cpu = serverCpuStats(servers);
@@ -159,7 +160,8 @@ async function getHetznerAccountUsage({ force = false } = {}) {
   const loadBalancerLimit = envNumber('HETZNER_LOAD_BALANCER_LIMIT');
   const placementLimit = envNumber('HETZNER_PLACEMENT_GROUP_LIMIT');
 
-  const rateHeaders = serverResult.headers || {};
+  const rateProbe = await totalFor(http, '/servers');
+  const rateHeaders = rateProbe.headers || serverResult.headers || {};
   const apiRateLimit = Number(rateHeaders['ratelimit-limit'] || 0) || null;
   const apiRateRemaining = Number(rateHeaders['ratelimit-remaining'] || 0);
   const apiRateReset = Number(rateHeaders['ratelimit-reset'] || 0) || null;
@@ -176,7 +178,7 @@ async function getHetznerAccountUsage({ force = false } = {}) {
     resourceRow({
       key: 'primary_ips',
       label: 'Primary IPs',
-      used: primaryResult.total,
+      used: primaryIps.length,
       limit: primaryIpLimit,
       source: '۲ × Server limit (قاعده رسمی Hetzner)',
       note: serverLimit == null ? 'برای محاسبه عدد دقیق، Server limit پروژه باید در config ثبت شود.' : ''
@@ -226,9 +228,12 @@ async function getHetznerAccountUsage({ force = false } = {}) {
       dedicated_cores: cpu.dedicatedCores
     },
     primary_ips: {
-      total: primaryResult.total,
+      total: primaryIps.length,
       ipv4,
       ipv6,
+      assigned: assignedPrimaryIps,
+      unassigned: unassignedPrimaryIps,
+      auto_delete: autoDeletePrimaryIps,
       derived_limit: primaryIpLimit,
       server_limit: serverLimit,
       formula: 'Primary IP limit = Server limit × 2'
