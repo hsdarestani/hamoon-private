@@ -155,7 +155,38 @@ async function sendLowBalanceAlertIfNeeded(userId, chatId, remainingToman, reaso
   await sendMessage(chatId, `⚠️ موجودی قابل‌استفاده شما برای ترافیک به کمتر از ۱۰۰٬۰۰۰ تومان رسیده.\n` +
                             `برای جلوگیری از اختلال، لطفاً «💰 افزایش اعتبار» را انجام دهید.`);
 }
+function makeDirectManageCb(payload) {
+  if (!payload || payload.action !== 'M') return null;
+  const dcKey = String(payload.dcKey || '');
+  const serverId = String(payload.serverId || '');
+  if (!dcKey || !serverId) return null;
+
+  const direct = `MS:${encodeURIComponent(dcKey)}:${encodeURIComponent(serverId)}`;
+  return Buffer.byteLength(direct, 'utf8') <= 64 ? direct : null;
+}
+
+function parseDirectManageCb(data) {
+  const raw = String(data || '');
+  if (!raw.startsWith('MS:')) return null;
+
+  const body = raw.slice(3);
+  const separator = body.indexOf(':');
+  if (separator <= 0 || separator >= body.length - 1) return null;
+
+  try {
+    const dcKey = decodeURIComponent(body.slice(0, separator));
+    const serverId = decodeURIComponent(body.slice(separator + 1));
+    if (!dcKey || !serverId) return null;
+    return { action: 'M', dcKey, serverId };
+  } catch (_) {
+    return null;
+  }
+}
+
 function makeShortCb(uid, payload) {
+  const directManage = makeDirectManageCb(payload);
+  if (directManage) return directManage;
+
   ensureUserState(uid);
   const token = 'C' + crypto.randomBytes(3).toString('hex'); // مثل C8f3a1b
   state[uid].cb[token] = payload;
@@ -1517,7 +1548,16 @@ bot.on('callback_query', async q => {
 
   const data = q.data;
 
-  const payload = readShortCb(effectiveUserId, data);
+  const directManagePayload = parseDirectManageCb(data);
+  const payload = directManagePayload || readShortCb(effectiveUserId, data);
+
+  if (!payload && /^C[0-9a-f]{6}$/i.test(String(data || ''))) {
+    console.warn('[STALE_CALLBACK]', { user_id: effectiveUserId, callback: data });
+    return sendMessage(
+      effectiveChatId,
+      '⚠️ این دکمه مربوط به منوی قدیمی است و بعد از به‌روزرسانی ربات منقضی شده. لطفاً دوباره «⚙️ مدیریت سرورها» را باز کنید.'
+    );
+  }
 if (payload && payload.action === 'PROJECT_SUM') {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
   if (!requireCapabilityOrReply(effectiveChatId, dc, 'projectTraffic')) return;
