@@ -24,6 +24,7 @@ const { applyLoyaltyHistoryPatches } = require('./loyalty-history-bootstrap');
 const { applyPurchaseConfirmationSafetyPatches } = require('./purchase-confirmation-safety-bootstrap');
 const { applyAdminUnlimitedFreeTestPatches } = require('./admin-free-test-bootstrap');
 const { applyServerPowerControlPatches } = require('./server-power-controls-bootstrap');
+const { applySurveyPatches } = require('./survey-bootstrap');
 const { installServerDeletionConsistency } = require('./server-deletion-consistency-bootstrap');
 const { scheduleDeletionPendingReconcile } = require('./services/server-deletion-safety');
 const { installStrictCheckHostFetch } = require('./services/check-host-strict-fetch');
@@ -189,7 +190,7 @@ function applyPatches(coreSource) {
   );
   const withPowerControls = applyServerPowerControlPatches(baseline);
   const patched = applyBillingRenewalTickPatches(applyResumeTransactionalPatches(withPowerControls));
-  return applyAdminUnlimitedFreeTestPatches(patched);
+  return applySurveyPatches(applyAdminUnlimitedFreeTestPatches(patched));
 }
 
 function run() {
