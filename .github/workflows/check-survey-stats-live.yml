@@ -1,0 +1,55 @@
+name: Check Survey Stats Live
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/check-survey-stats-live.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Read live survey stats
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          node - <<'NODE'
+          require('dotenv').config();
+          const mysql = require('mysql2/promise');
+          (async () => {
+            const conn = await mysql.createConnection({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'root',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'hamooncloud_db'
+            });
+            const [[p]] = await conn.query("SELECT COUNT(*) started, SUM(completed_at IS NOT NULL) completed, SUM(rewarded_at IS NOT NULL) rewarded FROM user_surveys WHERE survey_version='services_2026_09'");
+            const [i] = await conn.query("SELECT invite_status, COUNT(*) total FROM survey_invites WHERE survey_version='services_2026_09' GROUP BY invite_status ORDER BY invite_status");
+            console.log('LIVE_SURVEY_PROGRESS=' + JSON.stringify(p));
+            console.log('LIVE_SURVEY_INVITES=' + JSON.stringify(i));
+            await conn.end();
+          })().catch(e => { console.error(e); process.exit(1); });
+          NODE
+          REMOTE
