@@ -11,6 +11,7 @@ on:
       - 'services/loyalty-club.js'
       - 'loyalty-club-bootstrap.js'
       - 'loyalty-history-bootstrap.js'
+      - 'Hetzner/hetzner-api.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
@@ -44,6 +45,8 @@ jobs:
           node --check services/loyalty-club.js
           node --check loyalty-club-bootstrap.js
           node --check loyalty-history-bootstrap.js
+          node --check Hetzner/hetzner-api.js
+          node --check Hetzner/hetzner-api.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
@@ -99,6 +102,23 @@ jobs:
           if (!runtime.includes('[LOYALTY_CLUB_OPEN_OK]')) process.exit(1);
           new Function(runtime);
           console.log('PRODUCTION_MANAGE_DB_FIRST=yes');
+          NODE
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const datacenters = require('./datacenters');
+          const hetzner = require('./Hetzner/hetzner-api');
+          (async () => {
+            const keys = Object.keys(datacenters).filter(k => String(datacenters[k]?.provider || datacenters[k]?.apiType || '').toLowerCase().includes('hetzner'));
+            const summary = {};
+            for (const key of keys) {
+              const plans = await hetzner.getHetznerSellablePlans(datacenters[key]);
+              const dedicated = plans.filter(p => String(p.family || '').toUpperCase() === 'CCX');
+              if (dedicated.length) throw new Error('DEDICATED_PLAN_STILL_SELLABLE:' + key);
+              summary[key] = plans.map(p => p.id);
+            }
+            console.log('HETZNER_SELLABLE_PLANS=' + JSON.stringify(summary));
+          })().catch(error => { console.error(error); process.exit(1); });
           NODE
 
           pm2 restart hamoonbot --update-env >/dev/null
