@@ -9,6 +9,7 @@ const datacenters = require('./datacenters');
 const cloud = require('./cloud-api');
 const { calculateTrafficCost, fetchServerTraffic, formatBillingAmountLabel, formatBillingCycleFa } = require('./billing-utils');
 const surveyDashboard = require('./survey-dashboard');
+const hetznerAccountDashboard = require('./hetzner-account-dashboard');
 
 const sessions = new Map();
 const loginAttempts = new Map();
@@ -116,6 +117,9 @@ function createDashboardApiRouter() {
   router.get('/api-clients/:id/usage', async (req,res,next)=>{ try{jsonOk(res, await db.getApiClientUsageSummary(req.params.id));}catch(e){next(e);} });
   router.get('/api-clients/:id/logs', async (req,res,next)=>{ try{jsonOk(res, await db.listApiClientLogs(req.params.id, req.query.limit));}catch(e){next(e);} });
   router.get('/hetzner/plans', async (_req,res,next)=>{ try{const { getHetznerSellablePlans } = require('./Hetzner/hetzner-api'); jsonOk(res, await getHetznerSellablePlans(datacenters.hetzner));}catch(e){next(e);} });
+  router.get('/hetzner/account-limits', async (req,res,next)=>{ try{
+    jsonOk(res, await hetznerAccountDashboard.getHetznerAccountUsage({ force: req.query.refresh === '1' }));
+  }catch(e){next(e);} });
 
   router.get('/datacenters', (_req,res)=>jsonOk(res,Object.values(datacenters).filter(dc=>dc&&dc.key).map(safeDc)));
   router.get('/datacenters/:key/health', async (req,res)=>{ const dc=datacenters[req.params.key]; if(!dc)return jsonError(res,404,'DATACENTER_NOT_FOUND','دیتاسنتر پیدا نشد.'); const health={token:false,listFlavors:false,listServers:false}; try{const tok=await cloud.getToken(dc); health.token=true; try{await cloud.listFlavors(dc,tok); health.listFlavors=true;}catch{} try{await cloud.listServers(dc,tok); health.listServers=true;}catch{} jsonOk(res,health);}catch{jsonOk(res,health);} });
