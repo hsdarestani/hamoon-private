@@ -8,6 +8,7 @@ const db = require('./db');
 const datacenters = require('./datacenters');
 const cloud = require('./cloud-api');
 const { calculateTrafficCost, fetchServerTraffic, formatBillingAmountLabel, formatBillingCycleFa } = require('./billing-utils');
+const surveyDashboard = require('./survey-dashboard');
 
 const sessions = new Map();
 const loginAttempts = new Map();
@@ -45,6 +46,13 @@ function createDashboardApiRouter() {
   router.use(requireAuth, requireAdminAction);
   router.get('/me', (req,res)=>jsonOk(res,{user:req.admin.actor, configured:adminConfigured()}));
   router.get('/overview', async (_req,res,next)=>{ try{jsonOk(res, await db.getAdminOverviewStats());}catch(e){next(e);} });
+  router.get('/survey/overview', async (_req,res,next)=>{ try{jsonOk(res, await surveyDashboard.getOverview());}catch(e){next(e);} });
+  router.get('/survey/raw', async (req,res,next)=>{ try{jsonOk(res, await surveyDashboard.getRaw(req.query));}catch(e){next(e);} });
+  router.get('/export/survey.csv', async (_req,res,next)=>{ try{
+    const rows = await surveyDashboard.getExportRows();
+    res.setHeader('Content-Disposition', 'attachment; filename="hamoon-survey-services-2026-09.csv"');
+    res.type('text/csv; charset=utf-8').send('\uFEFF' + csv(rows));
+  }catch(e){next(e);} });
   router.get('/metrics/:metric/details', async (req,res,next)=>{ try{const data=await db.getAdminMetricDetails(req.params.metric, req.query); data?res.json(data):jsonError(res,404,'METRIC_NOT_FOUND','شاخص پیدا نشد.');}catch(e){next(e);} });
   router.get('/metrics/:metric/export.csv', async (req,res,next)=>{ try{const data=await db.getAdminMetricDetails(req.params.metric, {...req.query,pageSize:200}); if(!data)return jsonError(res,404,'METRIC_NOT_FOUND','شاخص پیدا نشد.'); res.type('text/csv').send(csv(data.rows));}catch(e){next(e);} });
   router.get('/search', async (req,res,next)=>{ try{jsonOk(res, await db.globalAdminSearch(req.query.q, req.query.limit));}catch(e){next(e);} });
