@@ -8,6 +8,9 @@ on:
       - 'runtime-bootstrap.js'
       - 'survey-service.js'
       - 'survey-bootstrap.js'
+      - 'services/loyalty-club.js'
+      - 'loyalty-club-bootstrap.js'
+      - 'loyalty-history-bootstrap.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
@@ -38,6 +41,12 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check survey-service.js
           node --check survey-bootstrap.js
+          node --check services/loyalty-club.js
+          node --check loyalty-club-bootstrap.js
+          node --check loyalty-history-bootstrap.js
+          node --check services/loyalty-club.js
+          node --check loyalty-club-bootstrap.js
+          node --check loyalty-history-bootstrap.js
           node scripts/validate-hetzner-management-buttons.js
           node - <<'NODE'
           const fs = require('fs');
