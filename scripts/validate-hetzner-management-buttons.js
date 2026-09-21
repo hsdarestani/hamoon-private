@@ -44,6 +44,10 @@ const required = [
   "return '🟡';",
   "return '⚪';",
   statusLabelMarker,
+  'function makeDirectManageCb(payload)',
+  'function parseDirectManageCb(data)',
+  "directManagePayload || readShortCb(effectiveUserId, data)",
+  "'⚠️ این دکمه مربوط به منوی قدیمی است",
 ];
 
 for (const marker of required) {
@@ -71,6 +75,11 @@ const statusLabelIndex = composed.indexOf(statusLabelMarker);
 assert(statusHelperIndex >= 0, 'compact status helper must exist');
 assert(statusLabelIndex > statusHelperIndex, 'management list must use live provider status icon');
 assert(composed.includes('const datacenterKeys = []; // MANAGE_DB_FIRST'), 'management index must not wait for provider list calls');
+
+// Server-entry buttons must remain usable after a bot restart/deploy. The M action
+// should therefore prefer a self-contained callback instead of the in-memory Cxxxxxx map.
+assert(composed.includes("const directManage = makeDirectManageCb(payload);"), 'management callbacks must prefer restart-safe direct payloads');
+assert(composed.includes("const directManagePayload = parseDirectManageCb(data);"), 'callback handler must parse restart-safe management payloads');
 
 new vm.Script(composed, { filename: 'index-core.composed.js' });
 new vm.Script(paginatedListSource, { filename: 'hetzner-list-all-servers.js' });
