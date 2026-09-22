@@ -40,6 +40,6 @@ assert(baseSource.includes('same_or_recently_bad_range'), 'same/bad range fast r
 assert(baseSource.includes('NO_DIFFERENT_IPV4_RANGE_AVAILABLE'), 'different-range exhaustion guard missing');
 assert(baseSource.includes('blockedRanges.add(oldRange)'), 'manual Change-IP must leave the current /24 range');
 
-console.log('validate-manual-change-ip-cap: ok');
+assert(baseSource.includes('HETZNER_AUDITED_CLEAN_IP_CLAIMED'), 'preverified clean pool preference missing');
 
-assert(source.includes('HETZNER_AUDITED_CLEAN_IP_CLAIMED'), 'preverified clean pool preference missing');
+console.log('validate-manual-change-ip-cap: ok');
