@@ -173,7 +173,7 @@ async function changeHetznerPublicIp(args) {
   const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 12);
   const maxInconclusiveCandidates = clampInt(
     process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
-    2,
+    3,
     1,
     4
   );
