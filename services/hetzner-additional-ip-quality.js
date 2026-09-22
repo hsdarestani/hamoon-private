@@ -1,0 +1,224 @@
+'use strict';
+
+const net = require('net');
+const { Client } = require('ssh2');
+const cloud = require('../cloud-api');
+const hetznerApi = require('../Hetzner/hetzner-api');
+const lifecycle = require('./hetzner-lifecycle');
+const additionalIps = require('./hetzner-additional-ips');
+const changeIp = require('./hetzner-change-ip');
+
+const clamp = (v, d, min, max) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : d;
+};
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const ipv4 = value => net.isIP(String(value || '').trim()) === 4 ? String(value).trim() : null;
+
+function primaryIp(server) {
+  return ipv4(server?.public_net?.ipv4?.ip || server?.public_ip || server?.ip);
+}
+function locationOf(server, dc = {}) {
+  return String(server?.datacenter?.location?.name || server?.location?.name || server?.location ||
+    dc?.HETZNER_LOCATION || dc?.location || '').trim().toLowerCase();
+}
+function command(script) {
+  return `printf '%s' '${Buffer.from(script).toString('base64')}' | base64 -d | /bin/sh`;
+}
+function bindScript(ip) {
+  return `set -eu
+IFACE="$(ip -4 route show default | awk 'NR==1 {print $5}')"
+test -n "$IFACE"
+ip -4 addr show dev "$IFACE" | grep -Fq "inet ${ip}/32" || ip addr add "${ip}/32" dev "$IFACE"
+`;
+}
+function unbindScript(ip) {
+  return `set +e
+IFACE="$(ip -4 route show default | awk 'NR==1 {print $5}')"
+[ -z "$IFACE" ] || ip addr del "${ip}/32" dev "$IFACE" >/dev/null 2>&1 || true
+`;
+}
+
+function sshExec({ host, password, command: cmd, timeoutMs = 30000 }) {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    let done = false;
+    const finish = error => {
+      if (done) return;
+      done = true;
+      try { conn.end(); } catch (_) {}
+      error ? reject(error) : resolve(true);
+    };
+    conn.on('ready', () => conn.exec(cmd, (error, stream) => {
+      if (error) return finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' }));
+      stream.on('error', () => finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' })));
+      stream.on('close', code => finish(Number(code) === 0 ? null :
+        Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' })));
+    }));
+    conn.on('error', error => {
+      const msg = String(error?.message || '').toLowerCase();
+      const code = msg.includes('auth') ? 'SSH_AUTH_FAILED' :
+        (msg.includes('timeout') ? 'SSH_TIMEOUT' : 'SSH_CONNECTION_FAILED');
+      finish(Object.assign(new Error(code), { code }));
+    });
+    conn.connect({ host, username: 'root', password, readyTimeout: timeoutMs, tryKeyboard: false });
+  });
+}
+
+function globalReady(q) {
+  const selected = Number(q?.global?.selected || 0);
+  const success = Number(q?.global?.success || 0);
+  const ratio = Math.min(1, Math.max(0.5, Number(process.env.HETZNER_IP_QUALITY_GLOBAL_MIN_RATIO || 0.67)));
+  const required = Number(q?.global?.required || Math.max(1, Math.ceil(selected * ratio)));
+  return selected > 0 && success >= required;
+}
+
+async function quality(ip, check = lifecycle.checkIpQuality) {
+  const tries = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_RECHECKS, 2, 1, 4);
+  const polls = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLLS, 15, 6, 24);
+  const delay = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLL_DELAY_MS, 1500, 750, 4000);
+  let last = null;
+  for (let i = 0; i < tries; i += 1) {
+    last = await check(ip, { polls, pollDelayMs: delay });
+    if (last?.ok || (last?.definitive && globalReady(last))) return last;
+    if (i + 1 < tries) await sleep(2500);
+  }
+  return last;
+}
+
+async function serverFor(dc, serverId, request) {
+  if (request) {
+    const data = await request(dc, 'GET', `/servers/${encodeURIComponent(serverId)}`);
+    return data?.server || null;
+  }
+  return hetznerApi.getHetznerServer(dc, serverId);
+}
+
+async function createVerifiedAdditionalIpv4(opts) {
+  const {
+    dc, serverId, telegramId, description, maxIps, request,
+    db = require('../db'), getSecret, execSsh = sshExec,
+    checkQuality, maxAttempts
+  } = opts;
+  const server = await serverFor(dc, serverId, request);
+  const host = primaryIp(server);
+  const location = locationOf(server, dc);
+  if (!server?.id || !host || !location) {
+    throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
+      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'
+    });
+  }
+  const password = await (getSecret || (id => db.getServerSecret(id, 'root_password')))(serverId);
+  if (!password) {
+    throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
+      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'
+    });
+  }
+
+  const attempts = clamp(maxAttempts ?? process.env.HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS, 8, 1, 12);
+  const blocked = await changeIp.recentBadRanges(db, { location }).catch(() => new Set());
+  let last = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let created = null;
+    let bound = false;
+    try {
+      created = await additionalIps.addAdditionalIpv4({ dc, serverId, description, maxIps, request });
+      const actionId = created?.action?.id ?? created?.action?.action?.id;
+      if (actionId) await cloud.waitHetznerAction(dc, actionId, 120000);
+
+      const ip = ipv4(created?.ip?.ip);
+      if (!ip) throw Object.assign(new Error('FLOATING_IP_CREATE_FAILED'), { code: 'FLOATING_IP_CREATE_FAILED' });
+      const range = changeIp.ipv4Range24(ip);
+      if (range && blocked.has(range)) {
+        await additionalIps.deleteAdditionalIp({ dc, serverId, floatingIpId: created.ip.id, request });
+        continue;
+      }
+
+      await execSsh({ host, password, command: command(bindScript(ip)), timeoutMs: 30000 });
+      bound = true;
+      last = await quality(ip, checkQuality);
+
+      if (last?.ok) {
+        console.log('[HETZNER_ADDITIONAL_IP_CLEAN_SUCCESS]', {
+          user_id: String(telegramId || ''), server_id: String(serverId),
+          floating_ip_id: String(created.ip.id), attempt, ip, location,
+          quality: lifecycle.qualitySummary(last)
+        });
+        return { ...created, verified: true, attempts: attempt, quality: last };
+      }
+
+      if (last?.definitive && globalReady(last)) {
+        await changeIp.rememberBadRange(db, {
+          location, ip, reason: last?.reason || 'additional_ip_quality_failed'
+        }).catch(() => {});
+        if (range) blocked.add(range);
+      }
+      console.warn('[HETZNER_ADDITIONAL_IP_QUALITY_REJECTED]', {
+        server_id: String(serverId), attempt, ip, location,
+        definitive: Boolean(last?.definitive), reason: last?.reason || 'unknown'
+      });
+
+      await execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 30000 }).catch(() => {});
+      bound = false;
+      await additionalIps.deleteAdditionalIp({ dc, serverId, floatingIpId: created.ip.id, request });
+    } catch (error) {
+      if (created?.ip?.id) {
+        if (bound && created?.ip?.ip) {
+          await execSsh({
+            host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 30000
+          }).catch(() => {});
+        }
+        await additionalIps.deleteAdditionalIp({
+          dc, serverId, floatingIpId: created.ip.id, request
+        }).catch(() => {});
+      }
+      if (String(error?.code || '').startsWith('SSH_')) {
+        throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
+          code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
+          cause: error
+        });
+      }
+      throw error;
+    }
+  }
+
+  throw Object.assign(new Error('NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE'), {
+    code: 'NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE',
+    attempts,
+    quality: last
+  });
+}
+
+async function deleteVerifiedAdditionalIp(opts) {
+  const {
+    dc, serverId, floatingIpId, request,
+    db = require('../db'), getSecret, execSsh = sshExec
+  } = opts;
+  const call = request || ((...args) => hetznerApi.hetznerRequest(...args));
+  try {
+    const [floatingData, server] = await Promise.all([
+      call(dc, 'GET', `/floating_ips/${encodeURIComponent(floatingIpId)}`),
+      serverFor(dc, serverId, request)
+    ]);
+    const floating = floatingData?.floating_ip;
+    const host = primaryIp(server);
+    const password = host
+      ? await (getSecret || (id => db.getServerSecret(id, 'root_password')))(serverId).catch(() => null)
+      : null;
+    if (floating?.ip && String(floating?.server?.id || '') === String(serverId) && host && password) {
+      await execSsh({
+        host, password, command: command(unbindScript(floating.ip)), timeoutMs: 30000
+      }).catch(() => {});
+    }
+  } catch (_) {}
+
+  return additionalIps.deleteAdditionalIp({ dc, serverId, floatingIpId, request });
+}
+
+module.exports = {
+  globalReady,
+  quality,
+  createVerifiedAdditionalIpv4,
+  deleteVerifiedAdditionalIp
+};
