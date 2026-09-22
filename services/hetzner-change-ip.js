@@ -245,6 +245,140 @@ async function deletePrimaryIpWithRetry(dc, primaryIpId, attempts = 4) {
   throw lastError || new Error('PRIMARY_IP_DELETE_FAILED');
 }
 
+async function claimAuditedCleanPrimaryIpv4(db, {
+  dc,
+  serverId,
+  location,
+  used = new Set(),
+  blockedRanges = new Set(),
+  fetchPrimaryIp = null
+}) {
+  if (!db?.pool?.query) return null;
+  const normalizedLocation = String(location || '').trim().toLowerCase();
+  if (!normalizedLocation) return null;
+
+  try {
+    const [tables] = await db.pool.query(
+      `SELECT 1
+         FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'hetzner_ip_pool_audit'
+        LIMIT 1`
+    );
+    if (!tables?.length) return null;
+
+    const [rows] = await db.pool.query(
+      `SELECT primary_ip_id, ip_address, tested_at, updated_at
+         FROM hetzner_ip_pool_audit
+        WHERE location = ? AND result = 'clean'
+        ORDER BY COALESCE(tested_at, updated_at) DESC
+        LIMIT 30`,
+      [normalizedLocation]
+    );
+
+    const fetchOne = fetchPrimaryIp || (async primaryIpId => {
+      const data = await hetznerApi.hetznerRequest(
+        dc,
+        'GET',
+        `/primary_ips/${encodeURIComponent(primaryIpId)}`
+      );
+      return data?.primary_ip || null;
+    });
+
+    for (const row of rows || []) {
+      const rowId = row?.primary_ip_id == null ? null : String(row.primary_ip_id);
+      const rowIp = normalizeIpv4(row?.ip_address);
+      if (!rowId || !rowIp || used.has(rowIp)) continue;
+
+      const rowRange = ipv4Range24(rowIp);
+      if (rowRange && blockedRanges.has(rowRange)) continue;
+
+      let providerIp = null;
+      try {
+        providerIp = await fetchOne(rowId);
+      } catch (error) {
+        console.warn('[HETZNER_AUDIT_POOL_LOOKUP_FAILED]', {
+          primary_ip_id: rowId,
+          ip: rowIp,
+          message: String(error?.message || error).slice(0, 120)
+        });
+        continue;
+      }
+
+      const liveId = providerIp?.id == null ? null : String(providerIp.id);
+      const liveIp = normalizeIpv4(providerIp?.ip);
+      const liveLocation = serverLocation(providerIp, dc);
+      const assigneeId = providerIp?.assignee_id == null ? null : String(providerIp.assignee_id);
+      const assigneeType = String(providerIp?.assignee_type || '').toLowerCase();
+
+      if (liveId !== rowId || liveIp !== rowIp ||
+          (liveLocation && liveLocation !== normalizedLocation) ||
+          assigneeId ||
+          (assigneeType && !['unassigned', 'server'].includes(assigneeType))) {
+        continue;
+      }
+
+      const [claim] = await db.pool.query(
+        `UPDATE hetzner_ip_pool_audit
+            SET result = 'pending',
+                reason = ?,
+                updated_at = CURRENT_TIMESTAMP(3)
+          WHERE primary_ip_id = ? AND result = 'clean'`,
+        [`runtime_reserved:${String(serverId)}`, rowId]
+      );
+      if (Number(claim?.affectedRows || 0) !== 1) continue;
+
+      console.log('[HETZNER_AUDITED_CLEAN_IP_CLAIMED]', {
+        server_id: String(serverId),
+        primary_ip_id: rowId,
+        ip: rowIp,
+        location: normalizedLocation
+      });
+
+      return {
+        ...providerIp,
+        id: rowId,
+        ip: rowIp,
+        auditPoolClaimed: true
+      };
+    }
+  } catch (error) {
+    console.warn('[HETZNER_AUDIT_POOL_UNAVAILABLE]', {
+      server_id: String(serverId),
+      location: normalizedLocation,
+      message: String(error?.message || error).slice(0, 120)
+    });
+  }
+  return null;
+}
+
+async function markAuditedPoolCandidate(db, candidate, result, reason) {
+  if (!candidate?.auditPoolClaimed || !candidate?.id || !db?.pool?.query) return false;
+  try {
+    const [updated] = await db.pool.query(
+      `UPDATE hetzner_ip_pool_audit
+          SET result = ?,
+              reason = ?,
+              tested_at = CURRENT_TIMESTAMP(3),
+              updated_at = CURRENT_TIMESTAMP(3)
+        WHERE primary_ip_id = ?`,
+      [
+        String(result || 'error'),
+        String(reason || 'runtime_update').slice(0, 255),
+        String(candidate.id)
+      ]
+    );
+    return Number(updated?.affectedRows || 0) > 0;
+  } catch (error) {
+    console.warn('[HETZNER_AUDIT_POOL_MARK_FAILED]', {
+      primary_ip_id: String(candidate.id),
+      result: String(result || 'error'),
+      message: String(error?.message || error).slice(0, 120)
+    });
+    return false;
+  }
+}
+
 async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, serverId, location, oldIp }) {
   const maxAttempts = Math.max(1, Math.min(20, Number(process.env.HETZNER_CHANGE_IP_UNIQUE_ATTEMPTS || 8)));
   const used = await usedIps(db, { datacenter, serverId });
@@ -259,6 +393,26 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
   if (oldIp) {
     used.add(oldIp);
     await rememberIp(db, { telegramId, datacenter, serverId, ip: oldIp, event: 'current_before_change' });
+  }
+
+  // Prefer an IPv4 that the dedicated pool probe has already verified as clean.
+  // If none is available, fall back to normal on-demand Hetzner allocation.
+  const auditedCandidate = await claimAuditedCleanPrimaryIpv4(db, {
+    dc,
+    serverId,
+    location,
+    used,
+    blockedRanges
+  });
+  if (auditedCandidate) {
+    await rememberIp(db, {
+      telegramId,
+      datacenter,
+      serverId,
+      ip: auditedCandidate.ip,
+      event: 'audited_clean_candidate'
+    }).catch(() => {});
+    return auditedCandidate;
   }
 
   let duplicateCandidates = 0;
@@ -486,6 +640,12 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
         if (rollbackDone) {
           await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
         }
+        await markAuditedPoolCandidate(
+          db,
+          newPrimary,
+          verification?.definitive ? 'dirty' : 'inconclusive',
+          verification?.reason || 'runtime_candidate_rejected'
+        );
 
         const error = new Error(rollbackDone ? 'CANDIDATE_REJECTED' : 'CANDIDATE_REJECTED_ROLLBACK_FAILED');
         error.code = rollbackDone ? 'CANDIDATE_REJECTED' : 'CANDIDATE_REJECTED_ROLLBACK_FAILED';
@@ -517,6 +677,12 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
 
     await db.updatePublicIp(telegramId, serverId, datacenter, ready.ip);
     await rememberIp(db, { telegramId, datacenter, serverId, ip: ready.ip, event: 'change_completed' });
+    await markAuditedPoolCandidate(
+      db,
+      newPrimary,
+      'blocked_active_reference',
+      `assigned_to_server:${String(serverId)}`
+    );
     console.log('[HETZNER_CHANGE_IP_SUCCESS]', { server_id: String(serverId), old_ip: oldIp, new_ip: ready.ip });
     return { oldIp, newIp: ready.ip, verification };
   } catch (error) {
@@ -564,6 +730,8 @@ module.exports = {
   recentBadRanges,
   rememberIp,
   usedIps,
+  claimAuditedCleanPrimaryIpv4,
+  markAuditedPoolCandidate,
   reserveUniquePrimaryIpv4,
   waitForNewIp,
   rollbackSwap,

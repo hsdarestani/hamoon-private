@@ -1,0 +1,58 @@
+name: Validate Hetzner additional IP quality
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/hetzner-additional-ip-quality.js'
+      - 'services/hetzner-additional-ips.js'
+      - 'services/hetzner-change-ip.js'
+      - 'hetzner-additional-ip-quality-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'index-core.js'
+      - 'scripts/validate-hetzner-additional-ip-quality.js'
+      - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-manual-change-ip-cap.js'
+      - 'package.json'
+      - '.github/workflows/validate-hetzner-additional-ip-quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/hetzner-additional-ip-quality.js'
+      - 'services/hetzner-additional-ips.js'
+      - 'services/hetzner-change-ip.js'
+      - 'hetzner-additional-ip-quality-bootstrap.js'
+      - 'runtime-bootstrap.js'
+      - 'index-core.js'
+      - 'scripts/validate-hetzner-additional-ip-quality.js'
+      - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-manual-change-ip-cap.js'
+      - 'package.json'
+      - '.github/workflows/validate-hetzner-additional-ip-quality.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Syntax
+        run: |
+          node -c runtime-bootstrap.js
+          node -c services/hetzner-change-ip.js
+          node -c services/hetzner-clean-ip-change.js
+          node -c services/hetzner-additional-ip-quality.js
+          node -c hetzner-additional-ip-quality-bootstrap.js
+          node -c scripts/validate-hetzner-additional-ip-quality.js
+      - run: npm run validate:hetzner-additional-ips
+      - run: npm run validate:hetzner-additional-ip-quality
+      - run: npm run validate:clean-ip-runtime
+      - run: node scripts/validate-manual-change-ip-cap.js
