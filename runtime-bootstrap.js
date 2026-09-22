@@ -8,6 +8,7 @@ const { applyHetznerPendingDeliveryRecoveryPatches } = require('./hetzner-pendin
 const { applyPatches: applyFeaturePatches } = require('./hetzner-console-bootstrap');
 const { applyHetznerTrafficPatches } = require('./hetzner-traffic-bootstrap');
 const { applyHetznerChangeIpPatches } = require('./hetzner-change-ip-bootstrap');
+const { applyHetznerAdditionalIpQualityPatches } = require('./hetzner-additional-ip-quality-bootstrap');
 const { applyBillingCyclePatches } = require('./billing-cycle-bootstrap');
 const { applyBillingRenewalGuardPatches } = require('./billing-renewal-guard-bootstrap');
 const { applyBillingSettlementPatches } = require('./billing-settlement-bootstrap');
@@ -67,8 +68,10 @@ function applyRuntimeSafetyDefaults() {
     // Manual Change-IP never moves/rebuilds the VM. Try more definitively bad
     // candidates in-place before giving up, while still keeping the inconclusive
     // cap low so external probe outages cannot trap the request for a long time.
-    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '8',
-    HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '2',
+    HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '10',
+    HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '3',
+    HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS: '8',
+    HETZNER_ADDITIONAL_IP_QUALITY_RECHECKS: '2',
     HETZNER_TRAFFIC_EUR_TO_TOMAN: '250000',
     LOYALTY_SILVER_CASHBACK: '2',
     LOYALTY_GOLD_CASHBACK: '4',
@@ -85,7 +88,10 @@ function applyRuntimeSafetyDefaults() {
     HETZNER_CHANGE_IP_QUALITY_POLL_DELAY_MS: '1500',
     HETZNER_CHANGE_IP_QUALITY_SETTLE_MS: '6000',
     HETZNER_CHANGE_IP_RECENT_REUSE_COOLDOWN_MS: String(30 * 60 * 1000),
-    HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '8',
+    HETZNER_CHANGE_IP_BAD_RANGE_COOLDOWN_MS: String(12 * 60 * 60 * 1000),
+    HETZNER_PROVISIONING_CLEAN_ATTEMPTS: '12',
+    HETZNER_GERMANY_LOCATION_FALLBACK_AFTER_ATTEMPTS: '2',
+    HETZNER_FSN_LOCATION_FALLBACK_CANDIDATES: '3',
     HETZNER_PROVISIONING_QUALITY_SETTLE_MS: '6000',
     HETZNER_PROVISIONING_SSH_VERIFY_TIMEOUT_MS: '90000',
     HETZNER_PENDING_RECOVERY_READY_TIMEOUT_MS: '90000'
@@ -188,7 +194,8 @@ function applyPatches(coreSource) {
       )
     )
   );
-  const withPowerControls = applyServerPowerControlPatches(baseline);
+  const withAdditionalIpQuality = applyHetznerAdditionalIpQualityPatches(baseline);
+  const withPowerControls = applyServerPowerControlPatches(withAdditionalIpQuality);
   const patched = applyBillingRenewalTickPatches(applyResumeTransactionalPatches(withPowerControls));
   return applySurveyPatches(applyAdminUnlimitedFreeTestPatches(patched));
 }
