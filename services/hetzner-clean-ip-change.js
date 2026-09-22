@@ -170,7 +170,7 @@ async function changeHetznerPublicIp(args) {
   // provisioning, it cannot safely rebuild the customer's machine in another
   // Hetzner location just to obtain a different address. Bound the number of
   // full candidate rounds so the request cannot spin for tens of minutes.
-  const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 8);
+  const maxAttempts = clampInt(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, 4, 1, 12);
   const maxInconclusiveCandidates = clampInt(
     process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES,
     2,
