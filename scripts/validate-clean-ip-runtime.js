@@ -63,6 +63,47 @@ const fastFallback = require('../services/hetzner-location-fallback-fast-bootstr
   assert(!blocked.has('2.2.2.2'));
   assert(!blocked.has('4.4.4.4'));
 
+  // A preverified clean, still-unassigned Primary IPv4 must be claimed before
+  // falling back to random provider allocation.
+  const auditQueries = [];
+  const auditDb = {
+    pool: {
+      async query(sql, params) {
+        const text = String(sql);
+        auditQueries.push({ text, params });
+        if (text.includes('INFORMATION_SCHEMA.TABLES')) return [[{ ok: 1 }], []];
+        if (text.includes('FROM hetzner_ip_pool_audit') && text.includes("result = 'clean'")) {
+          return [[{
+            primary_ip_id: 77,
+            ip_address: '5.5.5.5',
+            tested_at: new Date(),
+            updated_at: new Date()
+          }], []];
+        }
+        if (text.includes('UPDATE hetzner_ip_pool_audit')) return [{ affectedRows: 1 }, []];
+        throw new Error(`unexpected audit query: ${text}`);
+      }
+    }
+  };
+  const audited = await baseChange.claimAuditedCleanPrimaryIpv4(auditDb, {
+    dc: {},
+    serverId: 's',
+    location: 'nbg1',
+    used: new Set(['1.1.1.1']),
+    blockedRanges: new Set(),
+    fetchPrimaryIp: async id => ({
+      id,
+      ip: '5.5.5.5',
+      type: 'ipv4',
+      location: { name: 'nbg1' },
+      assignee_id: null,
+      assignee_type: 'unassigned'
+    })
+  });
+  assert.strictEqual(audited.ip, '5.5.5.5');
+  assert.strictEqual(audited.auditPoolClaimed, true);
+  assert(auditQueries.some(x => x.text.includes("SET result = 'pending'")));
+
   // Dirty IPs must be rejected by Iran/global quality before we spend time on SSH.
   let sshCalls = 0;
   let qualityCalls = 0;
