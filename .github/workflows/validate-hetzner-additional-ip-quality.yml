@@ -12,6 +12,7 @@ on:
       - 'index-core.js'
       - 'scripts/validate-hetzner-additional-ip-quality.js'
       - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-manual-change-ip-cap.js'
       - 'package.json'
       - '.github/workflows/validate-hetzner-additional-ip-quality.yml'
   push:
@@ -25,6 +26,7 @@ on:
       - 'index-core.js'
       - 'scripts/validate-hetzner-additional-ip-quality.js'
       - 'scripts/validate-clean-ip-runtime.js'
+      - 'scripts/validate-manual-change-ip-cap.js'
       - 'package.json'
       - '.github/workflows/validate-hetzner-additional-ip-quality.yml'
 
