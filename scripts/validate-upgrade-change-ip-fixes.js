@@ -29,7 +29,7 @@ assert(cleanSource.includes('continue;'), 'inconclusive retry loop missing');
 new vm.Script(cleanSource, { filename: 'hetzner-clean-ip-change.js' });
 
 runtime.applyRuntimeSafetyDefaults();
-assert.strictEqual(process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES, '2');
-assert.strictEqual(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, '8');
+assert.strictEqual(process.env.HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES, '3');
+assert.strictEqual(process.env.HETZNER_CHANGE_IP_CLEAN_ATTEMPTS, '10');
 
 console.log('validate-upgrade-change-ip-fixes: ok');
