@@ -13,7 +13,7 @@ permissions:
 jobs:
   repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
       SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
@@ -21,6 +21,8 @@ jobs:
       SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
       SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
       TARGET_IP: 91.107.146.135
+      TARGET_SERVER_ID: 166087176
+
     steps:
       - name: Prepare management SSH
         shell: bash
@@ -31,25 +33,226 @@ jobs:
           chmod 600 ~/.ssh/k
           ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Repair ICMP through Hetzner Rescue
+      - name: Enable Hetzner Rescue
         shell: bash
         run: |
           set -euo pipefail
           APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
-          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_IP='$TARGET_IP' bash -s" <<'REMOTE'
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
           set -euo pipefail
-          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
-          cd "$APP_PATH"
-          TMP_SCRIPT="scripts/.tmp-repair-hetzner-icmp.js"
-          trap 'rm -f "$TMP_SCRIPT"' EXIT
-          curl -fsSL "https://raw.githubusercontent.com/hsdarestani/hamoon-private/main/scripts/repair-hetzner-icmp.js" -o "$TMP_SCRIPT"
-          node "$TMP_SCRIPT" "$TARGET_IP"
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs = require('fs');
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const h = require('./Hetzner/hetzner-api');
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const id = String(process.env.TARGET_SERVER_ID);
+
+          async function waitAction(dc, action) {
+            const actionId = action?.id || action?.action?.id;
+            if (actionId) await h.waitHetznerAction(dc, actionId, 180000);
+          }
+
+          async function powerCycle(dc) {
+            const current = await h.getHetznerServer(dc, id);
+            if (String(current?.status || '').toLowerCase() !== 'off') {
+              const off = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/poweroff`, {});
+              await waitAction(dc, off?.action);
+            }
+            await sleep(4000);
+            const on = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/poweron`, {});
+            await waitAction(dc, on?.action);
+          }
+
+          (async () => {
+            const purchase = await db.getPurchaseByServerId(id);
+            if (!purchase) throw new Error('PURCHASE_NOT_FOUND');
+            const dc = {...(datacenters[purchase.datacenter] || {}), key: purchase.datacenter};
+            const rescue = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/enable_rescue`, {type:'linux64'});
+            const password = rescue?.root_password || rescue?.action?.root_password;
+            if (!password) throw new Error('RESCUE_PASSWORD_MISSING');
+            await waitAction(dc, rescue?.action);
+            fs.writeFileSync(`/tmp/hamoon-rescue-${id}.pass`, password, {mode:0o600});
+            await powerCycle(dc);
+            console.log('RESCUE_ENABLED=1');
+            await db.pool.end();
+          })().catch(async e => {
+            console.error(String(e?.stack || e));
+            try { await db.pool.end(); } catch {}
+            process.exit(1);
+          });
+          NODE
           REMOTE
 
-      - name: Verify public ping and SSH
+      - name: Read rescue password securely
         shell: bash
         run: |
           set -euo pipefail
+          RESCUE_PASS="$(ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "cat /tmp/hamoon-rescue-$TARGET_SERVER_ID.pass")"
+          test -n "$RESCUE_PASS"
+          echo "::add-mask::$RESCUE_PASS"
+          printf 'RESCUE_PASS=%s\n' "$RESCUE_PASS" >> "$GITHUB_ENV"
+
+      - name: Wait for Rescue SSH from runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then
+              ok=1
+              break
+            fi
+            sleep 3
+          done
+          test "$ok" = "1"
+          echo "RESCUE_TCP22_OK=1"
+
+      - name: Install sshpass
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v sshpass >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+          fi
+
+      - name: Repair installed Ubuntu ICMP settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          sshpass -p "$RESCUE_PASS" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            root@"$TARGET_IP" 'bash -s' <<'REPAIR'
+          set -euo pipefail
+          ROOT_DEV="$(lsblk -bpnro NAME,FSTYPE,SIZE | grep -E ' (ext4|xfs|btrfs) ' | sort -k3,3nr | head -n1 | awk '{print $1}')"
+          test -n "$ROOT_DEV"
+          mkdir -p /mnt/hamoon-root
+          mount "$ROOT_DEV" /mnt/hamoon-root
+          cleanup() { umount /mnt/hamoon-root 2>/dev/null || true; }
+          trap cleanup EXIT
+          test -f /mnt/hamoon-root/etc/os-release
+
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          BACKUP="/mnt/hamoon-root/root/hamoon-icmp-recovery-$STAMP"
+          mkdir -p "$BACKUP"
+          cp -a /mnt/hamoon-root/etc/sysctl.conf "$BACKUP/" 2>/dev/null || true
+          cp -a /mnt/hamoon-root/etc/sysctl.d "$BACKUP/" 2>/dev/null || true
+          cp -a /mnt/hamoon-root/etc/ufw "$BACKUP/" 2>/dev/null || true
+
+          mkdir -p /mnt/hamoon-root/etc/sysctl.d
+          printf '%s\n' 'net.ipv4.icmp_echo_ignore_all = 0' > /mnt/hamoon-root/etc/sysctl.d/99-hamoon-icmp.conf
+
+          if [ -f /mnt/hamoon-root/etc/ufw/before.rules ] && ! grep -Eq 'ufw-before-input.*icmp.*echo-request.*ACCEPT' /mnt/hamoon-root/etc/ufw/before.rules; then
+            awk '
+              BEGIN { added=0 }
+              !added && /^COMMIT$/ {
+                print "-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT"
+                added=1
+              }
+              { print }
+            ' /mnt/hamoon-root/etc/ufw/before.rules > /mnt/hamoon-root/etc/ufw/before.rules.hamoon.tmp
+            mv /mnt/hamoon-root/etc/ufw/before.rules.hamoon.tmp /mnt/hamoon-root/etc/ufw/before.rules
+          fi
+
+          cat > /mnt/hamoon-root/etc/systemd/system/hamoon-icmp-allow.service <<'EOF'
+          [Unit]
+          Description=Allow ICMP echo requests for monitoring
+          After=network-online.target ufw.service
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/sh -c '/usr/sbin/iptables -C INPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || /usr/sbin/iptables -I INPUT 1 -p icmp --icmp-type echo-request -j ACCEPT'
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          mkdir -p /mnt/hamoon-root/etc/systemd/system/multi-user.target.wants
+          ln -sf /etc/systemd/system/hamoon-icmp-allow.service /mnt/hamoon-root/etc/systemd/system/multi-user.target.wants/hamoon-icmp-allow.service
+
+          echo "ROOT_DEV=$ROOT_DEV"
+          echo "ICMP_SYSCTL=$(cat /mnt/hamoon-root/etc/sysctl.d/99-hamoon-icmp.conf)"
+          echo "ICMP_SERVICE_ENABLED=$(test -L /mnt/hamoon-root/etc/systemd/system/multi-user.target.wants/hamoon-icmp-allow.service && echo 1 || echo 0)"
+          echo "REPAIR_BACKUP=$BACKUP"
+          echo "ICMP_REPAIR_OK=1"
+          REPAIR
+
+      - name: Disable Rescue and boot installed system
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs = require('fs');
+          const db = require('./db');
+          const datacenters = require('./datacenters');
+          const h = require('./Hetzner/hetzner-api');
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const id = String(process.env.TARGET_SERVER_ID);
+
+          async function waitAction(dc, action) {
+            const actionId = action?.id || action?.action?.id;
+            if (actionId) await h.waitHetznerAction(dc, actionId, 180000);
+          }
+
+          async function powerCycle(dc) {
+            const current = await h.getHetznerServer(dc, id);
+            if (String(current?.status || '').toLowerCase() !== 'off') {
+              const off = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/poweroff`, {});
+              await waitAction(dc, off?.action);
+            }
+            await sleep(4000);
+            const on = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/poweron`, {});
+            await waitAction(dc, on?.action);
+          }
+
+          (async () => {
+            const purchase = await db.getPurchaseByServerId(id);
+            if (!purchase) throw new Error('PURCHASE_NOT_FOUND');
+            const dc = {...(datacenters[purchase.datacenter] || {}), key: purchase.datacenter};
+            const server = await h.getHetznerServer(dc, id);
+            if (server?.rescue_enabled) {
+              const disable = await h.hetznerRequest(dc, 'POST', `/servers/${id}/actions/disable_rescue`, {});
+              await waitAction(dc, disable?.action);
+            }
+            await powerCycle(dc);
+            try { fs.unlinkSync(`/tmp/hamoon-rescue-${id}.pass`); } catch {}
+            console.log('INSTALLED_SYSTEM_BOOTED=1');
+            await db.pool.end();
+          })().catch(async e => {
+            console.error(String(e?.stack || e));
+            try { await db.pool.end(); } catch {}
+            process.exit(1);
+          });
+          NODE
+          REMOTE
+
+      - name: Verify public Ping and SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then
+              ok=1
+              break
+            fi
+            sleep 3
+          done
+          test "$ok" = "1"
           ping -c 4 -W 3 "$TARGET_IP"
           nc -vz -w 8 "$TARGET_IP" 22
           echo "ICMP_PUBLIC_OK=1"
