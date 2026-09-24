@@ -1,0 +1,135 @@
+name: Probe ICMP in Hetzner Rescue Srv-HET-4b2569
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-rescue-ping.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_ID: 166087176
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare management SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Boot Hetzner Rescue
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          async function waitAction(dc,a){const x=a?.id||a?.action?.id;if(x)await h.waitHetznerAction(dc,x,180000)}
+          async function cycle(dc){
+            const s=await h.getHetznerServer(dc,id);
+            if(String(s?.status||'').toLowerCase()!=='off'){
+              const off=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              await waitAction(dc,off?.action);
+            }
+            await sleep(4000);
+            const on=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            await waitAction(dc,on?.action);
+          }
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const r=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/enable_rescue`,{type:'linux64'});
+            await waitAction(dc,r?.action);
+            await cycle(dc);
+            console.log('RESCUE_BOOTED=1');
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Probe Ping and SSH in Rescue
+        shell: bash
+        run: |
+          set +e
+          sshok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then sshok=1; break; fi
+            sleep 3
+          done
+          echo "RESCUE_SSH_OK=$sshok"
+          ping -c 8 -W 2 "$TARGET_IP"
+          echo "RESCUE_PING_RC=$?"
+          exit 0
+      - name: Disable Rescue and boot installed Ubuntu
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          async function waitAction(dc,a){const x=a?.id||a?.action?.id;if(x)await h.waitHetznerAction(dc,x,180000)}
+          async function cycle(dc){
+            const s=await h.getHetznerServer(dc,id);
+            if(String(s?.status||'').toLowerCase()!=='off'){
+              const off=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              await waitAction(dc,off?.action);
+            }
+            await sleep(4000);
+            const on=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            await waitAction(dc,on?.action);
+          }
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const s=await h.getHetznerServer(dc,id);
+            if(s?.rescue_enabled){
+              const d=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/disable_rescue`,{});
+              await waitAction(dc,d?.action);
+            }
+            await cycle(dc);
+            console.log('INSTALLED_UBUNTU_BOOTED=1');
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Final SSH check
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then ok=1; break; fi
+            sleep 3
+          done
+          test "$ok" = "1"
+          echo "FINAL_SSH_OK=1"
