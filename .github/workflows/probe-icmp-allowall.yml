@@ -1,0 +1,139 @@
+name: Probe Hetzner ICMP with allow all firewall
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe-icmp-allowall.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_ID: 166087176
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare management SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Create and attach temporary allow all firewall
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs=require('fs');
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const rules=[];
+            for(const protocol of ['tcp','udp','icmp','esp','gre']){
+              rules.push({direction:'in',protocol,source_ips:['0.0.0.0/0','::/0']});
+              rules.push({direction:'out',protocol,destination_ips:['0.0.0.0/0','::/0']});
+            }
+            const created=await h.hetznerRequest(dc,'POST','/firewalls',{
+              name:`hamoon-temp-allow-all-${id}`,
+              rules
+            });
+            const fw=created.firewall;
+            if(!fw?.id) throw new Error('FIREWALL_CREATE_FAILED');
+            fs.writeFileSync(`/tmp/hamoon-temp-fw-${id}.id`,String(fw.id),{mode:0o600});
+            const apply=await h.hetznerRequest(dc,'POST',`/firewalls/${fw.id}/actions/apply_to_resources`,{
+              apply_to:[{type:'server',server:{id:Number(id)}}]
+            });
+            const actionId=apply?.action?.id;
+            if(actionId) await h.waitHetznerAction(dc,actionId,180000);
+            for(let i=0;i<30;i++){
+              const s=await h.getHetznerServer(dc,id);
+              const item=(s?.public_net?.firewalls||[]).find(x=>String(x.id)===String(fw.id));
+              if(item?.status==='applied'){console.log('TEMP_FIREWALL_APPLIED='+fw.id);await db.pool.end();return;}
+              await sleep(1000);
+            }
+            throw new Error('TEMP_FIREWALL_NOT_APPLIED');
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Test with temporary firewall
+        shell: bash
+        run: |
+          set +e
+          sleep 4
+          ping -c 4 -W 2 "$TARGET_IP"
+          echo "PING_WITH_FW_RC=$?"
+          nc -vz -w 8 "$TARGET_IP" 22
+          echo "SSH_WITH_FW_RC=$?"
+          exit 0
+      - name: Detach and delete temporary firewall
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs=require('fs');
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          (async()=>{
+            const path=`/tmp/hamoon-temp-fw-${id}.id`;
+            if(!fs.existsSync(path)){console.log('NO_TEMP_FIREWALL_ID');await db.pool.end();return;}
+            const fwId=fs.readFileSync(path,'utf8').trim();
+            const p=await db.getPurchaseByServerId(id);
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            try{
+              const remove=await h.hetznerRequest(dc,'POST',`/firewalls/${fwId}/actions/remove_from_resources`,{
+                remove_from:[{type:'server',server:{id:Number(id)}}]
+              });
+              const actionId=remove?.action?.id;
+              if(actionId) await h.waitHetznerAction(dc,actionId,180000);
+            }catch(e){console.log('DETACH_NOTE='+String(e?.message||e))}
+            for(let i=0;i<30;i++){
+              const s=await h.getHetznerServer(dc,id);
+              if(!(s?.public_net?.firewalls||[]).some(x=>String(x.id)===fwId)) break;
+              await sleep(1000);
+            }
+            try{await h.hetznerRequest(dc,'DELETE',`/firewalls/${fwId}`);console.log('TEMP_FIREWALL_DELETED='+fwId)}catch(e){console.log('DELETE_NOTE='+String(e?.message||e))}
+            try{fs.unlinkSync(path)}catch{}
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Test after detach
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sleep 4
+          ping -c 4 -W 2 "$TARGET_IP"
+          echo "PING_AFTER_FW_RC=$?"
+          nc -vz -w 8 "$TARGET_IP" 22
+          echo "SSH_AFTER_FW_RC=$?"
+          exit 0
