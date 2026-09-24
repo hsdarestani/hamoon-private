@@ -1,0 +1,142 @@
+name: Refresh Primary IPv4 binding Srv-HET-4b2569
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refresh-primary-ip-srv-het-4b2569.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_ID: 166087176
+      TARGET_IP: 91.107.146.135
+      PRIMARY_IP_ID: 150815636
+    steps:
+      - name: Prepare management SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Safely refresh Primary IPv4 binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' TARGET_IP='$TARGET_IP' PRIMARY_IP_ID='$PRIMARY_IP_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          const ip=String(process.env.TARGET_IP);
+          const primaryId=String(process.env.PRIMARY_IP_ID);
+
+          async function waitAction(dc,a){
+            const actionId=a?.id||a?.action?.id;
+            if(actionId) await h.waitHetznerAction(dc,actionId,180000);
+          }
+          async function getPrimary(dc){
+            const r=await h.hetznerRequest(dc,'GET',`/primary_ips/${primaryId}`);
+            return r?.primary_ip;
+          }
+
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+
+            const beforeServer=await h.getHetznerServer(dc,id);
+            if(String(beforeServer?.public_net?.ipv4?.ip||'')!==ip) throw new Error('SERVER_IPV4_MISMATCH');
+            if(Number(beforeServer?.public_net?.ipv4?.id)!==Number(primaryId)) throw new Error('SERVER_PRIMARY_ID_MISMATCH');
+            if((beforeServer?.public_net?.firewalls||[]).length) throw new Error('UNEXPECTED_FIREWALL_ATTACHED');
+
+            const beforeIp=await getPrimary(dc);
+            if(String(beforeIp?.ip||'')!==ip) throw new Error('PRIMARY_IP_ADDRESS_MISMATCH');
+            if(String(beforeIp?.assignee_id||'')!==id) throw new Error('PRIMARY_IP_ASSIGNEE_MISMATCH');
+            if(beforeIp?.blocked) throw new Error('PRIMARY_IP_BLOCKED');
+            console.log('PRIMARY_BEFORE='+JSON.stringify({id:beforeIp.id,ip:beforeIp.ip,assignee_id:beforeIp.assignee_id,blocked:beforeIp.blocked,auto_delete:beforeIp.auto_delete,protection:beforeIp.protection}));
+
+            if(String(beforeServer?.status||'').toLowerCase()!=='off'){
+              const off=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              await waitAction(dc,off?.action);
+            }
+            for(let i=0;i<40;i++){
+              const s=await h.getHetznerServer(dc,id);
+              if(String(s?.status||'').toLowerCase()==='off') break;
+              await sleep(1000);
+            }
+            const offCheck=await h.getHetznerServer(dc,id);
+            if(String(offCheck?.status||'').toLowerCase()!=='off') throw new Error('SERVER_DID_NOT_POWER_OFF');
+
+            const unassign=await h.hetznerRequest(dc,'POST',`/primary_ips/${primaryId}/actions/unassign`,{});
+            await waitAction(dc,unassign?.action);
+            for(let i=0;i<30;i++){
+              const q=await getPrimary(dc);
+              if(!q?.assignee_id) break;
+              await sleep(1000);
+            }
+            const unassigned=await getPrimary(dc);
+            if(unassigned?.assignee_id) throw new Error('PRIMARY_IP_STILL_ASSIGNED');
+            console.log('PRIMARY_UNASSIGNED=1');
+
+            const assign=await h.hetznerRequest(dc,'POST',`/primary_ips/${primaryId}/actions/assign`,{
+              assignee_type:'server',
+              assignee_id:Number(id)
+            });
+            await waitAction(dc,assign?.action);
+            for(let i=0;i<30;i++){
+              const q=await getPrimary(dc);
+              if(String(q?.assignee_id||'')===id) break;
+              await sleep(1000);
+            }
+            const assigned=await getPrimary(dc);
+            if(String(assigned?.assignee_id||'')!==id) throw new Error('PRIMARY_IP_REASSIGN_FAILED');
+            if(String(assigned?.ip||'')!==ip) throw new Error('PRIMARY_IP_CHANGED_UNEXPECTEDLY');
+            console.log('PRIMARY_REASSIGNED=1');
+
+            const on=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            await waitAction(dc,on?.action);
+            for(let i=0;i<60;i++){
+              const s=await h.getHetznerServer(dc,id);
+              if(String(s?.status||'').toLowerCase()==='running') break;
+              await sleep(1000);
+            }
+            const afterServer=await h.getHetznerServer(dc,id);
+            console.log('SERVER_AFTER='+JSON.stringify({status:afterServer.status,ipv4:afterServer?.public_net?.ipv4,firewalls:afterServer?.public_net?.firewalls}));
+            if(String(afterServer?.public_net?.ipv4?.ip||'')!==ip) throw new Error('IP_NOT_PRESENT_AFTER_REBIND');
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Verify SSH and Ping after binding refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          sshok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then sshok=1; break; fi
+            sleep 3
+          done
+          test "$sshok" = "1"
+          echo "SSH_REACHABLE_AFTER_REBIND=1"
+          set +e
+          ping -c 6 -W 2 "$TARGET_IP"
+          echo "PING_AFTER_REBIND_RC=$?"
+          set -e
+          nc -vz -w 8 "$TARGET_IP" 22
