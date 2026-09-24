@@ -1,0 +1,274 @@
+name: Runtime ICMP diagnose Srv-HET-4b2569
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runtime-icmp-srv-het-4b2569.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 91.107.146.135
+      TARGET_SERVER_ID: 166087176
+
+    steps:
+      - name: Prepare management SSH and temp key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          ssh-keygen -t ed25519 -N '' -C hamoon-temp-icmp -f ~/.ssh/hamoon_temp >/dev/null
+          PUB_B64="$(base64 -w0 ~/.ssh/hamoon_temp.pub)"
+          echo "PUB_B64=$PUB_B64" >> "$GITHUB_ENV"
+
+      - name: Enable Rescue
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs=require('fs');
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          async function waitAction(dc,a){const x=a?.id||a?.action?.id;if(x)await h.waitHetznerAction(dc,x,180000)}
+          async function cycle(dc){
+            const s=await h.getHetznerServer(dc,id);
+            if(String(s?.status||'').toLowerCase()!=='off'){
+              const off=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              await waitAction(dc,off?.action);
+            }
+            await sleep(4000);
+            const on=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            await waitAction(dc,on?.action);
+          }
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const r=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/enable_rescue`,{type:'linux64'});
+            const pw=r?.root_password||r?.action?.root_password;
+            if(!pw) throw new Error('RESCUE_PASSWORD_MISSING');
+            await waitAction(dc,r?.action);
+            fs.writeFileSync(`/tmp/hamoon-rescue-${id}.pass`,pw,{mode:0o600});
+            await cycle(dc);
+            console.log('RESCUE_ENABLED=1');
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+
+      - name: Read rescue password and wait
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESCUE_PASS="$(ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "cat /tmp/hamoon-rescue-$TARGET_SERVER_ID.pass")"
+          test -n "$RESCUE_PASS"
+          echo "::add-mask::$RESCUE_PASS"
+          echo "RESCUE_PASS=$RESCUE_PASS" >> "$GITHUB_ENV"
+          ok=0
+          for i in $(seq 1 70); do
+            if nc -z -w 3 "$TARGET_IP" 22; then ok=1; break; fi
+            sleep 3
+          done
+          test "$ok" = "1"
+          if ! command -v sshpass >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+          fi
+
+      - name: Inject temporary root key
+        shell: bash
+        run: |
+          set -euo pipefail
+          PUBKEY="$(printf '%s' "$PUB_B64" | base64 -d)"
+          sshpass -p "$RESCUE_PASS" ssh             -o StrictHostKeyChecking=no             -o UserKnownHostsFile=/dev/null             -o PreferredAuthentications=password             -o PubkeyAuthentication=no             root@"$TARGET_IP" "PUBKEY='$PUBKEY' bash -s" <<'REPAIR'
+          set -euo pipefail
+          ROOT_DEV="$(lsblk -bpnro NAME,FSTYPE,SIZE | grep -E ' (ext4|xfs|btrfs) ' | sort -k3,3nr | head -n1 | awk '{print $1}')"
+          test -n "$ROOT_DEV"
+          mkdir -p /mnt/hamoon-root
+          mount "$ROOT_DEV" /mnt/hamoon-root
+          cleanup(){ umount /mnt/hamoon-root 2>/dev/null || true; }
+          trap cleanup EXIT
+          test -f /mnt/hamoon-root/etc/os-release
+          mkdir -p /mnt/hamoon-root/root/.ssh
+          chmod 700 /mnt/hamoon-root/root/.ssh
+          touch /mnt/hamoon-root/root/.ssh/authorized_keys
+          chmod 600 /mnt/hamoon-root/root/.ssh/authorized_keys
+          grep -v 'hamoon-temp-icmp' /mnt/hamoon-root/root/.ssh/authorized_keys > /mnt/hamoon-root/root/.ssh/authorized_keys.tmp || true
+          printf '%s\n' "$PUBKEY" >> /mnt/hamoon-root/root/.ssh/authorized_keys.tmp
+          mv /mnt/hamoon-root/root/.ssh/authorized_keys.tmp /mnt/hamoon-root/root/.ssh/authorized_keys
+          chmod 600 /mnt/hamoon-root/root/.ssh/authorized_keys
+          mkdir -p /mnt/hamoon-root/etc/ssh/sshd_config.d
+          printf '%s\n' 'PermitRootLogin prohibit-password' 'PubkeyAuthentication yes' > /mnt/hamoon-root/etc/ssh/sshd_config.d/99-hamoon-temp-icmp.conf
+          echo "TEMP_KEY_INJECTED=1"
+          REPAIR
+
+      - name: Boot installed Ubuntu
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const fs=require('fs');
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const id=String(process.env.TARGET_SERVER_ID);
+          async function waitAction(dc,a){const x=a?.id||a?.action?.id;if(x)await h.waitHetznerAction(dc,x,180000)}
+          async function cycle(dc){
+            const s=await h.getHetznerServer(dc,id);
+            if(String(s?.status||'').toLowerCase()!=='off'){
+              const off=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweroff`,{});
+              await waitAction(dc,off?.action);
+            }
+            await sleep(4000);
+            const on=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/poweron`,{});
+            await waitAction(dc,on?.action);
+          }
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const s=await h.getHetznerServer(dc,id);
+            if(s?.rescue_enabled){
+              const d=await h.hetznerRequest(dc,'POST',`/servers/${id}/actions/disable_rescue`,{});
+              await waitAction(dc,d?.action);
+            }
+            await cycle(dc);
+            try{fs.unlinkSync(`/tmp/hamoon-rescue-${id}.pass`)}catch{}
+            console.log('INSTALLED_BOOTED=1');
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+
+      - name: Wait for temporary key SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 70); do
+            if ssh -i ~/.ssh/hamoon_temp               -o StrictHostKeyChecking=no               -o UserKnownHostsFile=/dev/null               -o BatchMode=yes               -o ConnectTimeout=4               root@"$TARGET_IP" 'true' >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 3
+          done
+          test "$ok" = "1"
+          echo "TEMP_KEY_SSH_OK=1"
+
+      - name: Runtime diagnose and fix ICMP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hamoon_temp             -o StrictHostKeyChecking=no             -o UserKnownHostsFile=/dev/null             -o BatchMode=yes             root@"$TARGET_IP" 'bash -s' <<'RUNTIME'
+          set -euo pipefail
+          echo '=== BEFORE SYSCTL ==='
+          sysctl net.ipv4.icmp_echo_ignore_all || true
+          echo '=== SERVICE ==='
+          systemctl status hamoon-icmp-allow.service --no-pager -l || true
+          echo '=== UFW ==='
+          ufw status verbose 2>&1 || true
+          echo '=== INPUT ==='
+          iptables -S INPUT 2>&1 || true
+          echo '=== ICMP RULES ==='
+          iptables -S 2>&1 | grep -i icmp || true
+          echo '=== NFT ICMP/REJECT/DROP ==='
+          nft list ruleset 2>/dev/null | grep -Ei -C 3 'icmp|drop|reject' || true
+
+          sysctl -w net.ipv4.icmp_echo_ignore_all=0
+          printf '%s\n' 'net.ipv4.icmp_echo_ignore_all = 0' > /etc/sysctl.d/99-hamoon-icmp.conf
+          if command -v iptables >/dev/null 2>&1; then
+            iptables -C INPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p icmp --icmp-type echo-request -j ACCEPT
+          fi
+          systemctl daemon-reload
+          systemctl restart hamoon-icmp-allow.service || true
+
+          echo '=== AFTER SYSCTL ==='
+          sysctl net.ipv4.icmp_echo_ignore_all || true
+          echo '=== AFTER INPUT ==='
+          iptables -S INPUT 2>&1 || true
+          RUNTIME
+
+      - name: Test Ping from runner
+        shell: bash
+        run: |
+          set +e
+          ping -c 4 -W 3 "$TARGET_IP"
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "PING_OK=1" >> "$GITHUB_ENV"
+            echo "ICMP_PUBLIC_OK=1"
+          else
+            echo "PING_OK=0" >> "$GITHUB_ENV"
+            echo "ICMP_PUBLIC_OK=0"
+          fi
+          exit 0
+
+      - name: Extra runtime evidence if Ping still fails
+        if: env.PING_OK == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hamoon_temp             -o StrictHostKeyChecking=no             -o UserKnownHostsFile=/dev/null             -o BatchMode=yes             root@"$TARGET_IP" 'bash -s' <<'RUNTIME'
+          echo '=== FULL NFT RULESET ==='
+          nft list ruleset 2>&1 || true
+          echo '=== SYSCTL FILES ==='
+          grep -Rns 'icmp_echo_ignore_all' /etc/sysctl.conf /etc/sysctl.d 2>/dev/null || true
+          echo '=== NETWORK ==='
+          ip -br addr || true
+          ip route || true
+          RUNTIME
+
+      - name: Remove temporary root key
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          ssh -i ~/.ssh/hamoon_temp             -o StrictHostKeyChecking=no             -o UserKnownHostsFile=/dev/null             -o BatchMode=yes             -o ConnectTimeout=6             root@"$TARGET_IP" 'bash -s' <<'CLEAN'
+          if [ -f /root/.ssh/authorized_keys ]; then
+            grep -v 'hamoon-temp-icmp' /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.hamoon.tmp || true
+            mv /root/.ssh/authorized_keys.hamoon.tmp /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+          fi
+          rm -f /etc/ssh/sshd_config.d/99-hamoon-temp-icmp.conf
+          systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+          echo "TEMP_KEY_REMOVED=1"
+          CLEAN
+          exit 0
+
+      - name: Final SSH reachability
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          nc -vz -w 8 "$TARGET_IP" 22
+          echo "SSH_PUBLIC_OK=1"
