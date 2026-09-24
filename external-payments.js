@@ -39,6 +39,13 @@ function camcamReturnUrl(status, row) {
   if (row?.external_ref) u.searchParams.set('intent', row.external_ref);
   return u.toString();
 }
+function beonmeetReturnUrl(status, row) {
+  const u = new URL(process.env.BEONMEET_RETURN_URL || 'https://beonmeet.smarbiz.sbs/api/billing/payment-return');
+  u.searchParams.set('payment', status);
+  if (row?.receipt) u.searchParams.set('receipt', row.receipt);
+  if (row?.external_ref) u.searchParams.set('intent', row.external_ref);
+  return u.toString();
+}
 function marketReturnUrl(status, row) {
   const u = new URL(process.env.VESTALAND_MARKET_RETURN_URL || 'https://vestaland.smarbiz.sbs/');
   u.searchParams.set('market_payment', status);
@@ -209,6 +216,40 @@ function mountExternalPayments(app, { db, axios }) {
   });
   app.get('/payments/camcam/verify', (req,res) => verifyCallback({ req,res,db,axios,appName:'camcam',returnUrl:camcamReturnUrl }));
   app.get('/payments/camcam/status', (req,res) => paymentStatus(req,res,db,'camcam'));
+
+  app.get('/payments/beonmeet/start', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!allowStart(req)) return res.status(429).send(errorPage('درخواست زیاد بود', 'چند دقیقه دیگه دوباره امتحان کن.'));
+    const intent = String(req.query.intent || '').trim();
+    if (!validIntent(intent)) return res.status(400).send(errorPage('لینک پرداخت معتبر نیست', 'لطفاً از داخل ربات BeOnMeet دوباره روی خرید بزن.'));
+    try {
+      const resolver = process.env.BEONMEET_PAYMENT_INTENT_URL || 'https://beonmeet.smarbiz.sbs/api/billing/payment-intent';
+      const answer = await axios.get(resolver, {
+        params: { intent },
+        timeout: 15000,
+        headers: { Accept:'application/json', 'User-Agent':'HamoonCloud-BeOnMeet/1.0' }
+      });
+      const d = answer.data || {};
+      const amountToman = Number(d.amount_toman || 0);
+      const plan = String(d.plan || '');
+      if (!d.ok || d.status !== 'pending' || d.intent !== intent ||
+          !['monthly','quarterly','halfyear'].includes(plan) ||
+          !Number.isSafeInteger(amountToman) || amountToman < 1000 || amountToman > 500000000) {
+        return res.status(409).send(errorPage('پرداخت قابل انجام نیست', 'درخواست منقضی یا نامعتبره؛ از داخل BeOnMeet دوباره تلاش کن.'));
+      }
+      const p = await createGatewayPayment({
+        db, axios, appName:'beonmeet', intent, plan, amountToman,
+        label:String(d.label || 'پلن ویژه BeOnMeet').slice(0,180),
+        orderPrefix:'bom', callbackPath:'/payments/beonmeet/verify'
+      });
+      return res.redirect(302, `${PAYMENT_PUBLIC_ORIGIN}/payment/start/${encodeURIComponent(p.trackId)}`);
+    } catch (error) {
+      console.error('[BEONMEET_PAYMENT_START]', error.gatewayData || error.response?.data || error.code || error.message);
+      return res.status(502).send(errorPage('درگاه در دسترس نیست', 'شروع پرداخت انجام نشد. لطفاً دوباره امتحان کن.'));
+    }
+  });
+  app.get('/payments/beonmeet/verify', (req,res) => verifyCallback({ req,res,db,axios,appName:'beonmeet',returnUrl:beonmeetReturnUrl }));
+  app.get('/payments/beonmeet/status', (req,res) => paymentStatus(req,res,db,'beonmeet'));
 
   app.get('/payments/vestaland/start', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
