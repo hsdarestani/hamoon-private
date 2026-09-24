@@ -1,0 +1,61 @@
+name: Audit production firewall automation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-production-firewall-automation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Audit production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo '=== GREP APP ==='
+          grep -RniE --exclude-dir=node_modules --exclude-dir=.git             'deny-user|4499|8\.8\.8\.8|apply_to_resources|remove_from_resources|/firewalls/|firewall'             "$APP_PATH" 2>/dev/null | head -n 400 || true
+
+          echo '=== CRONTAB ==='
+          crontab -l 2>/dev/null || true
+          for f in /etc/cron.d/* /etc/crontab; do
+            [ -f "$f" ] && { echo "--- $f"; sed -n '1,220p' "$f"; }
+          done 2>/dev/null || true
+
+          echo '=== SYSTEMD TIMERS ==='
+          systemctl list-timers --all --no-pager 2>/dev/null | head -n 120 || true
+
+          echo '=== PM2 ==='
+          if command -v pm2 >/dev/null 2>&1; then
+            pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);for(const p of a)console.log(JSON.stringify({name:p.name,script:p.pm2_env?.pm_exec_path,args:p.pm2_env?.args,cron_restart:p.pm2_env?.cron_restart,status:p.pm2_env?.status}))})"
+            echo '=== RECENT FIREWALL LOGS ==='
+            pm2 logs --nostream --lines 10000 2>&1 | grep -Ei 'firewall|deny-user|4499|8\.8\.8\.8|apply_to_resources' | tail -n 300 || true
+          fi
+
+          echo '=== PROCESS CMDLINES ==='
+          ps auxww | grep -Ei 'firewall|deny-user|4499|8\.8\.8\.8' | grep -v grep || true
+          REMOTE
