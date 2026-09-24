@@ -1,0 +1,82 @@
+name: Remove obsolete deny user firewall
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/remove-obsolete-deny-user-firewall.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Delete obsolete firewall safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const dcs=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const ID=11330120;
+          (async()=>{
+            const dc={...dcs.hetzner,key:'hetzner'};
+            let fw;
+            try {
+              fw=(await h.hetznerRequest(dc,'GET',`/firewalls/${ID}`)).firewall;
+            } catch(e) {
+              if(Number(e?.status)===404){ console.log('ALREADY_DELETED=1'); return; }
+              throw e;
+            }
+            if(fw?.name!=='deny-user68413') throw new Error('UNEXPECTED_FIREWALL_NAME');
+            if((fw.applied_to||[]).length) throw new Error('FIREWALL_STILL_IN_USE');
+            const rules=fw.rules||[];
+            const expected=rules.length===1 &&
+              rules[0].direction==='out' &&
+              rules[0].protocol==='udp' &&
+              String(rules[0].port)==='4499' &&
+              (rules[0].destination_ips||[]).includes('8.8.8.8/32');
+            if(!expected) throw new Error('FIREWALL_RULES_CHANGED');
+            await h.hetznerRequest(dc,'DELETE',`/firewalls/${ID}`);
+            try {
+              await h.hetznerRequest(dc,'GET',`/firewalls/${ID}`);
+              throw new Error('FIREWALL_DELETE_NOT_CONFIRMED');
+            } catch(e) {
+              if(Number(e?.status)===404){ console.log('FIREWALL_DELETED=1'); return; }
+              throw e;
+            }
+          })().catch(e=>{console.error('DELETE_FAILED='+String(e?.stack||e));process.exit(1)});
+          NODE
+          REMOTE
+
+      - name: Verify SSH remains reachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          nc -vz -w 8 "$TARGET_IP" 22
+          echo "TARGET_SSH_REACHABLE=1"
