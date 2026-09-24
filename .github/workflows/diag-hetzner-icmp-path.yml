@@ -1,0 +1,79 @@
+name: Diagnose Hetzner ICMP path Srv-HET-4b2569
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diag-hetzner-icmp-path.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_SERVER_ID: 166087176
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare management SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect Hetzner network layer
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' TARGET_SERVER_ID='$TARGET_SERVER_ID' TARGET_IP='$TARGET_IP' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const datacenters=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const id=String(process.env.TARGET_SERVER_ID);
+          const ip=String(process.env.TARGET_IP);
+          (async()=>{
+            const p=await db.getPurchaseByServerId(id);
+            if(!p) throw new Error('PURCHASE_NOT_FOUND');
+            const dc={...(datacenters[p.datacenter]||{}),key:p.datacenter};
+            const server=await h.getHetznerServer(dc,id);
+            console.log('SERVER='+JSON.stringify({
+              id:server.id,name:server.name,status:server.status,rescue_enabled:server.rescue_enabled,
+              locked:server.locked,protection:server.protection,public_net:server.public_net,
+              private_net:server.private_net,datacenter:server.datacenter
+            }));
+            const ips=await h.hetznerRequest(dc,'GET','/primary_ips');
+            const primary=(ips.primary_ips||[]).find(x=>String(x.ip)===ip || String(x.assignee_id)===id);
+            console.log('PRIMARY_IP='+JSON.stringify(primary||null));
+            const fws=await h.hetznerRequest(dc,'GET','/firewalls');
+            const linked=(fws.firewalls||[]).filter(f=>Array.isArray(f.applied_to)&&f.applied_to.some(a=>String(a?.server?.id||a?.label_selector?.selector||'')===id));
+            console.log('LINKED_FIREWALLS='+JSON.stringify(linked));
+            console.log('ALL_FIREWALL_SUMMARY='+JSON.stringify((fws.firewalls||[]).map(f=>({id:f.id,name:f.name,applied_to:f.applied_to,rules:f.rules}))));
+            const actions=await h.hetznerRequest(dc,'GET',`/servers/${id}/actions?sort=status&per_page=20`);
+            console.log('RECENT_ACTIONS='+JSON.stringify((actions.actions||[]).slice(0,20).map(a=>({id:a.id,command:a.command,status:a.status,started:a.started,finished:a.finished,error:a.error}))));
+            await db.pool.end();
+          })().catch(async e=>{console.error(String(e?.stack||e));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
+      - name: Runner network checks
+        shell: bash
+        run: |
+          set +e
+          echo "=== PING ==="
+          ping -c 3 -W 2 "$TARGET_IP"
+          echo "PING_RC=$?"
+          echo "=== TRACE ICMP ==="
+          traceroute -n -I -w 1 -q 1 -m 16 "$TARGET_IP" || true
+          echo "=== TCP22 ==="
+          nc -vz -w 8 "$TARGET_IP" 22
