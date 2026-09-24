@@ -1,0 +1,84 @@
+name: Recover Srv HET 4b2569 Firewall
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-srv-het-4b2569-firewall.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Remove broken firewall from target
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const dcs=require('./datacenters');
+          const h=require('./Hetzner/hetzner-api');
+          const FIREWALL_ID='11330120';
+          const SERVER_ID=166087176;
+          (async()=>{
+            const dc={...dcs.hetzner,key:'hetzner'};
+            const before=await h.hetznerRequest(dc,'GET',`/servers/${SERVER_ID}`);
+            console.log('BEFORE_FIREWALLS='+JSON.stringify(before.server?.public_net?.firewalls||[]));
+
+            const resp=await h.hetznerRequest(
+              dc,
+              'POST',
+              `/firewalls/${FIREWALL_ID}/actions/remove_from_resources`,
+              {remove_from:[{type:'server',server:{id:SERVER_ID}}]}
+            );
+            const action=resp?.action;
+            if(action?.id) await h.waitHetznerAction(dc, action.id, 180000);
+
+            const after=await h.hetznerRequest(dc,'GET',`/servers/${SERVER_ID}`);
+            console.log('AFTER_FIREWALLS='+JSON.stringify(after.server?.public_net?.firewalls||[]));
+            if((after.server?.public_net?.firewalls||[]).some(f=>String(f.id)===FIREWALL_ID)){
+              throw new Error('FIREWALL_STILL_ATTACHED');
+            }
+          })().catch(e=>{console.error('RECOVERY_FAILED='+String(e?.stack||e));process.exit(1)});
+          NODE
+          REMOTE
+
+      - name: Verify target reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          ping -c 3 -W 3 "$TARGET_IP" || true
+          for i in 1 2 3 4 5 6; do
+            if nc -vz -w 5 "$TARGET_IP" 22; then
+              echo "TCP22_OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "TCP22_FAIL"
+          exit 1
