@@ -50,19 +50,29 @@ jobs:
             const before=await h.hetznerRequest(dc,'GET',`/servers/${SERVER_ID}`);
             console.log('BEFORE_FIREWALLS='+JSON.stringify(before.server?.public_net?.firewalls||[]));
 
-            const resp=await h.hetznerRequest(
-              dc,
-              'POST',
-              `/firewalls/${FIREWALL_ID}/actions/remove_from_resources`,
-              {remove_from:[{type:'server',server:{id:SERVER_ID}}]}
-            );
-            const action=resp?.action;
-            if(action?.id) await h.waitHetznerAction(dc, action.id, 180000);
+            const attached=(before.server?.public_net?.firewalls||[]).find(f=>String(f.id)===FIREWALL_ID);
+            if(attached && String(attached.status||'').toLowerCase()!=='pending'){
+              const resp=await h.hetznerRequest(
+                dc,
+                'POST',
+                `/firewalls/${FIREWALL_ID}/actions/remove_from_resources`,
+                {remove_from:[{type:'server',server:{id:SERVER_ID}}]}
+              );
+              const action=resp?.action;
+              if(action?.id) await h.waitHetznerAction(dc, action.id, 180000).catch(()=>null);
+            }
 
-            const after=await h.hetznerRequest(dc,'GET',`/servers/${SERVER_ID}`);
-            console.log('AFTER_FIREWALLS='+JSON.stringify(after.server?.public_net?.firewalls||[]));
-            if((after.server?.public_net?.firewalls||[]).some(f=>String(f.id)===FIREWALL_ID)){
-              throw new Error('FIREWALL_STILL_ATTACHED');
+            let after=null;
+            for(let i=0;i<45;i++){
+              after=await h.hetznerRequest(dc,'GET',`/servers/${SERVER_ID}`);
+              const list=after.server?.public_net?.firewalls||[];
+              console.log('FIREWALL_POLL_'+i+'='+JSON.stringify(list));
+              if(!list.some(f=>String(f.id)===FIREWALL_ID)) break;
+              await new Promise(r=>setTimeout(r,2000));
+            }
+            console.log('AFTER_FIREWALLS='+JSON.stringify(after?.server?.public_net?.firewalls||[]));
+            if((after?.server?.public_net?.firewalls||[]).some(f=>String(f.id)===FIREWALL_ID)){
+              throw new Error('FIREWALL_STILL_ATTACHED_AFTER_WAIT');
             }
           })().catch(e=>{console.error('RECOVERY_FAILED='+String(e?.stack||e));process.exit(1)});
           NODE
