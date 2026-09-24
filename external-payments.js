@@ -86,7 +86,7 @@ async function createGatewayPayment({ db, axios, appName, intent, plan, amountTo
   const receipt = crypto.randomBytes(18).toString('hex');
   const amountRial = Number(amountToman) * 10;
   const orderId = `${orderPrefix}-${receipt}`;
-  const merchant = process.env.ZIBAL_MERCHANT_ID || MERCHANT_FALLBACK;
+  const merchant = process.env.ZIBAL_MERCHANT || process.env.ZIBAL_MERCHANT_ID || MERCHANT_FALLBACK;
   const callbackUrl = `${PAYMENT_PUBLIC_ORIGIN}${callbackPath}?receipt=${encodeURIComponent(receipt)}`;
   await ensureTable(db);
   await db.pool.execute(
