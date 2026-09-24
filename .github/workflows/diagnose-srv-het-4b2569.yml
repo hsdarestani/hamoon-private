@@ -1,0 +1,115 @@
+name: Diagnose Srv HET 4b2569
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-srv-het-4b2569.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+      TARGET_NAME: Srv-HET-4b2569
+      TARGET_IP: 91.107.146.135
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Inspect target read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          TARGET_NAME_B64="$(printf '%s' "$TARGET_NAME" | base64 -w0)"
+          TARGET_IP_B64="$(printf '%s' "$TARGET_IP" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" \
+            "APP_PATH_B64='$APP_PATH_B64' TARGET_NAME_B64='$TARGET_NAME_B64' TARGET_IP_B64='$TARGET_IP_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          TARGET_NAME="$(printf '%s' "$TARGET_NAME_B64" | base64 -d)"
+          TARGET_IP="$(printf '%s' "$TARGET_IP_B64" | base64 -d)"
+          cd "$APP_PATH"
+
+          echo '=== DB_AND_PROVIDER ==='
+          node - "$TARGET_NAME" "$TARGET_IP" <<'NODE'
+          require('dotenv').config();
+          const db = require('./db');
+          const dcs = require('./datacenters');
+          const cloud = require('./cloud-api');
+          const [targetName, targetIp] = process.argv.slice(2);
+          (async () => {
+            const [rows] = await db.pool.query(
+              `SELECT server_id,telegram_id,datacenter,server_name,status,provider_status,provider_status_checked_at,
+                      public_ip,duration,amount,auto_renew,last_billed_at,created_at,delivered_at,
+                      suspend_reason,renewal_stopped_at,lifecycle_error_code,lifecycle_updated_at
+                 FROM purchases
+                WHERE server_name=? OR public_ip=?
+                ORDER BY updated_at DESC
+                LIMIT 5`,
+              [targetName, targetIp]
+            );
+            console.log('PURCHASES=' + JSON.stringify(rows));
+            for (const p of rows) {
+              const dc = dcs[p.datacenter];
+              if (!dc) {
+                console.log('PROVIDER=' + JSON.stringify({server_id:p.server_id,error:'DC_NOT_FOUND',datacenter:p.datacenter}));
+                continue;
+              }
+              try {
+                const s = await cloud.getServer({...dc,key:p.datacenter}, null, p.server_id);
+                console.log('PROVIDER=' + JSON.stringify({
+                  server_id:p.server_id,
+                  status:s?.status || null,
+                  name:s?.name || null,
+                  server_type:s?.server_type || null,
+                  addresses:s?.addresses || null
+                }));
+              } catch (e) {
+                console.log('PROVIDER=' + JSON.stringify({
+                  server_id:p.server_id,
+                  error:String(e?.message || e),
+                  status:e?.response?.status || e?.status || null
+                }));
+              }
+            }
+            await db.pool.end();
+          })().catch(async e => {
+            console.error('NODE_DIAG_FAILED=' + String(e?.stack || e));
+            try { await db.pool.end(); } catch {}
+            process.exit(1);
+          });
+          NODE
+
+          echo '=== NETWORK_FROM_PRODUCTION ==='
+          if command -v ping >/dev/null 2>&1; then
+            ping -c 3 -W 2 "$TARGET_IP" || true
+          fi
+          if command -v nc >/dev/null 2>&1; then
+            nc -vz -w 5 "$TARGET_IP" 22 || true
+          else
+            timeout 6 bash -c "</dev/tcp/$TARGET_IP/22" && echo TCP22_OK || echo TCP22_FAIL
+          fi
+
+          echo '=== RECENT_RELATED_LOGS ==='
+          if command -v pm2 >/dev/null 2>&1; then
+            pm2 logs hamoonbot --nostream --lines 2500 2>&1 | grep -F "$TARGET_NAME" | tail -n 80 || true
+            pm2 logs hamoonbot --nostream --lines 2500 2>&1 | grep -F "$TARGET_IP" | tail -n 80 || true
+          fi
+          REMOTE
