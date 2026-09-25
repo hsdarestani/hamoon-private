@@ -35,6 +35,8 @@ assert('invalid traffic package is rejected', addons.quoteTrafficAddon(1, 7).ok 
 const sampleQuote = addons.quoteTrafficAddon(1, 5);
 assert('valid traffic package produces a positive quote', sampleQuote.ok && sampleQuote.extraBytes === 5_000_000_000_000 && sampleQuote.amountToman > 0);
 
+assert('Hetzner display unit maps provider 20 TiB allowance to 20.00', (20 * alerts.HETZNER_DISPLAY_TB_BYTES) / alerts.HETZNER_DISPLAY_TB_BYTES === 20);
+
 const twentyTb = 20 * alerts.DECIMAL_TB_BYTES;
 assert('quota alert stays silent below 20 TB allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb - 1, twentyTb) === false);
 assert('quota alert fires exactly at 20 TB allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb, twentyTb) === true);
@@ -64,6 +66,7 @@ try {
   assert('quota alert does not block overage settlement', patched.includes('[HETZNER_TRAFFIC_ALERT_ERROR]') && patched.includes('const trafficSettlement = await settleHetznerTrafficOverage({'));
   assert('traffic quota monitor runs every five minutes', patched.includes("cron.schedule('*/5 * * * *'") && patched.includes('runHetznerTrafficQuotaMonitor()'));
   assert('traffic quota monitor warns at 90 and 98 percent without billing', patched.includes('claimTrafficQuotaWarningAlert({') && patched.includes('warningThreshold >= 98'));
+  assert('quota alert display uses provider friendly units', patched.includes('trafficAlerts.HETZNER_DISPLAY_TB_BYTES'));
   assert('console remains active', patched.includes("case 'HCONSOLE':"));
   assert('rename remains active', patched.includes("case 'RENAME_SERVER':"));
   assert('provider visibility remains active', patched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
