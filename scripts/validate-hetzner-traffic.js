@@ -40,6 +40,10 @@ assert('quota alert stays silent below 20 TB allowance', alerts.shouldNotifyTraf
 assert('quota alert fires exactly at 20 TB allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb, twentyTb) === true);
 assert('quota alert stays active above exhausted allowance', alerts.shouldNotifyTrafficQuotaExhausted(twentyTb + 1, twentyTb) === true);
 assert('quota alert ignores missing allowance', alerts.shouldNotifyTrafficQuotaExhausted(1, 0) === false);
+assert('quota warning stays silent below 90 percent', alerts.getTrafficQuotaWarningThreshold(twentyTb * 0.899, twentyTb) === null);
+assert('quota warning starts at 90 percent', alerts.getTrafficQuotaWarningThreshold(twentyTb * 0.90, twentyTb) === 90);
+assert('quota warning escalates at 98 percent', alerts.getTrafficQuotaWarningThreshold(twentyTb * 0.98, twentyTb) === 98);
+assert('quota warning yields to exhausted alert at 100 percent', alerts.getTrafficQuotaWarningThreshold(twentyTb, twentyTb) === null);
 
 const core = fs.readFileSync('index-core.js', 'utf8');
 try {
@@ -58,6 +62,8 @@ try {
   assert('prepaid traffic extends automatic billing allowance', patched.includes('customerIncludedBytes') && patched.includes("require('./hetzner-traffic-addons').getTrafficAddonSummary"));
   assert('quota exhausted alert is wired into runtime billing', patched.includes("require('./hetzner-traffic-alerts')") && patched.includes('claimTrafficQuotaExhaustedAlert({'));
   assert('quota alert does not block overage settlement', patched.includes('[HETZNER_TRAFFIC_ALERT_ERROR]') && patched.includes('const trafficSettlement = await settleHetznerTrafficOverage({'));
+  assert('traffic quota monitor runs every five minutes', patched.includes("cron.schedule('*/5 * * * *'") && patched.includes('runHetznerTrafficQuotaMonitor()'));
+  assert('traffic quota monitor warns at 90 and 98 percent without billing', patched.includes('claimTrafficQuotaWarningAlert({') && patched.includes('warningThreshold >= 98'));
   assert('console remains active', patched.includes("case 'HCONSOLE':"));
   assert('rename remains active', patched.includes("case 'RENAME_SERVER':"));
   assert('provider visibility remains active', patched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
