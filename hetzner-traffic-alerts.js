@@ -4,6 +4,7 @@ require('dotenv').config();
 const mysql = require('mysql2/promise');
 
 const DECIMAL_TB_BYTES = 1_000_000_000_000;
+const HETZNER_DISPLAY_TB_BYTES = 1024 ** 4;
 const TRAFFIC_WARNING_THRESHOLDS = Object.freeze([90, 98]);
 
 const pool = mysql.createPool({
@@ -227,6 +228,7 @@ async function releaseTrafficQuotaWarningAlert({
 
 module.exports = {
   DECIMAL_TB_BYTES,
+  HETZNER_DISPLAY_TB_BYTES,
   TRAFFIC_WARNING_THRESHOLDS,
   shouldNotifyTrafficQuotaExhausted,
   getTrafficQuotaWarningThreshold,
