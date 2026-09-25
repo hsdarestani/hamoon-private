@@ -4,6 +4,7 @@ require('dotenv').config();
 const mysql = require('mysql2/promise');
 
 const DECIMAL_TB_BYTES = 1_000_000_000_000;
+const TRAFFIC_WARNING_THRESHOLDS = Object.freeze([90, 98]);
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
@@ -16,6 +17,7 @@ const pool = mysql.createPool({
 });
 
 let schemaPromise = null;
+let warningSchemaPromise = null;
 
 function mysqlDate(value) {
   const date = value instanceof Date ? value : new Date(value);
@@ -27,6 +29,19 @@ function shouldNotifyTrafficQuotaExhausted(outgoingBytes, allowanceBytes) {
   const outgoing = Math.max(0, Number(outgoingBytes || 0));
   const allowance = Math.max(0, Number(allowanceBytes || 0));
   return allowance > 0 && outgoing >= allowance;
+}
+
+function getTrafficQuotaWarningThreshold(outgoingBytes, allowanceBytes) {
+  const outgoing = Math.max(0, Number(outgoingBytes || 0));
+  const allowance = Math.max(0, Number(allowanceBytes || 0));
+  if (!(allowance > 0) || outgoing >= allowance) return null;
+
+  const percent = outgoing / allowance * 100;
+  let reached = null;
+  for (const threshold of TRAFFIC_WARNING_THRESHOLDS) {
+    if (percent >= threshold) reached = threshold;
+  }
+  return reached;
 }
 
 async function ensureTrafficAlertSchema() {
@@ -55,6 +70,35 @@ async function ensureTrafficAlertSchema() {
     throw error;
   });
   return schemaPromise;
+}
+
+async function ensureTrafficWarningSchema() {
+  if (warningSchemaPromise) return warningSchemaPromise;
+  warningSchemaPromise = (async () => {
+    const conn = await pool.getConnection();
+    try {
+      await conn.execute(`
+        CREATE TABLE IF NOT EXISTS hetzner_traffic_warning_alerts (
+          server_id VARCHAR(255) NOT NULL,
+          period_start DATETIME NOT NULL,
+          allowance_bytes BIGINT UNSIGNED NOT NULL,
+          threshold_percent TINYINT UNSIGNED NOT NULL,
+          telegram_id VARCHAR(255) NOT NULL,
+          datacenter VARCHAR(64) NOT NULL,
+          outgoing_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+          notified_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (server_id, period_start, allowance_bytes, threshold_percent),
+          INDEX idx_hetzner_traffic_warning_user_period (telegram_id, period_start)
+        )
+      `);
+    } finally {
+      conn.release();
+    }
+  })().catch(error => {
+    warningSchemaPromise = null;
+    throw error;
+  });
+  return warningSchemaPromise;
 }
 
 async function claimTrafficQuotaExhaustedAlert({
@@ -116,10 +160,80 @@ async function releaseTrafficQuotaExhaustedAlert({
   }
 }
 
+async function claimTrafficQuotaWarningAlert({
+  telegramId,
+  serverId,
+  datacenter,
+  periodStart,
+  outgoingBytes,
+  allowanceBytes,
+  thresholdPercent
+}) {
+  const threshold = Number(thresholdPercent);
+  if (!TRAFFIC_WARNING_THRESHOLDS.includes(threshold)) return false;
+  if (getTrafficQuotaWarningThreshold(outgoingBytes, allowanceBytes) !== threshold) return false;
+
+  await ensureTrafficWarningSchema();
+  const conn = await pool.getConnection();
+  try {
+    const [result] = await conn.execute(
+      `INSERT IGNORE INTO hetzner_traffic_warning_alerts
+       (server_id, period_start, allowance_bytes, threshold_percent, telegram_id, datacenter, outgoing_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(serverId),
+        mysqlDate(periodStart),
+        Math.max(0, Math.floor(Number(allowanceBytes || 0))),
+        threshold,
+        String(telegramId),
+        String(datacenter),
+        Math.max(0, Math.floor(Number(outgoingBytes || 0)))
+      ]
+    );
+    return Number(result?.affectedRows || 0) === 1;
+  } finally {
+    conn.release();
+  }
+}
+
+async function releaseTrafficQuotaWarningAlert({
+  telegramId,
+  serverId,
+  datacenter,
+  periodStart,
+  allowanceBytes,
+  thresholdPercent
+}) {
+  await ensureTrafficWarningSchema();
+  const conn = await pool.getConnection();
+  try {
+    await conn.execute(
+      `DELETE FROM hetzner_traffic_warning_alerts
+       WHERE server_id = ? AND period_start = ? AND allowance_bytes = ?
+         AND threshold_percent = ? AND telegram_id = ? AND datacenter = ?`,
+      [
+        String(serverId),
+        mysqlDate(periodStart),
+        Math.max(0, Math.floor(Number(allowanceBytes || 0))),
+        Number(thresholdPercent),
+        String(telegramId),
+        String(datacenter)
+      ]
+    );
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   DECIMAL_TB_BYTES,
+  TRAFFIC_WARNING_THRESHOLDS,
   shouldNotifyTrafficQuotaExhausted,
+  getTrafficQuotaWarningThreshold,
   ensureTrafficAlertSchema,
+  ensureTrafficWarningSchema,
   claimTrafficQuotaExhaustedAlert,
-  releaseTrafficQuotaExhaustedAlert
+  releaseTrafficQuotaExhaustedAlert,
+  claimTrafficQuotaWarningAlert,
+  releaseTrafficQuotaWarningAlert
 };
