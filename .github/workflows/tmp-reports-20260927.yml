@@ -1,11 +1,9 @@
 name: Temporary branch diagnostics 2026-09-27
 
 on:
-  push:
+  pull_request:
     branches:
-      - 'fix/reports-2026-09-27'
-    paths:
-      - '.github/workflows/tmp-reports-20260927.yml'
+      - main
 
 permissions:
   contents: read
