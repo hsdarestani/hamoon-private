@@ -47,6 +47,18 @@ function applyProviderVisibilityPatches(coreSource) {
 
   source = replaceOnce(
     source,
+    ' const userPurchases = await getUserActivePurchases(effectiveUserId);',
+    [
+      " await require('./stale-server-reconcile').reconcileStaleServersForUser(effectiveUserId).catch(error => {",
+      "   console.warn('[MANAGE_STALE_RECONCILE_FAILED]', { user_id: String(effectiveUserId), message: error?.message || String(error) });",
+      ' });',
+      ' const userPurchases = await getUserActivePurchases(effectiveUserId);'
+    ].join('\n'),
+    'reconcile provider-deleted servers before manage list'
+  );
+
+  source = replaceOnce(
+    source,
     ' const promises = datacenterKeys.map(dcKey => {',
     [
       ' const manageProviderErrors = [];',

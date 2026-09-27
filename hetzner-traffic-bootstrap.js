@@ -56,6 +56,19 @@ function formatHetznerTrafficDateFa(value) {
   }
 }
 
+function formatHetznerTrafficResetCountdown(resetAt, now = new Date()) {
+  const reset = new Date(resetAt);
+  const current = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(reset.getTime()) || Number.isNaN(current.getTime())) return 'نامشخص';
+  const diffMs = reset.getTime() - current.getTime();
+  if (diffMs <= 0) return 'در حال ریست';
+  const totalHours = Math.ceil(diffMs / 3600000);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  if (days > 0) return days.toLocaleString('fa-IR') + ' روز و ' + hours.toLocaleString('fa-IR') + ' ساعت';
+  return hours.toLocaleString('fa-IR') + ' ساعت';
+}
+
 function hetznerTrafficRangeLabel(range) {
   return ({ current: 'ماه تقویمی جاری Hetzner', '24h': '۲۴ ساعت گذشته', '7d': '۷ روز گذشته', '30d': '۳۰ روز گذشته' })[range] || 'ماه تقویمی جاری Hetzner';
 }
@@ -96,7 +109,8 @@ async function handleHetznerTrafficInfo(chatId, userId, serverId, dcConfig, rang
 
     if (selectedRange === 'current' && traffic.traffic_period_start && traffic.traffic_period_reset) {
       text += '▶️ شروع دوره ترافیک: <b>' + htmlEscape(formatHetznerTrafficDateFa(traffic.traffic_period_start)) + '</b>\\n' +
-        '🔄 ریست بعدی: <b>' + htmlEscape(formatHetznerTrafficDateFa(traffic.traffic_period_reset)) + '</b>\\n';
+        '🔄 ریست بعدی: <b>' + htmlEscape(formatHetznerTrafficDateFa(traffic.traffic_period_reset)) + '</b>\\n' +
+        '⏳ زمان مانده تا ریست: <b>' + htmlEscape(formatHetznerTrafficResetCountdown(traffic.traffic_period_reset)) + '</b>\\n';
     }
     text += '\\n';
 
