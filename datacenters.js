@@ -77,11 +77,20 @@ module.exports = {
 
 hetzner: createHetznerLocationDc({
   key: 'hetzner',
-  label: 'آلمان - Hetzner',
+  label: 'آلمان - نورنبرگ - Hetzner',
   flag: '🇩🇪',
-  location: process.env.HETZNER_LOCATION || 'nbg1',
-  fallbackLocations: process.env.HETZNER_LOCATION_FALLBACKS || 'nbg1,fsn1',
-  namePrefix: 'HET'
+  location: 'nbg1',
+  fallbackLocations: 'nbg1',
+  namePrefix: 'NBG'
+}),
+
+'hetzner-falkenstein': createHetznerLocationDc({
+  key: 'hetzner-falkenstein',
+  label: 'آلمان - فالکنشتاین - Hetzner',
+  flag: '🇩🇪',
+  location: 'fsn1',
+  fallbackLocations: 'fsn1',
+  namePrefix: 'FSN'
 }),
 
 'hetzner-finland': createHetznerLocationDc({
