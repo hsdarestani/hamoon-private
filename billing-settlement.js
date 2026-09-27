@@ -232,6 +232,35 @@ async function settleServerRenewalAtomic({
     );
 
     await conn.commit();
+
+    // Loyalty is deliberately best-effort and runs only after the money and
+    // billing event are committed. The billing event key makes the award
+    // idempotent and also matches the history backfill path.
+    if (renewal > 0) {
+      await require('./services/loyalty-club').recordEligibleSpend({
+        telegramId: String(telegramId),
+        eventKey: 'billing:' + eventKey,
+        eventType: 'renewal',
+        referenceId: String(serverId),
+        amountToman: renewal,
+        grossAmountToman: renewal,
+        occurredAt: nowDate,
+        metadata: {
+          source: 'atomic_billing_settlement',
+          datacenter: String(datacenter),
+          server_name: serverName || purchase.server_name || String(serverId),
+          billing_event_key: eventKey
+        }
+      }).catch(error => {
+        console.error('[LOYALTY_ATOMIC_RENEWAL_FAILED]', {
+          user_id: String(telegramId),
+          server_id: String(serverId),
+          event_key: eventKey,
+          message: error?.message || String(error)
+        });
+      });
+    }
+
     return { status: 'charged', charged: total, renewalCharged: renewal, trafficCharged: traffic, newWallet: balance - total, eventKey };
   } catch (error) {
     await conn.rollback().catch(() => {});
