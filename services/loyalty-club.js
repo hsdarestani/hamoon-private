@@ -287,38 +287,107 @@ async function syncPurchases(telegramId) {
 }
 
 async function syncHistoricalRenewals(telegramId) {
-  const launch = new Date(LAUNCH_AT);
-  if (Number.isNaN(launch.getTime())) return { renewals: 0, addedXp: 0 };
-  const [rows] = await pool.execute(
-    `SELECT w.id, w.amount, w.description, w.timestamp
-       FROM wallet_logs w
-       LEFT JOIN loyalty_events e
-         ON e.event_key = CONCAT('history:wallet:', w.id)
-      WHERE w.telegram_id = ?
-        AND w.amount < 0
-        AND LOWER(w.type) IN ('billing','upgrade','server_upgrade')
-        AND w.timestamp < ?
-        AND e.id IS NULL
-      ORDER BY w.timestamp ASC`,
-    [String(telegramId), launch]
-  );
+  const uid = String(telegramId);
   let addedXp = 0;
-  for (const row of rows) {
-    const amount = Math.max(0, -Number(row.amount || 0));
-    const xp = xpForSpend(amount);
-    const inserted = await recordEvent({
-      telegramId,
-      eventKey: `history:wallet:${row.id}`,
-      eventType: 'renewal',
-      referenceId: String(row.id),
-      xpDelta: xp,
-      spendAmount: amount,
-      occurredAt: row.timestamp,
-      metadata: { source: 'billing_history_backfill_v2_incremental', description: row.description || null }
-    });
-    if (inserted) addedXp += xp;
+  let modernRenewals = 0;
+  let legacyRenewals = 0;
+
+  // Modern atomic renewals are persisted in billing_events. This is the
+  // authoritative source for renewals after the billing-settlement rollout and
+  // allows the club to recover payments that were charged while the realtime
+  // loyalty hook was unavailable.
+  try {
+    const [billingRows] = await pool.execute(
+      `SELECT b.event_key, b.server_id, b.datacenter, b.amount_toman, b.period_end, b.metadata
+         FROM billing_events b
+         LEFT JOIN loyalty_events exact_event
+           ON exact_event.event_key = CONCAT('billing:', b.event_key)
+         LEFT JOIN loyalty_events legacy_event
+           ON legacy_event.telegram_id = b.telegram_id
+          AND legacy_event.event_type = 'renewal'
+          AND legacy_event.reference_id = b.server_id
+          AND ABS(TIMESTAMPDIFF(SECOND, legacy_event.occurred_at, b.period_end)) <= 10
+        WHERE b.telegram_id = ?
+          AND b.event_type = 'renewal'
+          AND exact_event.id IS NULL
+          AND legacy_event.id IS NULL
+        ORDER BY b.period_end ASC`,
+      [uid]
+    );
+
+    for (const row of billingRows) {
+      let metadata = row.metadata || {};
+      if (typeof metadata === 'string') {
+        try { metadata = JSON.parse(metadata); } catch (_) { metadata = {}; }
+      }
+      const renewalAmount = Math.max(
+        0,
+        Number(metadata?.renewalAmount ?? metadata?.renewal_amount ?? row.amount_toman ?? 0)
+      );
+      if (!(renewalAmount > 0)) continue;
+      const xp = xpForSpend(renewalAmount);
+      const inserted = await recordEvent({
+        telegramId: uid,
+        eventKey: `billing:${row.event_key}`,
+        eventType: 'renewal',
+        referenceId: row.server_id,
+        xpDelta: xp,
+        spendAmount: renewalAmount,
+        occurredAt: row.period_end,
+        metadata: {
+          source: 'billing_events_backfill_v1',
+          datacenter: row.datacenter,
+          billing_event_key: row.event_key
+        }
+      });
+      if (inserted) {
+        modernRenewals += 1;
+        addedXp += xp;
+      }
+    }
+  } catch (error) {
+    if (error?.code !== 'ER_NO_SUCH_TABLE') throw error;
+    console.warn('[LOYALTY] billing_events table unavailable during renewal backfill');
   }
-  return { renewals: rows.length, addedXp };
+
+  // Keep compatibility with charges recorded before billing_events existed.
+  const launch = new Date(LAUNCH_AT);
+  if (!Number.isNaN(launch.getTime())) {
+    const [rows] = await pool.execute(
+      `SELECT w.id, w.amount, w.description, w.timestamp
+         FROM wallet_logs w
+         LEFT JOIN loyalty_events e
+           ON e.event_key = CONCAT('history:wallet:', w.id)
+        WHERE w.telegram_id = ?
+          AND w.amount < 0
+          AND LOWER(w.type) IN ('billing','upgrade','server_upgrade')
+          AND w.timestamp < ?
+          AND e.id IS NULL
+        ORDER BY w.timestamp ASC`,
+      [uid, launch]
+    );
+
+    for (const row of rows) {
+      const amount = Math.max(0, -Number(row.amount || 0));
+      const xp = xpForSpend(amount);
+      const inserted = await recordEvent({
+        telegramId: uid,
+        eventKey: `history:wallet:${row.id}`,
+        eventType: 'renewal',
+        referenceId: String(row.id),
+        xpDelta: xp,
+        spendAmount: amount,
+        occurredAt: row.timestamp,
+        metadata: { source: 'billing_history_backfill_v3_incremental', description: row.description || null }
+      });
+      if (inserted) {
+        legacyRenewals += 1;
+        addedXp += xp;
+      }
+    }
+  }
+
+  return { renewals: modernRenewals + legacyRenewals, modernRenewals, legacyRenewals, addedXp };
 }
 
 async function syncHistory(telegramId) {
