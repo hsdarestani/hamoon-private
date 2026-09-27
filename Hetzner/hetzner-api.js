@@ -6,6 +6,61 @@ const axios  = require('axios');
 
 const BASE = 'https://api.hetzner.cloud/v1';
 
+const HETZNER_API_RETRY_ATTEMPTS = Math.max(0, Number(process.env.HETZNER_API_RETRY_ATTEMPTS || 4));
+const HETZNER_API_RETRY_BASE_MS = Math.max(100, Number(process.env.HETZNER_API_RETRY_BASE_MS || 750));
+const HETZNER_API_RETRY_MAX_MS = Math.max(HETZNER_API_RETRY_BASE_MS, Number(process.env.HETZNER_API_RETRY_MAX_MS || 10000));
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function retryAfterMs(headers = {}, attempt = 0) {
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
+  if (raw != null) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(HETZNER_API_RETRY_MAX_MS, Math.max(250, seconds * 1000));
+    }
+    const dateMs = Date.parse(String(raw));
+    if (Number.isFinite(dateMs)) {
+      return Math.min(HETZNER_API_RETRY_MAX_MS, Math.max(250, dateMs - Date.now()));
+    }
+  }
+  return Math.min(HETZNER_API_RETRY_MAX_MS, HETZNER_API_RETRY_BASE_MS * Math.pow(2, attempt));
+}
+
+function shouldRetryHetznerStatus(status, method) {
+  const code = Number(status || 0);
+  const verb = String(method || 'GET').toUpperCase();
+  if (code === 429) return true;
+  return ['GET', 'HEAD', 'OPTIONS'].includes(verb) && [502, 503, 504].includes(code);
+}
+
+function installHetznerRetryInterceptor(http) {
+  http.interceptors.response.use(
+    response => response,
+    async error => {
+      const cfg = error?.config;
+      const status = Number(error?.response?.status || 0);
+      if (!cfg || !shouldRetryHetznerStatus(status, cfg.method)) throw error;
+      const attempt = Number(cfg.__hetznerRetryAttempt || 0);
+      if (attempt >= HETZNER_API_RETRY_ATTEMPTS) throw error;
+      cfg.__hetznerRetryAttempt = attempt + 1;
+      const delayMs = retryAfterMs(error?.response?.headers || {}, attempt);
+      console.warn('[HETZNER_API_RETRY]', {
+        method: String(cfg.method || 'GET').toUpperCase(),
+        url: cfg.url,
+        status,
+        attempt: attempt + 1,
+        delay_ms: delayMs
+      });
+      await sleep(delayMs);
+      return http.request(cfg);
+    }
+  );
+  return http;
+}
+
 
 function getHetznerApiToken(config = {}) {
   return config?.HETZNER_API_TOKEN || config?.HETZNER_TOKEN || config?.apiToken || config?.token ||
@@ -15,20 +70,49 @@ function getHetznerApiToken(config = {}) {
 async function hetznerRequest(config, method, reqPath, body) {
   const token = getHetznerApiToken(config);
   if (!token) throw new Error('Hetzner API token is missing');
-  const res = await axios({
-    baseURL: BASE,
-    url: reqPath,
-    method,
-    data: body,
-    timeout: 30000,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    validateStatus: () => true
-  });
-  if (res.status >= 200 && res.status < 300) return res.data;
-  const err = new Error(`Hetzner API ${method} ${reqPath} failed HTTP ${res.status}`);
-  err.status = res.status;
-  err.data = res.data;
-  throw err;
+
+  for (let attempt = 0; ; attempt += 1) {
+    let res;
+    try {
+      res = await axios({
+        baseURL: BASE,
+        url: reqPath,
+        method,
+        data: body,
+        timeout: 30000,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        validateStatus: () => true
+      });
+    } catch (networkError) {
+      const verb = String(method || 'GET').toUpperCase();
+      const canRetryNetwork = ['GET', 'HEAD', 'OPTIONS'].includes(verb) && attempt < HETZNER_API_RETRY_ATTEMPTS;
+      if (!canRetryNetwork) throw networkError;
+      const delayMs = retryAfterMs({}, attempt);
+      console.warn('[HETZNER_API_RETRY_NETWORK]', { method: verb, path: reqPath, attempt: attempt + 1, delay_ms: delayMs });
+      await sleep(delayMs);
+      continue;
+    }
+
+    if (res.status >= 200 && res.status < 300) return res.data;
+    if (shouldRetryHetznerStatus(res.status, method) && attempt < HETZNER_API_RETRY_ATTEMPTS) {
+      const delayMs = retryAfterMs(res.headers || {}, attempt);
+      console.warn('[HETZNER_API_RETRY]', {
+        method: String(method || 'GET').toUpperCase(),
+        path: reqPath,
+        status: res.status,
+        attempt: attempt + 1,
+        delay_ms: delayMs
+      });
+      await sleep(delayMs);
+      continue;
+    }
+
+    const err = new Error(`Hetzner API ${method} ${reqPath} failed HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = res.data;
+    err.response = { status: res.status, data: res.data, headers: res.headers };
+    throw err;
+  }
 }
 
 async function listHetznerServerTypes(config) {
@@ -264,11 +348,12 @@ function client(tokenOrCfg) {
   const token = typeof tokenOrCfg === 'string'
     ? tokenOrCfg
     : (getHetznerApiToken(tokenOrCfg));
-  return axios.create({
+  const http = axios.create({
     baseURL: BASE,
     timeout: 15000,
     headers: { Authorization: `Bearer ${token}`},
   });
+  return installHetznerRetryInterceptor(http);
 }
 
 // همگام با امضای openstack-api (برای سازگاری با کد شما):
