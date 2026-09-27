@@ -141,6 +141,25 @@ jobs:
                     period_reset:t.traffic_period_reset,
                     generated_at:t.generated_at
                   }));
+
+                  const { hetznerRequest } = require('./Hetzner/hetzner-api');
+                  const period = trafficApi.currentHetznerTrafficPeriod(new Date());
+                  const end = new Date().toISOString();
+                  const params = new URLSearchParams({
+                    type: 'network',
+                    start: period.start,
+                    end,
+                    step: '1800'
+                  });
+                  const metricData = await hetznerRequest(dc, 'GET', '/servers/' + encodeURIComponent(p.server_id) + '/metrics?' + params.toString());
+                  const series = metricData?.metrics?.time_series || {};
+                  console.log('CURRENT_MONTH_METRICS=' + JSON.stringify({
+                    server_id:p.server_id,
+                    start:period.start,
+                    end,
+                    outgoing_bytes:trafficApi.sumHetznerMetricDirection(series, 'out', 1800),
+                    incoming_bytes:trafficApi.sumHetznerMetricDirection(series, 'in', 1800)
+                  }));
                 } catch (e) {
                   console.log('LIVE_TRAFFIC=' + JSON.stringify({server_id:p.server_id,error:String(e.code || e.status || e.message)}));
                 }
