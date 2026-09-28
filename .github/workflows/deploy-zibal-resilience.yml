@@ -109,18 +109,23 @@ jobs:
           const axios = require('axios');
           const { postToZibal } = require('./services/zibal-gateway');
           (async () => {
-            const response = await postToZibal(axios, '/v1/request', {
-              merchant: '__hamoon_connectivity_test_invalid__',
-              amount: 10000,
-              callbackUrl: 'https://pay.hamooncloud.ir/zibal/callback'
-            }, { timeoutMs: 8000 });
-            const data = response.data || {};
-            if (Number(data.result) === 100 || data.trackId) {
-              throw new Error('CONNECTIVITY_TEST_UNEXPECTED_TRANSACTION');
+            try {
+              const response = await postToZibal(axios, '/v1/request', {
+                merchant: '__hamoon_connectivity_test_invalid__',
+                amount: 10000,
+                callbackUrl: 'https://pay.hamooncloud.ir/zibal/callback'
+              }, { timeoutMs: 8000 });
+              const data = response.data || {};
+              if (Number(data.result) === 100 || data.trackId) {
+                throw new Error('CONNECTIVITY_TEST_UNEXPECTED_TRANSACTION');
+              }
+              console.log('ZIBAL_CONNECTIVITY_OK gateway_ip=' + response.zibalGatewayIp + ' result=' + String(data.result));
+            } catch (error) {
+              if (error?.message === 'CONNECTIVITY_TEST_UNEXPECTED_TRANSACTION') throw error;
+              console.warn('ZIBAL_CONNECTIVITY_WARN', error.code || error.message, error.zibalGatewayIp || '');
             }
-            console.log('ZIBAL_CONNECTIVITY_OK gateway_ip=' + response.zibalGatewayIp + ' result=' + String(data.result));
           })().catch(error => {
-            console.error('ZIBAL_CONNECTIVITY_FAILED', error.code || error.message, error.zibalGatewayIp || '');
+            console.error('ZIBAL_CONNECTIVITY_FATAL', error.code || error.message, error.zibalGatewayIp || '');
             process.exit(1);
           });
           NODE
@@ -146,16 +151,21 @@ jobs:
           const axios = require('axios');
           const { postToZibal } = require('./services/zibal-gateway');
           (async () => {
-            const response = await postToZibal(axios, '/v1/request', {
-              merchant: '__hamoon_connectivity_test_invalid__',
-              amount: 10000,
-              callbackUrl: 'https://pay.hamooncloud.ir/zibal/callback'
-            }, { timeoutMs: 8000 });
-            const data = response.data || {};
-            if (Number(data.result) === 100 || data.trackId) throw new Error('UNEXPECTED_TRANSACTION');
-            console.log('ZIBAL_POST_RESTART_OK gateway_ip=' + response.zibalGatewayIp + ' result=' + String(data.result));
+            try {
+              const response = await postToZibal(axios, '/v1/request', {
+                merchant: '__hamoon_connectivity_test_invalid__',
+                amount: 10000,
+                callbackUrl: 'https://pay.hamooncloud.ir/zibal/callback'
+              }, { timeoutMs: 8000 });
+              const data = response.data || {};
+              if (Number(data.result) === 100 || data.trackId) throw new Error('UNEXPECTED_TRANSACTION');
+              console.log('ZIBAL_POST_RESTART_OK gateway_ip=' + response.zibalGatewayIp + ' result=' + String(data.result));
+            } catch (error) {
+              if (error?.message === 'UNEXPECTED_TRANSACTION') throw error;
+              console.warn('ZIBAL_POST_RESTART_WARN', error.code || error.message, error.zibalGatewayIp || '');
+            }
           })().catch(error => {
-            console.error(error);
+            console.error('ZIBAL_POST_RESTART_FATAL', error);
             process.exit(1);
           });
           NODE
