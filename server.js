@@ -295,9 +295,14 @@ app.get('/zibal/callback', async (req, res) => {
         [originalAmountToman, telegramId]
       );
       if (walletUpdate.affectedRows !== 1) throw new Error(`ZIBAL_USER_NOT_FOUND:${telegramId}`);
+      const bankPaidToman = (paidRial || expectedPayableRial) / 10;
+      const walletLogDescription =
+        `شارژ کیف پول از طریق زیبال؛ اعتبار کیف پول: ${originalAmountToman.toLocaleString('fa-IR')} تومان؛ ` +
+        `مالیات: ${taxToman.toLocaleString('fa-IR')} تومان؛ ` +
+        `پرداخت بانکی: ${bankPaidToman.toLocaleString('fa-IR')} تومان؛ trackId: ${trackId}`;
       await conn.execute(
         `INSERT INTO wallet_logs (telegram_id, amount, description, type) VALUES (?, ?, ?, ?)`,
-        [telegramId, originalAmountToman, `شارژ کیف پول از طریق زیبال - trackId: ${trackId}`, 'payment']
+        [telegramId, originalAmountToman, walletLogDescription, 'payment']
       );
       await conn.commit();
 
@@ -330,7 +335,6 @@ app.get('/zibal/callback', async (req, res) => {
         trackId,
         orderId
       });
-      const bankPaidToman = (paidRial || expectedPayableRial) / 10;
       const roundingText = legacyOneTomanOvercharge
         ? ' اختلاف ۱ تومانی فرمول قدیمی نیز به کیف پول شما برگردانده شد.'
         : '';
