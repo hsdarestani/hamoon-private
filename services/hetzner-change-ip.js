@@ -63,6 +63,47 @@ function positiveMs(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function hetznerProviderErrorCode(error) {
+  return String(
+    error?.data?.error?.code ||
+    error?.response?.data?.error?.code ||
+    ''
+  ).trim().toLowerCase();
+}
+
+function hetznerProviderHttpStatus(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return Number.isFinite(status) ? status : null;
+}
+
+function normalizePrimaryIpCreateError(cause) {
+  const providerCode = hetznerProviderErrorCode(cause);
+  const status = hetznerProviderHttpStatus(cause);
+
+  let code = null;
+  if (providerCode === 'resource_limit_exceeded') code = 'HETZNER_PRIMARY_IPV4_RESOURCE_LIMIT';
+  else if (providerCode === 'rate_limit_exceeded' || status === 429) code = 'HETZNER_PRIMARY_IPV4_RATE_LIMIT';
+  else if (providerCode === 'forbidden' || status === 403) code = 'HETZNER_PRIMARY_IPV4_FORBIDDEN';
+  else if (status === 400 || status === 422) code = 'HETZNER_PRIMARY_IPV4_CREATE_REJECTED';
+
+  if (!code) return cause;
+
+  const error = new Error(code);
+  error.code = code;
+  error.status = status;
+  error.providerCode = providerCode || null;
+  error.providerMessage = String(
+    cause?.data?.error?.message ||
+    cause?.response?.data?.error?.message ||
+    cause?.message ||
+    ''
+  ).slice(0, 240);
+  error.cause = cause;
+  if (cause?.data) error.data = cause.data;
+  if (cause?.response) error.response = cause.response;
+  return error;
+}
+
 async function ensureHistoryTable(db) {
   if (!db?.pool?.query) throw Object.assign(new Error('DB_POOL_UNAVAILABLE'), { code: 'DB_POOL_UNAVAILABLE' });
   await db.pool.query(`
@@ -422,6 +463,24 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
     try {
       candidate = await cloud.createPrimaryIpv4(dc, null, location);
     } catch (cause) {
+      const providerError = normalizePrimaryIpCreateError(cause);
+      console.error('[HETZNER_CHANGE_IP_PRIMARY_CREATE_FAILED]', {
+        server_id: String(serverId),
+        attempt,
+        status: hetznerProviderHttpStatus(cause),
+        provider_code: hetznerProviderErrorCode(cause) || null,
+        message: String(
+          cause?.data?.error?.message ||
+          cause?.response?.data?.error?.message ||
+          cause?.message ||
+          cause
+        ).slice(0, 180)
+      });
+
+      // Provider quota/validation/permission failures are actionable on their
+      // own. Do not hide them behind the generic candidate-pool message.
+      if (providerError !== cause) throw providerError;
+
       if (duplicateCandidates > 0 || rangeRejectedCandidates > 0) {
         const code = rangeRejectedCandidates > 0
           ? 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE'
@@ -705,6 +764,18 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
 
 function userMessageForError(error) {
   const code = String(error?.code || error?.message || '');
+  if (code === 'HETZNER_PRIMARY_IPV4_RESOURCE_LIMIT') {
+    return 'سقف ساخت Primary IPv4 در پروژه Hetzner پر است و فعلاً IP جدید ساخته نمی‌شود. IP فعلی سرور بدون تغییر حفظ شد؛ ظرفیت IP پروژه باید آزاد یا افزایش داده شود.';
+  }
+  if (code === 'HETZNER_PRIMARY_IPV4_RATE_LIMIT') {
+    return 'Hetzner فعلاً به‌دلیل محدودیت تعداد درخواست‌ها اجازه ساخت IPv4 جدید نداد. IP فعلی حفظ شد؛ چند دقیقه بعد دوباره تلاش کنید.';
+  }
+  if (code === 'HETZNER_PRIMARY_IPV4_FORBIDDEN') {
+    return 'Hetzner اجازه ساخت Primary IPv4 جدید را برای این پروژه نداد. IP فعلی حفظ شد و دسترسی یا تنظیمات پروژه باید بررسی شود.';
+  }
+  if (code === 'HETZNER_PRIMARY_IPV4_CREATE_REJECTED') {
+    return 'Hetzner درخواست ساخت Primary IPv4 جدید را رد کرد. IP فعلی بدون تغییر حفظ شد؛ تنظیمات یا ظرفیت IPv4 پروژه نیاز به بررسی دارد.';
+  }
   if (code === 'NO_DIFFERENT_IPV4_RANGE_AVAILABLE') {
     return 'Hetzner در این تلاش از همین لوکیشن رنج IPv4 متفاوتی برنگرداند. برای جلوگیری از دادن IP از همان رنج نامناسب، IP فعلی بدون تغییر حفظ شد؛ لطفاً کمی بعد دوباره تلاش کنید.';
   }
@@ -724,6 +795,9 @@ function userMessageForError(error) {
 module.exports = {
   normalizeIpv4,
   ipv4Range24,
+  hetznerProviderErrorCode,
+  hetznerProviderHttpStatus,
+  normalizePrimaryIpCreateError,
   ensureHistoryTable,
   ensureBadRangeTable,
   rememberBadRange,
