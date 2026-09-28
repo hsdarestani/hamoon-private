@@ -11,6 +11,7 @@ const VALID_STATUSES = new Set([
   'provisioning', 'pending_ip', 'pending_ssh', 'pending_ip_quality', 'manual_review'
 ]);
 const locks = new Set();
+const reservedPrimaryIds = new Set();
 const REJECTED_HISTORY_EVENTS = new Set([
   'duplicate_candidate_rejected',
   'candidate_verification_rejected',
@@ -393,6 +394,114 @@ async function claimAuditedCleanPrimaryIpv4(db, {
   return null;
 }
 
+async function claimStaleUnassignedPrimaryIpv4(db, {
+  dc,
+  serverId,
+  location,
+  used = new Set(),
+  blockedRanges = new Set(),
+  now = Date.now()
+}) {
+  const normalizedLocation = String(location || '').trim().toLowerCase();
+  if (!normalizedLocation) return null;
+
+  const staleMinAgeMs = positiveMs(
+    process.env.HETZNER_CHANGE_IP_RECYCLE_MIN_AGE_MS,
+    10 * 60 * 1000
+  );
+  const maxPages = Math.max(1, Math.min(20, Number(process.env.HETZNER_CHANGE_IP_RECYCLE_MAX_PAGES || 4)));
+  const nowMs = Number(now instanceof Date ? now.getTime() : now) || Date.now();
+  const candidates = [];
+
+  try {
+    for (let page = 1; page <= maxPages; page += 1) {
+      const data = await hetznerApi.hetznerRequest(
+        dc,
+        'GET',
+        `/primary_ips?type=ipv4&per_page=50&page=${page}`
+      );
+      const rows = data?.primary_ips || [];
+      candidates.push(...rows);
+      const nextPage = data?.meta?.pagination?.next_page;
+      if (!nextPage) break;
+    }
+  } catch (error) {
+    console.warn('[HETZNER_CHANGE_IP_RECYCLE_LIST_FAILED]', {
+      server_id: String(serverId),
+      location: normalizedLocation,
+      message: String(error?.message || error).slice(0, 140)
+    });
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const candidateId = candidate?.id == null ? null : String(candidate.id);
+    const candidateIp = normalizeIpv4(candidate?.ip);
+    if (!candidateId || !candidateIp || reservedPrimaryIds.has(candidateId)) continue;
+    if (String(candidate?.type || '').toLowerCase() !== 'ipv4') continue;
+
+    const assigneeId = candidate?.assignee_id == null ? null : String(candidate.assignee_id);
+    const assigneeType = String(candidate?.assignee_type || '').toLowerCase();
+    if (assigneeId || (assigneeType && !['unassigned', 'server'].includes(assigneeType))) continue;
+
+    const candidateLocation = serverLocation(candidate, dc);
+    if (candidateLocation && candidateLocation !== normalizedLocation) continue;
+
+    // Only recycle addresses created by Hamoon itself. This avoids consuming
+    // customer-managed or manually reserved Primary IPs.
+    const candidateName = String(candidate?.name || '');
+    if (!candidateName.startsWith('hamoon-ip-')) continue;
+
+    const createdMs = new Date(candidate?.created || candidate?.created_at || 0).getTime();
+    if (!Number.isFinite(createdMs) || createdMs <= 0 || (nowMs - createdMs) < staleMinAgeMs) continue;
+    if (used.has(candidateIp)) continue;
+
+    const candidateRange = ipv4Range24(candidateIp);
+    if (candidateRange && blockedRanges.has(candidateRange)) continue;
+
+    // Do not steal an address that an in-flight or recoverable purchase already
+    // references in the application database.
+    if (db?.pool?.query) {
+      try {
+        const [rows] = await db.pool.query(
+          `SELECT 1
+             FROM purchases
+            WHERE public_ip = ?
+              AND LOWER(COALESCE(status,'')) NOT IN ('deleted','cancelled','failed','refunded','expired')
+            LIMIT 1`,
+          [candidateIp]
+        );
+        if (rows?.length) continue;
+      } catch (error) {
+        console.warn('[HETZNER_CHANGE_IP_RECYCLE_DB_CHECK_FAILED]', {
+          server_id: String(serverId),
+          ip: candidateIp,
+          message: String(error?.message || error).slice(0, 120)
+        });
+        continue;
+      }
+    }
+
+    reservedPrimaryIds.add(candidateId);
+    console.log('[HETZNER_CHANGE_IP_RECYCLED_PRIMARY_CLAIMED]', {
+      server_id: String(serverId),
+      primary_ip_id: candidateId,
+      ip: candidateIp,
+      location: normalizedLocation,
+      age_ms: Math.max(0, nowMs - createdMs)
+    });
+    return {
+      ...candidate,
+      id: candidateId,
+      ip: candidateIp,
+      recycledPoolClaimed: true,
+      runtimePoolLockId: candidateId
+    };
+  }
+
+  return null;
+}
+
 async function markAuditedPoolCandidate(db, candidate, result, reason) {
   if (!candidate?.auditPoolClaimed || !candidate?.id || !db?.pool?.query) return false;
   try {
@@ -454,6 +563,27 @@ async function reserveUniquePrimaryIpv4(db, { dc, telegramId, datacenter, server
       event: 'audited_clean_candidate'
     }).catch(() => {});
     return auditedCandidate;
+  }
+
+  // Reuse a stale, unassigned Hamoon Primary IPv4 before requesting a brand-new
+  // address. This keeps Change IP working when Hetzner's temporary Primary-IP
+  // headroom is exhausted by safe leftovers from earlier attempts.
+  const recycledCandidate = await claimStaleUnassignedPrimaryIpv4(db, {
+    dc,
+    serverId,
+    location,
+    used,
+    blockedRanges
+  });
+  if (recycledCandidate) {
+    await rememberIp(db, {
+      telegramId,
+      datacenter,
+      serverId,
+      ip: recycledCandidate.ip,
+      event: 'recycled_unassigned_candidate'
+    }).catch(() => {});
+    return recycledCandidate;
   }
 
   let duplicateCandidates = 0;
@@ -758,6 +888,9 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
     }
     throw error;
   } finally {
+    if (newPrimary?.runtimePoolLockId) {
+      reservedPrimaryIds.delete(String(newPrimary.runtimePoolLockId));
+    }
     locks.delete(lockKey);
   }
 }
@@ -805,6 +938,7 @@ module.exports = {
   rememberIp,
   usedIps,
   claimAuditedCleanPrimaryIpv4,
+  claimStaleUnassignedPrimaryIpv4,
   markAuditedPoolCandidate,
   reserveUniquePrimaryIpv4,
   waitForNewIp,
