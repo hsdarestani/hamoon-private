@@ -46,7 +46,7 @@ jobs:
           (async()=>{
             const uid='7293732698';
             const [p]=await db.pool.query(
-              `SELECT id,telegram_id,server_id,server_name,datacenter,public_ip,status,updated_at
+              `SELECT telegram_id,server_id,server_name,datacenter,public_ip,status,updated_at
                  FROM purchases
                 WHERE telegram_id=? AND LOWER(datacenter) LIKE 'hetzner%'
                 ORDER BY id DESC LIMIT 20`,[uid]);
