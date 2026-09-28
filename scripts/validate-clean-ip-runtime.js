@@ -63,6 +63,22 @@ const fastFallback = require('../services/hetzner-location-fallback-fast-bootstr
   assert(!blocked.has('2.2.2.2'));
   assert(!blocked.has('4.4.4.4'));
 
+  const quotaCause = Object.assign(new Error('Hetzner API POST /primary_ips failed HTTP 422'), {
+    status: 422,
+    data: { error: { code: 'resource_limit_exceeded', message: 'resource limit exceeded' } }
+  });
+  const quotaError = baseChange.normalizePrimaryIpCreateError(quotaCause);
+  assert.strictEqual(quotaError.code, 'HETZNER_PRIMARY_IPV4_RESOURCE_LIMIT');
+  assert.strictEqual(quotaError.providerCode, 'resource_limit_exceeded');
+  assert(baseChange.userMessageForError(quotaError).includes('سقف ساخت Primary IPv4'));
+
+  const rejectedCause = Object.assign(new Error('Hetzner API POST /primary_ips failed HTTP 422'), {
+    status: 422,
+    data: { error: { code: 'invalid_input', message: 'invalid location' } }
+  });
+  const rejectedError = baseChange.normalizePrimaryIpCreateError(rejectedCause);
+  assert.strictEqual(rejectedError.code, 'HETZNER_PRIMARY_IPV4_CREATE_REJECTED');
+
   // A preverified clean, still-unassigned Primary IPv4 must be claimed before
   // falling back to random provider allocation.
   const auditQueries = [];
