@@ -5,7 +5,10 @@ on:
     branches: [main]
     paths:
       - 'services/zibal-gateway.js'
+      - 'services/wallet-topup-pricing.js'
+      - 'services/zibal-rounding-refund.js'
       - 'scripts/validate-zibal-gateway.js'
+      - 'scripts/validate-wallet-topup-pricing.js'
       - 'index-core.js'
       - 'server.js'
       - 'external-payments.js'
@@ -44,11 +47,15 @@ jobs:
         run: |
           set -euo pipefail
           node --check services/zibal-gateway.js
+          node --check services/wallet-topup-pricing.js
+          node --check services/zibal-rounding-refund.js
           node --check scripts/validate-zibal-gateway.js
+          node --check scripts/validate-wallet-topup-pricing.js
           node --check index-core.js
           node --check server.js
           node --check external-payments.js
           node scripts/validate-zibal-gateway.js
+          node scripts/validate-wallet-topup-pricing.js
           node - <<'NODE'
           const fs = require('fs');
           const vm = require('vm');
@@ -80,10 +87,13 @@ jobs:
           node scripts/restore-server-secret-key.js .env >/dev/null
 
           node --check services/zibal-gateway.js
+          node --check services/wallet-topup-pricing.js
+          node --check services/zibal-rounding-refund.js
           node --check index-core.js
           node --check server.js
           node --check external-payments.js
           node scripts/validate-zibal-gateway.js
+          node scripts/validate-wallet-topup-pricing.js
 
           node - <<'NODE'
           const fs = require('fs');
