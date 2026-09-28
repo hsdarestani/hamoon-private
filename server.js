@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const axios = require('axios');
 const { postToZibal } = require('./services/zibal-gateway');
+const { walletTopupAmounts } = require('./services/wallet-topup-pricing');
 const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
 const { createCustomerApiRouter } = require('./customer-api');
@@ -246,8 +247,8 @@ app.get('/zibal/callback', async (req, res) => {
 
     const telegramId = match[1];
     const originalAmountToman = Number(match[3]);
-    const expectedPayableToman = Math.ceil(originalAmountToman * 1.1);
-    const expectedPayableRial = expectedPayableToman * 10;
+    const { taxToman, payableToman: expectedPayableToman, payableRial: expectedPayableRial } =
+      walletTopupAmounts(originalAmountToman);
     const paidRial = Number(v.amount || 0);
 
     if (!Number.isFinite(originalAmountToman) || originalAmountToman < 100) {
@@ -296,8 +297,14 @@ app.get('/zibal/callback', async (req, res) => {
         [telegramId, originalAmountToman, `شارژ کیف پول از طریق زیبال - trackId: ${trackId}`, 'payment']
       );
       await conn.commit();
-      console.log('[ZIBAL_CALLBACK] credited wallet:', { telegramId, originalAmountToman, trackId, orderId });
-      return res.send(html('پرداخت موفق', `کیف پول شما به مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان شارژ شد. می‌توانید به ربات برگردید.`));
+      console.log('[ZIBAL_CALLBACK] credited wallet:', { telegramId, originalAmountToman, taxToman, expectedPayableToman, trackId, orderId });
+      return res.send(html(
+        'پرداخت موفق',
+        `مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان به کیف پول شما اضافه شد. ` +
+        `مالیات: ${taxToman.toLocaleString('fa-IR')} تومان. ` +
+        `مبلغ پرداخت بانکی: ${expectedPayableToman.toLocaleString('fa-IR')} تومان. ` +
+        `مالیات جزو موجودی کیف پول نیست. می‌توانید به ربات برگردید.`
+      ));
     } catch (e) {
       try { await conn.rollback(); } catch {}
       console.error('[ZIBAL_CALLBACK] db error:', e.code || e.message);
