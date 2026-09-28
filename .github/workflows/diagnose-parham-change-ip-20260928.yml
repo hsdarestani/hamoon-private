@@ -49,7 +49,7 @@ jobs:
               `SELECT telegram_id,server_id,server_name,datacenter,public_ip,status,updated_at
                  FROM purchases
                 WHERE telegram_id=? AND LOWER(datacenter) LIKE 'hetzner%'
-                ORDER BY id DESC LIMIT 20`,[uid]);
+                ORDER BY updated_at DESC LIMIT 20`,[uid]);
             console.log('PURCHASES='+JSON.stringify(p));
             const dc=dcs.hetzner || Object.values(dcs).find(x=>String(x?.provider||'').toLowerCase()==='hetzner');
             const all=[];
