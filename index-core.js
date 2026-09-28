@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 const { postToZibal } = require('./services/zibal-gateway');
+const { walletTopupAmounts } = require('./services/wallet-topup-pricing');
 const cron = require('node-cron');
 const { hasCapability, getCapabilityLabel } = require('./provider-capabilities');
 const { normalizeNationalCode, verifyShahkarLite } = require('./services/shahkar');
@@ -1002,9 +1003,43 @@ case '👛 کیف پول': {
           (runtimeCoverage.hasPrepaidCycles ? `\nℹ️ پلن‌های ماهانه/هفتگی فقط در موعد تمدید از کیف پول کسر می‌شوند، نه به‌صورت ساعتی` : ''))
     : '';
 
+  const zibalTrackIds = logs
+    .filter(l => String(l.type || '').toLowerCase() === 'payment')
+    .map(l => String(l.description || '').match(/trackId:\\s*(\\d+)/i)?.[1])
+    .filter(Boolean);
+  const zibalDetails = new Map();
+  if (zibalTrackIds.length) {
+    try {
+      const placeholders = zibalTrackIds.map(() => '?').join(',');
+      const [rows] = await require('./db').pool.query(
+        `SELECT track_id, amount_toman, paid_rial
+           FROM zibal_payments
+          WHERE track_id IN (${placeholders})`,
+        zibalTrackIds
+      );
+      for (const row of rows || []) zibalDetails.set(String(row.track_id), row);
+    } catch (error) {
+      console.warn('[WALLET_ZIBAL_DETAILS_FAILED]', error?.message || String(error));
+    }
+  }
+
   const history = logs.map(l => {
     const amountValue = parseFloat(l.amount);
-    const descriptionValue = String(l.description);
+    let descriptionValue = String(l.description);
+    const trackId = descriptionValue.match(/trackId:\\s*(\\d+)/i)?.[1] || null;
+    const payment = trackId ? zibalDetails.get(String(trackId)) : null;
+    if (payment) {
+      const walletCredit = Number(payment.amount_toman || amountValue || 0);
+      const { taxToman, payableToman } = walletTopupAmounts(Math.max(0, Math.round(walletCredit)));
+      const actualPaidToman = Number(payment.paid_rial || 0) / 10;
+      const legacyDelta = actualPaidToman - payableToman;
+      descriptionValue =
+        `شارژ کیف پول از طریق زیبال | اعتبار کیف پول: ${walletCredit.toLocaleString('fa-IR')} تومان` +
+        ` | مالیات: ${taxToman.toLocaleString('fa-IR')} تومان` +
+        ` | پرداخت بانکی: ${actualPaidToman.toLocaleString('fa-IR')} تومان` +
+        (legacyDelta > 0 ? ` | اختلاف گردکردن قدیمی: ${legacyDelta.toLocaleString('fa-IR')} تومان` : '') +
+        ` | trackId: ${trackId}`;
+    }
     const timestamp = new Date(l.timestamp).toLocaleString('fa-IR', { timeZone: 'Asia/Tehran' });
     return `${escapeMarkdownV2(timestamp)} \\| ${amountValue > 0 ? '\\+' : ''}${escapeMarkdownV2(amountValue.toFixed(2))} — ${escapeMarkdownV2(descriptionValue)}`;
   }).join('\n') || 'بدون سابقه';
@@ -1128,19 +1163,18 @@ const keyboard = [...projectManageKeyboard, ...serverManageKeyboard];
 
 default:
     if (state[effectiveUserId]?.step === 'WAIT_DEPOSIT' && /^\d+$/.test(text)) {
-const amount = parseInt(text);
-const originalAmount = amount;                        // مبلغ اصلی
-const payableToman = Math.ceil(originalAmount * 1.1); // مبلغ با ۱۰٪ مالیات
-const payableRial  = payableToman * 10;
-
+const amount = parseInt(text, 10);
+const originalAmount = amount;
 if (originalAmount < 100) {
   return sendMessage(effectiveChatId, 'حداقل مبلغ شارژ 100 تومان است.');
 }
+const { taxToman, payableToman, payableRial } = walletTopupAmounts(originalAmount);
 await sendMessage(
     effectiveChatId,
-    `💵 مبلغ شارژ انتخابی شما: ${originalAmount} تومان\n` +
-    `📌 مالیات (۱۰٪): ${payableToman - originalAmount} تومان\n` +
-    `💳 مبلغ قابل پرداخت: ${payableToman} تومان`
+    `💰 اعتبار افزوده‌شونده به کیف پول: ${originalAmount.toLocaleString('fa-IR')} تومان\n` +
+    `📌 مالیات ۱۰٪: ${taxToman.toLocaleString('fa-IR')} تومان\n` +
+    `💳 مبلغ پرداختی در درگاه: ${payableToman.toLocaleString('fa-IR')} تومان\n\n` +
+    `ℹ️ مالیات به موجودی کیف پول اضافه نمی‌شود. فقط مبلغ شارژ انتخابی شما به کیف پول افزوده می‌شود.`
 );
         const orderId = ++orderCounter;
         state[effectiveUserId] = { step: 'READY' };
