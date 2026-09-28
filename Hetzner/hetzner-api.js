@@ -9,9 +9,93 @@ const BASE = 'https://api.hetzner.cloud/v1';
 const HETZNER_API_RETRY_ATTEMPTS = Math.max(0, Number(process.env.HETZNER_API_RETRY_ATTEMPTS || 4));
 const HETZNER_API_RETRY_BASE_MS = Math.max(100, Number(process.env.HETZNER_API_RETRY_BASE_MS || 750));
 const HETZNER_API_RETRY_MAX_MS = Math.max(HETZNER_API_RETRY_BASE_MS, Number(process.env.HETZNER_API_RETRY_MAX_MS || 10000));
+const HETZNER_API_LOW_WATERMARK = Math.max(0, Number(process.env.HETZNER_API_LOW_WATERMARK || 120));
+const HETZNER_API_LOW_RATE_INTERVAL_MS = Math.max(250, Number(process.env.HETZNER_API_LOW_RATE_INTERVAL_MS || 1100));
+
+// Rate-limit state is shared by every Hetzner client in this process and keyed by
+// project token. Hetzner replenishes the default 3600/hour allowance gradually,
+// so once remaining capacity gets low we pace request starts instead of letting
+// independent bot flows race each other into repeated 429s.
+const rateLimitGates = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function headerValue(headers = {}, name) {
+  const target = String(name || '').toLowerCase();
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (String(key).toLowerCase() === target) return value;
+  }
+  return undefined;
+}
+
+function tokenGate(token) {
+  const key = String(token || 'default');
+  if (!rateLimitGates.has(key)) {
+    rateLimitGates.set(key, {
+      remaining: null,
+      limit: null,
+      resetAt: null,
+      nextAt: 0,
+      tail: Promise.resolve()
+    });
+  }
+  return rateLimitGates.get(key);
+}
+
+function observeRateLimitHeaders(token, headers = {}, status = null) {
+  const gate = tokenGate(token);
+  const remainingRaw = headerValue(headers, 'ratelimit-remaining');
+  const limitRaw = headerValue(headers, 'ratelimit-limit');
+  const resetRaw = headerValue(headers, 'ratelimit-reset');
+
+  const remaining = Number(remainingRaw);
+  const limit = Number(limitRaw);
+  const resetSeconds = Number(resetRaw);
+
+  if (Number.isFinite(remaining) && remaining >= 0) gate.remaining = remaining;
+  else if (Number(status || 0) === 429) gate.remaining = 0;
+
+  if (Number.isFinite(limit) && limit > 0) gate.limit = limit;
+  if (Number.isFinite(resetSeconds) && resetSeconds > 0) gate.resetAt = resetSeconds * 1000;
+
+  if (gate.remaining != null && gate.remaining <= HETZNER_API_LOW_WATERMARK) {
+    gate.nextAt = Math.max(gate.nextAt || 0, Date.now() + HETZNER_API_LOW_RATE_INTERVAL_MS);
+  }
+
+  return {
+    remaining: gate.remaining,
+    limit: gate.limit,
+    resetAt: gate.resetAt
+  };
+}
+
+async function waitForHetznerSlot(token) {
+  const gate = tokenGate(token);
+  let release;
+  const previous = gate.tail;
+  gate.tail = new Promise(resolve => { release = resolve; });
+  await previous;
+
+  try {
+    const low = gate.remaining != null && gate.remaining <= HETZNER_API_LOW_WATERMARK;
+    const now = Date.now();
+    const waitMs = low ? Math.max(0, Number(gate.nextAt || 0) - now) : 0;
+    if (waitMs > 0) await sleep(waitMs);
+
+    if (low) {
+      gate.nextAt = Date.now() + HETZNER_API_LOW_RATE_INTERVAL_MS;
+    }
+
+    // Optimistic accounting stops a burst exactly at the low-water boundary,
+    // before all concurrent callers have received their own response headers.
+    if (gate.remaining != null && gate.remaining > 0) {
+      gate.remaining = Math.max(0, gate.remaining - 1);
+    }
+  } finally {
+    release();
+  }
 }
 
 function retryAfterMs(headers = {}, attempt = 0) {
@@ -36,17 +120,29 @@ function shouldRetryHetznerStatus(status, method) {
   return ['GET', 'HEAD', 'OPTIONS'].includes(verb) && [502, 503, 504].includes(code);
 }
 
-function installHetznerRetryInterceptor(http) {
+function installHetznerRetryInterceptor(http, token) {
+  http.interceptors.request.use(async config => {
+    await waitForHetznerSlot(token);
+    return config;
+  });
+
   http.interceptors.response.use(
-    response => response,
+    response => {
+      observeRateLimitHeaders(token, response?.headers || {}, response?.status);
+      return response;
+    },
     async error => {
       const cfg = error?.config;
       const status = Number(error?.response?.status || 0);
+      observeRateLimitHeaders(token, error?.response?.headers || {}, status);
       if (!cfg || !shouldRetryHetznerStatus(status, cfg.method)) throw error;
       const attempt = Number(cfg.__hetznerRetryAttempt || 0);
       if (attempt >= HETZNER_API_RETRY_ATTEMPTS) throw error;
       cfg.__hetznerRetryAttempt = attempt + 1;
-      const delayMs = retryAfterMs(error?.response?.headers || {}, attempt);
+      const delayMs = Math.max(
+        status === 429 ? HETZNER_API_LOW_RATE_INTERVAL_MS : 0,
+        retryAfterMs(error?.response?.headers || {}, attempt)
+      );
       console.warn('[HETZNER_API_RETRY]', {
         method: String(cfg.method || 'GET').toUpperCase(),
         url: cfg.url,
@@ -74,6 +170,7 @@ async function hetznerRequest(config, method, reqPath, body) {
   for (let attempt = 0; ; attempt += 1) {
     let res;
     try {
+      await waitForHetznerSlot(token);
       res = await axios({
         baseURL: BASE,
         url: reqPath,
@@ -93,9 +190,13 @@ async function hetznerRequest(config, method, reqPath, body) {
       continue;
     }
 
+    observeRateLimitHeaders(token, res.headers || {}, res.status);
     if (res.status >= 200 && res.status < 300) return res.data;
     if (shouldRetryHetznerStatus(res.status, method) && attempt < HETZNER_API_RETRY_ATTEMPTS) {
-      const delayMs = retryAfterMs(res.headers || {}, attempt);
+      const delayMs = Math.max(
+        Number(res.status) === 429 ? HETZNER_API_LOW_RATE_INTERVAL_MS : 0,
+        retryAfterMs(res.headers || {}, attempt)
+      );
       console.warn('[HETZNER_API_RETRY]', {
         method: String(method || 'GET').toUpperCase(),
         path: reqPath,
@@ -353,7 +454,7 @@ function client(tokenOrCfg) {
     timeout: 15000,
     headers: { Authorization: `Bearer ${token}`},
   });
-  return installHetznerRetryInterceptor(http);
+  return installHetznerRetryInterceptor(http, token);
 }
 
 // همگام با امضای openstack-api (برای سازگاری با کد شما):
@@ -722,6 +823,8 @@ async function resetServerPassword(dcConfig, /*token*/ _t, serverId) {
 
 
 module.exports = {
+  observeRateLimitHeaders,
+  waitForHetznerSlot,
   getHetznerApiToken,
   hetznerRequest,
   getHetznerFallbackLocations,
