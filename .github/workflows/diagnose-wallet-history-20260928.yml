@@ -123,6 +123,24 @@ jobs:
                     LIMIT 80`
                 );
                 console.log('LEGACY_ROWS='+JSON.stringify(legacyRows));
+                const [safeCandidates]=await conn.query(
+                  `SELECT p.telegram_id,p.server_id,p.server_name,p.datacenter,p.status,p.duration,p.amount,
+                          p.last_billed_at,p.delivered_at,p.provider_status,p.provider_status_checked_at,p.created_at,
+                          EXISTS(
+                            SELECT 1 FROM billing_events b
+                             WHERE b.server_id=p.server_id
+                               AND b.telegram_id=p.telegram_id
+                               AND b.datacenter=p.datacenter
+                               AND b.event_type='renewal'
+                          ) prior_renewal
+                     FROM purchases p
+                    WHERE (LOWER(p.datacenter)='hetzner' OR LOWER(p.datacenter) LIKE 'hetzner-%')
+                      AND p.status IN ('active','running','suspended','stopped','shutoff')
+                      AND p.deleted_at IS NULL
+                      AND p.delivered_at IS NULL
+                    ORDER BY p.updated_at DESC`
+                );
+                console.log('SAFE_CANDIDATES='+JSON.stringify(safeCandidates));
                 const [tables]=await conn.query(
                   `SELECT TABLE_NAME,COLUMN_NAME
                      FROM INFORMATION_SCHEMA.COLUMNS
