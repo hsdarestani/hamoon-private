@@ -1,0 +1,78 @@
+name: Diagnose Ilkhani Wallet Payment 2026-09-28
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-ilkhani-wallet-20260928.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect payment records
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo "PRODUCTION_SHA=$(git rev-parse HEAD)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const conn=await db.pool.getConnection();
+            try {
+              const tracks=['4814456091','4814436321'];
+              const [zp]=await conn.query(
+                `SELECT id,track_id,order_id,telegram_id,amount_toman,paid_rial,verify_result,credited,created_at,updated_at,verify_payload
+                   FROM zibal_payments WHERE track_id IN (?,?) ORDER BY id`,tracks);
+              console.log('ZIBAL='+JSON.stringify(zp.map(x=>({
+                ...x,
+                verify_payload:(()=>{try{const v=JSON.parse(x.verify_payload||'{}');return {result:v.result,amount:v.amount,orderId:v.orderId,cardNumber:v.cardNumber,refNumber:v.refNumber,paidAt:v.paidAt};}catch{return null}})()
+              }))));
+              const uid=zp[0]?.telegram_id;
+              if(uid){
+                const [[u]]=await conn.query('SELECT telegram_id,wallet,created_at,updated_at FROM users WHERE telegram_id=?',[String(uid)]);
+                console.log('USER='+JSON.stringify(u||null));
+                const [logs]=await conn.query(
+                  `SELECT id,amount,type,description,timestamp FROM wallet_logs WHERE telegram_id=? ORDER BY timestamp ASC,id ASC`,[String(uid)]);
+                console.log('WALLET_LOGS='+JSON.stringify(logs));
+                const [p]=await conn.query(
+                  `SELECT server_id,server_name,datacenter,status,duration,amount,pricing_mode,monthly_basis_price,created_at,delivered_at,last_billed_at
+                     FROM purchases WHERE telegram_id=? ORDER BY created_at ASC`,[String(uid)]);
+                console.log('PURCHASES='+JSON.stringify(p));
+                const [[sum]]=await conn.query(
+                  `SELECT COALESCE(SUM(amount),0) ledger_sum,
+                          COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) credits,
+                          COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) debits
+                     FROM wallet_logs WHERE telegram_id=?`,[String(uid)]);
+                console.log('LEDGER_SUM='+JSON.stringify(sum));
+              }
+            } finally {
+              conn.release();
+              await db.pool.end();
+            }
+          })().catch(async e=>{console.error('DIAG='+JSON.stringify({message:e.message,code:e.code}));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
