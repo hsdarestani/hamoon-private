@@ -90,6 +90,39 @@ jobs:
                        OR server_name LIKE '%9c8bb9%'`
                 );
                 console.log('NAMED_PURCHASES='+JSON.stringify(named));
+                const [billingState]=await conn.query(
+                  `SELECT server_id,server_name,status,duration,amount,auto_renew,last_billed_at,
+                          delivered_at,delivery_state,suspend_reason,created_at,updated_at
+                     FROM purchases
+                    WHERE server_id IN ('133159739','148465206')`
+                ).catch(async()=>[[]]);
+                console.log('BILLING_STATE='+JSON.stringify(billingState));
+                const [events]=await conn.query(
+                  `SELECT id,event_key,telegram_id,server_id,event_type,amount_toman,period_start,period_end,created_at
+                     FROM billing_events
+                    WHERE server_id IN ('133159739','148465206')
+                    ORDER BY id DESC LIMIT 40`
+                );
+                console.log('BILLING_EVENTS='+JSON.stringify(events));
+                const [[legacy]]=await conn.query(
+                  `SELECT COUNT(*) total,
+                          SUM(delivered_at IS NULL) no_delivered_at,
+                          SUM(delivered_at IS NULL AND status IN ('active','running','suspended')) live_no_delivered_at
+                     FROM purchases
+                    WHERE (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%')
+                      AND status <> 'deleted'`
+                );
+                console.log('LEGACY_DELIVERY='+JSON.stringify(legacy));
+                const [legacyRows]=await conn.query(
+                  `SELECT telegram_id,server_id,server_name,datacenter,status,duration,amount,last_billed_at,delivered_at,created_at,updated_at
+                     FROM purchases
+                    WHERE (LOWER(datacenter)='hetzner' OR LOWER(datacenter) LIKE 'hetzner-%')
+                      AND status IN ('active','running','suspended')
+                      AND delivered_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 80`
+                );
+                console.log('LEGACY_ROWS='+JSON.stringify(legacyRows));
                 const [tables]=await conn.query(
                   `SELECT TABLE_NAME,COLUMN_NAME
                      FROM INFORMATION_SCHEMA.COLUMNS
