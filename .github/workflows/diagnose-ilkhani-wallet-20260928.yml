@@ -79,7 +79,18 @@ jobs:
                     AND paid_rial <> ((amount_toman + CEIL(amount_toman / 10)) * 10)
                   ORDER BY created_at ASC`
               );
-              console.log('ZIBAL_DISCREPANCIES='+JSON.stringify(diffs));
+              console.log('ZIBAL_DISCREPANCIES='+JSON.stringify(diffs.slice(-20)));
+              const [[diffSummary]]=await conn.query(
+                `SELECT COUNT(*) affected_payments,
+                        COUNT(DISTINCT telegram_id) affected_users,
+                        COALESCE(SUM(paid_rial - ((amount_toman + CEIL(amount_toman / 10)) * 10)),0) total_delta_rial,
+                        MIN(created_at) first_at,
+                        MAX(created_at) last_at
+                   FROM zibal_payments
+                  WHERE credited=1
+                    AND paid_rial <> ((amount_toman + CEIL(amount_toman / 10)) * 10)`
+              );
+              console.log('ZIBAL_DISCREPANCY_SUMMARY='+JSON.stringify(diffSummary));
             } finally {
               conn.release();
               await db.pool.end();
