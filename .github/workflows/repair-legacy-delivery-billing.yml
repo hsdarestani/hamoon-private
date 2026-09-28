@@ -1,0 +1,103 @@
+name: Repair Legacy Hetzner Delivery Billing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/repair-legacy-hetzner-delivery.js'
+      - '.github/workflows/repair-legacy-delivery-billing.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamoon-legacy-delivery-billing-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate repair script
+        run: node --check scripts/repair-legacy-hetzner-delivery.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Repair production and verify target
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+
+          fetched=0
+          for attempt in 1 2 3 4 5 6; do
+            if git fetch origin main; then fetched=1; break; fi
+            echo "git fetch retry $attempt/6"
+            sleep 3
+          done
+          test "$fetched" = 1
+          git checkout main
+          git merge --ff-only origin/main
+
+          node --check scripts/repair-legacy-hetzner-delivery.js
+          node scripts/repair-legacy-hetzner-delivery.js
+          node scripts/repair-legacy-hetzner-delivery.js --apply
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [rows]=await db.pool.query(
+              "SELECT server_id,server_name,status,provider_status,delivered_at,last_billed_at FROM purchases WHERE server_id IN ('133159739','148465206') ORDER BY server_id"
+            );
+            console.log('TARGET_AFTER_REPAIR='+JSON.stringify(rows));
+            if(rows.length!==2 || rows.some(x=>!x.delivered_at)) throw new Error('TARGET_DELIVERY_REPAIR_INCOMPLETE');
+            await db.pool.end();
+          })().catch(async e=>{console.error(e);try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+
+          sleep 75
+
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [[u]]=await db.pool.query("SELECT wallet,updated_at FROM users WHERE telegram_id='5083039930'");
+            const [logs]=await db.pool.query(
+              "SELECT id,amount,type,description,timestamp FROM wallet_logs WHERE telegram_id='5083039930' ORDER BY timestamp DESC,id DESC LIMIT 6"
+            );
+            const [p]=await db.pool.query(
+              "SELECT server_id,server_name,status,provider_status,delivered_at,last_billed_at FROM purchases WHERE server_id IN ('133159739','148465206') ORDER BY server_id"
+            );
+            console.log('TARGET_USER_AFTER_TICK='+JSON.stringify(u||null));
+            console.log('TARGET_LOGS_AFTER_TICK='+JSON.stringify(logs));
+            console.log('TARGET_PURCHASES_AFTER_TICK='+JSON.stringify(p));
+            if(!logs.some(x=>String(x.type)==='billing' && new Date(x.timestamp).getTime() > Date.parse('2026-09-28T11:45:00Z'))){
+              throw new Error('TARGET_BILLING_DID_NOT_RESUME');
+            }
+            await db.pool.end();
+          })().catch(async e=>{console.error(e);try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+
+          echo "PRODUCTION_SHA=$(git rev-parse HEAD)"
+          REMOTE
