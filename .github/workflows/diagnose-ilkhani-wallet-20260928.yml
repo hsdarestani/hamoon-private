@@ -37,6 +37,8 @@ jobs:
           set -euo pipefail
           cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
           echo "PRODUCTION_SHA=$(git rev-parse HEAD)"
+          node scripts/backfill-zibal-wallet-history-details.js
+          node scripts/backfill-zibal-wallet-history-details.js --apply
           node - <<'NODE'
           require('dotenv').config();
           const db=require('./db');
