@@ -5,6 +5,7 @@ const express = require('express');
 const axios = require('axios');
 const { postToZibal } = require('./services/zibal-gateway');
 const { walletTopupAmounts } = require('./services/wallet-topup-pricing');
+const { refundLegacyRoundingDifference } = require('./services/zibal-rounding-refund');
 const db = require('./db');
 const { createDashboardApiRouter, requireAuth } = require('./dashboard-api');
 const { createCustomerApiRouter } = require('./customer-api');
@@ -254,7 +255,9 @@ app.get('/zibal/callback', async (req, res) => {
     if (!Number.isFinite(originalAmountToman) || originalAmountToman < 100) {
       return res.status(400).send(html('خطای پرداخت', 'مبلغ سفارش معتبر نیست.'));
     }
-    if (paidRial && paidRial !== expectedPayableRial) {
+    const legacyRoundingDeltaRial = paidRial ? paidRial - expectedPayableRial : 0;
+    const legacyOneTomanOvercharge = legacyRoundingDeltaRial === 10;
+    if (paidRial && paidRial !== expectedPayableRial && !legacyOneTomanOvercharge) {
       console.error('[ZIBAL_CALLBACK] amount mismatch:', { trackId, orderId, paidRial, expectedPayableRial });
       return res.status(400).send(html('خطای پرداخت', 'مبلغ پرداختی با سفارش مطابقت ندارد. لطفاً با پشتیبانی تماس بگیرید.'));
     }
@@ -297,13 +300,46 @@ app.get('/zibal/callback', async (req, res) => {
         [telegramId, originalAmountToman, `شارژ کیف پول از طریق زیبال - trackId: ${trackId}`, 'payment']
       );
       await conn.commit();
-      console.log('[ZIBAL_CALLBACK] credited wallet:', { telegramId, originalAmountToman, taxToman, expectedPayableToman, trackId, orderId });
+
+      let roundingRefund = null;
+      if (legacyOneTomanOvercharge) {
+        try {
+          roundingRefund = await refundLegacyRoundingDifference(db.pool, {
+            trackId,
+            telegramId,
+            paidRial,
+            expectedRial: expectedPayableRial
+          });
+        } catch (refundError) {
+          console.error('[ZIBAL_ROUNDING_REFUND_FAILED]', {
+            telegramId,
+            trackId,
+            message: refundError?.message || String(refundError)
+          });
+        }
+      }
+
+      console.log('[ZIBAL_CALLBACK] credited wallet:', {
+        telegramId,
+        originalAmountToman,
+        taxToman,
+        expectedPayableToman,
+        paidRial,
+        legacyRoundingDeltaRial,
+        roundingRefund,
+        trackId,
+        orderId
+      });
+      const bankPaidToman = (paidRial || expectedPayableRial) / 10;
+      const roundingText = legacyOneTomanOvercharge
+        ? ' اختلاف ۱ تومانی فرمول قدیمی نیز به کیف پول شما برگردانده شد.'
+        : '';
       return res.send(html(
         'پرداخت موفق',
         `مبلغ ${originalAmountToman.toLocaleString('fa-IR')} تومان به کیف پول شما اضافه شد. ` +
         `مالیات: ${taxToman.toLocaleString('fa-IR')} تومان. ` +
-        `مبلغ پرداخت بانکی: ${expectedPayableToman.toLocaleString('fa-IR')} تومان. ` +
-        `مالیات جزو موجودی کیف پول نیست. می‌توانید به ربات برگردید.`
+        `مبلغ پرداخت بانکی: ${bankPaidToman.toLocaleString('fa-IR')} تومان. ` +
+        `مالیات جزو موجودی کیف پول نیست.${roundingText} می‌توانید به ربات برگردید.`
       ));
     } catch (e) {
       try { await conn.rollback(); } catch {}
