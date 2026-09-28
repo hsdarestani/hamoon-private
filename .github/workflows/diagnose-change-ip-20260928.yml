@@ -1,0 +1,100 @@
+name: Diagnose Change IP 2026-09-28
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-change-ip-20260928.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect production Change IP failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -u
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo "PRODUCTION_SHA=$(git rev-parse HEAD 2>/dev/null || true)"
+          echo "NOW=$(date -Is)"
+          echo "=== PM2 ==="
+          pm2 jlist 2>/dev/null | node - <<'NODE' || true
+          let s=''; process.stdin.on('data',d=>s+=d).on('end',()=>{
+            try {
+              const a=JSON.parse(s||'[]');
+              for (const p of a) {
+                console.log(JSON.stringify({
+                  name:p.name,
+                  status:p.pm2_env?.status,
+                  pid:p.pid,
+                  out:p.pm2_env?.pm_out_log_path,
+                  err:p.pm2_env?.pm_err_log_path
+                }));
+              }
+            } catch(e) { console.log('PM2_PARSE_ERROR='+e.message); }
+          });
+          NODE
+
+          echo "=== RECENT CHANGE IP LOGS ==="
+          for f in ~/.pm2/logs/*.log; do
+            [ -f "$f" ] || continue
+            if tail -n 5000 "$f" 2>/dev/null | grep -Eq 'HETZNER_CHANGE_IP|Hetzner API .*primary_ips|PRIMARY_IPV4|NO_.*IP|resource_limit|limit_reached|rate_limit|OPERATION_IN_PROGRESS'; then
+              echo "--- $f ---"
+              tail -n 5000 "$f" 2>/dev/null | grep -E 'HETZNER_CHANGE_IP|Hetzner API .*primary_ips|PRIMARY_IPV4|NO_.*IP|resource_limit|limit_reached|rate_limit|OPERATION_IN_PROGRESS' | tail -n 180
+            fi
+          done
+
+          echo "=== PARHAM PURCHASE CANDIDATES ==="
+          node - <<'NODE' || true
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const [cols]=await db.pool.query('SHOW COLUMNS FROM users');
+            const names=new Set(cols.map(c=>c.Field));
+            const candidates=['username','telegram_username','tg_username','name','first_name'];
+            const usable=candidates.filter(c=>names.has(c));
+            let users=[];
+            for (const col of usable) {
+              const [rows]=await db.pool.query(
+                `SELECT telegram_id, ${col} AS matched_value FROM users WHERE LOWER(COALESCE(${col},'')) LIKE ? LIMIT 20`,
+                ['%parham%']
+              );
+              users.push(...rows);
+            }
+            const unique=[...new Map(users.map(u=>[String(u.telegram_id),u])).values()];
+            console.log('PARHAM_USERS='+JSON.stringify(unique));
+            for (const u of unique) {
+              const [rows]=await db.pool.query(
+                `SELECT telegram_id,server_id,server_name,datacenter,public_ip,status,delivered_at
+                   FROM purchases
+                  WHERE telegram_id=? AND LOWER(datacenter) LIKE 'hetzner%'
+                  ORDER BY id DESC LIMIT 20`,
+                [String(u.telegram_id)]
+              );
+              console.log('PARHAM_PURCHASES_'+String(u.telegram_id)+'='+JSON.stringify(rows));
+            }
+            await db.pool.end();
+          })().catch(async e=>{console.log('DB_DIAG_ERROR='+e.message); try{await db.pool.end()}catch{}});
+          NODE
+          REMOTE
