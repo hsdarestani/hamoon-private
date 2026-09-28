@@ -69,6 +69,17 @@ jobs:
                      FROM wallet_logs WHERE telegram_id=?`,[String(uid)]);
                 console.log('LEDGER_SUM='+JSON.stringify(sum));
               }
+              const [diffs]=await conn.query(
+                `SELECT track_id,telegram_id,amount_toman,paid_rial,
+                        (amount_toman + CEIL(amount_toman / 10)) * 10 AS expected_rial,
+                        paid_rial - ((amount_toman + CEIL(amount_toman / 10)) * 10) AS delta_rial,
+                        credited,created_at
+                   FROM zibal_payments
+                  WHERE credited=1
+                    AND paid_rial <> ((amount_toman + CEIL(amount_toman / 10)) * 10)
+                  ORDER BY created_at ASC`
+              );
+              console.log('ZIBAL_DISCREPANCIES='+JSON.stringify(diffs));
             } finally {
               conn.release();
               await db.pool.end();
