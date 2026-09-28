@@ -82,7 +82,45 @@ jobs:
                     LIMIT 30`,[String(m.telegram_id)]
                 ).catch(async()=>[[]]);
                 console.log('PURCHASES='+JSON.stringify(purchases));
+                const [named]=await conn.query(
+                  `SELECT telegram_id,server_id,server_name,datacenter,status,duration,amount,created_at,updated_at
+                     FROM purchases
+                    WHERE server_name IN ('Srv-HET-812ee1','Srv-HET-9c8bb9')
+                       OR server_name LIKE '%812ee1%'
+                       OR server_name LIKE '%9c8bb9%'`
+                );
+                console.log('NAMED_PURCHASES='+JSON.stringify(named));
+                const [tables]=await conn.query(
+                  `SELECT TABLE_NAME,COLUMN_NAME
+                     FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA=DATABASE()
+                      AND COLUMN_NAME IN ('server_name','server_id','telegram_id')
+                      AND TABLE_NAME NOT LIKE 'wallet_logs'
+                    ORDER BY TABLE_NAME,COLUMN_NAME`
+                );
+                console.log('SERVER_TABLES='+JSON.stringify(tables));
               }
+
+              const datacenters=require('./datacenters');
+              const h=require('./Hetzner/hetzner-api');
+              const seenTokens=new Set();
+              const found=[];
+              for (const [key,dc] of Object.entries(datacenters)) {
+                const token=h.getHetznerApiToken(dc);
+                if (!token || seenTokens.has(token)) continue;
+                seenTokens.add(token);
+                for (const name of ['Srv-HET-812ee1','Srv-HET-9c8bb9']) {
+                  try {
+                    const r=await h.hetznerRequest(dc,'GET','/servers?name='+encodeURIComponent(name));
+                    for (const s of (r?.servers||[])) {
+                      found.push({project:key,id:s.id,name:s.name,status:s.status,labels:s.labels,ip:s?.public_net?.ipv4?.ip||null});
+                    }
+                  } catch (e) {
+                    console.log('HETZNER_LOOKUP_ERROR='+JSON.stringify({project:key,name,status:e.status,code:e?.data?.error?.code||e.code||null}));
+                  }
+                }
+              }
+              console.log('HETZNER_FOUND='+JSON.stringify(found));
             } finally {
               conn.release();
               await db.pool.end();
