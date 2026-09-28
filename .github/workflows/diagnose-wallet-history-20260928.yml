@@ -1,0 +1,92 @@
+name: Diagnose Wallet History 2026-09-28
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-wallet-history-20260928.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect wallet history
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          echo "PRODUCTION_SHA=$(git rev-parse HEAD)"
+          node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          (async()=>{
+            const conn=await db.pool.getConnection();
+            try {
+              const [[clock]]=await conn.query("SELECT NOW() db_now, UTC_TIMESTAMP() db_utc, @@session.time_zone session_tz, @@global.time_zone global_tz");
+              console.log('CLOCK='+JSON.stringify(clock));
+              const [matches]=await conn.query(
+                `SELECT w.telegram_id,u.wallet,u.updated_at user_updated_at,w.id reward_log_id,w.timestamp reward_timestamp,w.description
+                   FROM wallet_logs w
+                   JOIN users u ON u.telegram_id=w.telegram_id
+                  WHERE w.amount=50000
+                    AND w.description LIKE '%services_2026_09%'
+                    AND u.wallet BETWEEN 529000 AND 529150
+                  ORDER BY w.timestamp DESC
+                  LIMIT 20`
+              );
+              console.log('MATCHES='+JSON.stringify(matches));
+              for (const m of matches) {
+                const [logs]=await conn.query(
+                  `SELECT id,amount,type,description,timestamp
+                     FROM wallet_logs
+                    WHERE telegram_id=?
+                    ORDER BY timestamp DESC,id DESC
+                    LIMIT 30`,[String(m.telegram_id)]
+                );
+                console.log('USER='+String(m.telegram_id)+' WALLET='+String(m.wallet));
+                console.log('LOGS='+JSON.stringify(logs));
+                const [[agg]]=await conn.query(
+                  `SELECT COUNT(*) total, MAX(timestamp) max_ts,
+                          SUM(timestamp > ?) after_reward
+                     FROM wallet_logs WHERE telegram_id=?`,
+                  [m.reward_timestamp,String(m.telegram_id)]
+                );
+                console.log('AGG='+JSON.stringify(agg));
+                const [purchases]=await conn.query(
+                  `SELECT server_id,server_name,status,duration,amount,updated_at,
+                          billing_next_charge_at,billing_last_charged_at
+                     FROM purchases
+                    WHERE telegram_id=?
+                    ORDER BY updated_at DESC
+                    LIMIT 30`,[String(m.telegram_id)]
+                ).catch(async()=>[[]]);
+                console.log('PURCHASES='+JSON.stringify(purchases));
+              }
+            } finally {
+              conn.release();
+              await db.pool.end();
+            }
+          })().catch(async e=>{console.error('DIAG='+JSON.stringify({message:e.message,code:e.code}));try{await db.pool.end()}catch{};process.exit(1)});
+          NODE
+          REMOTE
