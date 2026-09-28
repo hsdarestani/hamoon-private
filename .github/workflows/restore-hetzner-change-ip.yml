@@ -8,6 +8,8 @@ on:
       - 'hetzner-change-ip-bootstrap.js'
       - 'runtime-bootstrap.js'
       - 'scripts/validate-hetzner-management-buttons.js'
+      - 'Hetzner/hetzner-api.js'
+      - 'cloud-api.js'
       - '.github/workflows/restore-hetzner-change-ip.yml'
   workflow_dispatch:
 
