@@ -120,6 +120,52 @@ const fastFallback = require('../services/hetzner-location-fallback-fast-bootstr
   assert.strictEqual(audited.auditPoolClaimed, true);
   assert(auditQueries.some(x => x.text.includes("SET result = 'pending'")));
 
+  // A stale unassigned Primary IPv4 created by Hamoon should be recycled before
+  // asking Hetzner to allocate another address.
+  const originalHetznerRequest = require('../Hetzner/hetzner-api').hetznerRequest;
+  const recycledQueries = [];
+  require('../Hetzner/hetzner-api').hetznerRequest = async (_dc, method, requestPath) => {
+    assert.strictEqual(method, 'GET');
+    assert(requestPath.includes('/primary_ips?type=ipv4'));
+    return {
+      primary_ips: [{
+        id: 88,
+        ip: '6.6.6.6',
+        type: 'ipv4',
+        name: 'hamoon-ip-nbg1-stale',
+        location: { name: 'nbg1' },
+        assignee_id: null,
+        assignee_type: 'unassigned',
+        created: new Date(now - 60 * 60 * 1000).toISOString()
+      }],
+      meta: { pagination: { next_page: null } }
+    };
+  };
+  try {
+    const recycled = await baseChange.claimStaleUnassignedPrimaryIpv4({
+      pool: {
+        async query(sql, params) {
+          recycledQueries.push({ sql: String(sql), params });
+          if (String(sql).includes('FROM purchases')) return [[], []];
+          throw new Error('unexpected recycle query: ' + String(sql));
+        }
+      }
+    }, {
+      dc: {},
+      serverId: 's',
+      location: 'nbg1',
+      used: new Set(['1.1.1.1']),
+      blockedRanges: new Set(),
+      now
+    });
+    assert.strictEqual(recycled.id, '88');
+    assert.strictEqual(recycled.ip, '6.6.6.6');
+    assert.strictEqual(recycled.recycledPoolClaimed, true);
+    assert(recycledQueries.some(x => x.sql.includes('FROM purchases')));
+  } finally {
+    require('../Hetzner/hetzner-api').hetznerRequest = originalHetznerRequest;
+  }
+
   // Dirty IPs must be rejected by Iran/global quality before we spend time on SSH.
   let sshCalls = 0;
   let qualityCalls = 0;
