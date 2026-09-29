@@ -6,6 +6,7 @@ on:
     paths:
       - 'billing-cycle-bootstrap.js'
       - 'billing-renewal-guard-bootstrap.js'
+      - 'billing-renewal-tick-bootstrap.js'
       - 'billing-settlement.js'
       - 'billing-settlement-bootstrap.js'
       - 'billing-settlement-recovery.js'
@@ -29,6 +30,7 @@ on:
       - 'services/hetzner-lifecycle-safe-bootstrap.js'
       - 'services/hetzner-lifecycle.js'
       - 'services/hetzner-change-ip.js'
+      - 'services/payment-gateway-outage-guard.js'
       - 'scripts/validate-clean-ip-runtime.js'
       - 'scripts/validate-hetzner-purchase-architecture.js'
       - 'scripts/validate-hetzner-management-buttons.js'
@@ -64,6 +66,7 @@ jobs:
           set -euo pipefail
           node --check billing-cycle-bootstrap.js
           node --check billing-renewal-guard-bootstrap.js
+          node --check billing-renewal-tick-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
           node --check billing-settlement-recovery.js
@@ -87,6 +90,7 @@ jobs:
           node --check services/hetzner-lifecycle-safe-bootstrap.js
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
+          node --check services/payment-gateway-outage-guard.js
           node --check scripts/validate-reseller-billing-grace.js
           node - <<'NODE'
           const fs = require('fs');
@@ -97,7 +101,10 @@ jobs:
             'settleServerRenewalAtomic({',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
-            '[HETZNER_TRAFFIC_BILLED]'
+            '[HETZNER_TRAFFIC_BILLED]',
+            'protectAutomaticBillingShortfall',
+            "'minute_renewal'",
+            '[PAYMENT_GATEWAY_BILLING_PROTECTED]'
           ];
           for (const marker of required) if (!composed.includes(marker)) throw new Error('BILLING_SETTLEMENT_MARKER_MISSING:' + marker);
           if (!composed.includes('const payUrl = `https://pay.hamooncloud.ir/payment/start/${trackId}`;')) throw new Error('ZIBAL_INTERMEDIARY_URL_MISSING');
@@ -144,6 +151,7 @@ jobs:
           echo '=== VALIDATE PRODUCTION SOURCE ==='
           node --check billing-cycle-bootstrap.js
           node --check billing-renewal-guard-bootstrap.js
+          node --check billing-renewal-tick-bootstrap.js
           node --check billing-settlement.js
           node --check billing-settlement-bootstrap.js
           node --check billing-settlement-recovery.js
@@ -167,6 +175,7 @@ jobs:
           node --check services/hetzner-lifecycle-safe-bootstrap.js
           node --check services/hetzner-lifecycle.js
           node --check services/hetzner-change-ip.js
+          node --check services/payment-gateway-outage-guard.js
           node --check scripts/validate-reseller-billing-grace.js
           node - <<'NODE'
           const fs = require('fs');
@@ -177,7 +186,10 @@ jobs:
             'settleServerRenewalAtomic({',
             'settleHetznerTrafficOverage({',
             '[ATOMIC_RENEWAL_DUPLICATE_SKIPPED]',
-            '[HETZNER_TRAFFIC_BILLED]'
+            '[HETZNER_TRAFFIC_BILLED]',
+            'protectAutomaticBillingShortfall',
+            "'minute_renewal'",
+            '[PAYMENT_GATEWAY_BILLING_PROTECTED]'
           ];
           for (const marker of required) if (!composed.includes(marker)) throw new Error('BILLING_SETTLEMENT_MARKER_MISSING:' + marker);
           if (!composed.includes('const payUrl = `https://pay.hamooncloud.ir/payment/start/${trackId}`;')) throw new Error('ZIBAL_INTERMEDIARY_URL_MISSING');
@@ -198,7 +210,7 @@ jobs:
           echo '=== TARGETED RECOVERY ==='
           node scripts/recover-suspended-server.js Srv-FIN-7b24a5
           echo '=== RECENT STARTUP ERRORS ==='
-          timeout 20s pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED|OPS_RECOVERY' | tail -n 120 || true
+          timeout 20s pm2 logs hamoonbot --lines 220 --nostream 2>/dev/null | grep -Ei 'SyntaxError|ReferenceError|TypeError|ATOMIC_RENEWAL_FAILED|HETZNER_TRAFFIC_BILLING_ERROR|PAYMENT_GATEWAY_BILLING|PAYMENT_GATEWAY_PROTECTED|BILLING_SETTLEMENT|ZIBAL_REFERER|strict-check|check-host|reconcile-policy|clean-ip|safe-lifecycle|pending-recovery|IP_QUALITY|HETZNER_PROVISIONING_IP|HETZNER_PENDING_RECOVERY|provider-visibility|billing-cycle-bootstrap|BILLING_RENEWAL_GUARD|BILLING_GRACE|reseller-billing-grace|rebuild-bootstrap|hetzner-purchase-architecture|HETZNER_MANAGEMENT_SCOPE|HETZNER_INVALID_IMAGE_ARCH|REBUILD|BILLING_CYCLE_CHANGE_FAILED|RESUME_BILLING_GUARD_FAILED|OPS_RECOVERY' | tail -n 120 || true
           echo '=== AFTER ==='
           git rev-parse --short HEAD
           REMOTE
