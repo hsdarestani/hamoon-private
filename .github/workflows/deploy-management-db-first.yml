@@ -13,6 +13,8 @@ on:
       - 'loyalty-history-bootstrap.js'
       - 'Hetzner/hetzner-api.js'
       - 'hetzner-management-scope-bootstrap.js'
+      - 'provider-visibility-bootstrap.js'
+      - 'scripts/validate-provider-visibility.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
   workflow_dispatch:
@@ -40,6 +42,9 @@ jobs:
         run: |
           set -euo pipefail
           node --check hetzner-management-scope-bootstrap.js
+          node --check provider-visibility-bootstrap.js
+          node --check scripts/validate-provider-visibility.js
+          node scripts/validate-provider-visibility.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
@@ -54,6 +59,12 @@ jobs:
           const runtime = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) {
             throw new Error('MANAGE_DB_FIRST_NOT_COMPOSED');
+          }
+          if (runtime.includes("await require('./stale-server-reconcile').reconcileStaleServersForUser")) {
+            throw new Error('MANAGE_STALE_RECONCILE_BLOCKING');
+          }
+          if (!runtime.includes("scheduleStaleServerReconcile([effectiveUserId], 1500)")) {
+            throw new Error('MANAGE_STALE_RECONCILE_NOT_DEFERRED');
           }
           if (!runtime.includes("case '🏆 باشگاه هامون'")) throw new Error('LOYALTY_MENU_NOT_COMPOSED');
           if (!runtime.includes('[LOYALTY_CLUB_OPEN_OK]')) throw new Error('LOYALTY_RESPONSIVE_HANDLER_NOT_COMPOSED');
@@ -87,6 +98,9 @@ jobs:
           git merge --ff-only origin/main
 
           node --check hetzner-management-scope-bootstrap.js
+          node --check provider-visibility-bootstrap.js
+          node --check scripts/validate-provider-visibility.js
+          node scripts/validate-provider-visibility.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
@@ -98,6 +112,8 @@ jobs:
           const { applyPatches } = require('./runtime-bootstrap');
           const runtime = applyPatches(fs.readFileSync('index-core.js', 'utf8'));
           if (!runtime.includes('const datacenterKeys = []; // MANAGE_DB_FIRST')) process.exit(1);
+          if (runtime.includes("await require('./stale-server-reconcile').reconcileStaleServersForUser")) process.exit(1);
+          if (!runtime.includes("scheduleStaleServerReconcile([effectiveUserId], 1500)")) process.exit(1);
           if (!runtime.includes("case '🏆 باشگاه هامون'")) process.exit(1);
           if (!runtime.includes('[LOYALTY_CLUB_OPEN_OK]')) process.exit(1);
           new Function(runtime);
