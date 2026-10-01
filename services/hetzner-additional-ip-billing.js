@@ -64,6 +64,15 @@ async function cancel({ db, floatingIpId }) {
   await db.pool.execute("UPDATE hetzner_additional_ip_billing SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE floating_ip_id = ?", [String(floatingIpId)]);
 }
 
+async function listActiveForServer(db, telegramId, serverId, datacenter) {
+  await ensureTable(db);
+  const [rows] = await db.pool.execute(
+    "SELECT * FROM hetzner_additional_ip_billing WHERE status = 'active' AND telegram_id = ? AND server_id = ? AND datacenter = ? ORDER BY created_at ASC",
+    [String(telegramId), String(serverId), String(datacenter)]
+  );
+  return rows;
+}
+
 async function listDue(db, now = new Date()) {
   await ensureTable(db);
   const cutoff = new Date(now.getTime() - BILLING_CYCLE_HOURS * 3600000);
@@ -90,4 +99,4 @@ async function renew({ db, floatingIpId }) {
   finally { conn.release(); }
 }
 
-module.exports = { HETZNER_FLOATING_IPV4_EUR_MONTHLY, HETZNER_ADDITIONAL_IP_EUR_TOMAN, BILLING_CYCLE_HOURS, MONTHLY_PRICE_TOMAN, quote, assertAffordable, activate, cancel, listDue, renew };
+module.exports = { HETZNER_FLOATING_IPV4_EUR_MONTHLY, HETZNER_ADDITIONAL_IP_EUR_TOMAN, BILLING_CYCLE_HOURS, MONTHLY_PRICE_TOMAN, quote, assertAffordable, activate, cancel, listActiveForServer, listDue, renew };
