@@ -6,6 +6,7 @@ const BASE = 'https://api.hetzner.cloud/v1';
 const CACHE_TTL_MS = Math.max(1000, Number(process.env.HETZNER_IMAGE_CACHE_MS || 10 * 60 * 1000));
 const STALE_CACHE_MS = Math.max(CACHE_TTL_MS, Number(process.env.HETZNER_IMAGE_STALE_CACHE_MS || 24 * 60 * 60 * 1000));
 const imageCache = new Map();
+const imageInFlight = new Map();
 
 function architectureForServerType(serverType) {
   return String(serverType || '').trim().toLowerCase().startsWith('cax') ? 'arm' : 'x86';
@@ -126,27 +127,39 @@ async function listCompatibleImages(dcConfig = {}, serverType) {
   const cached = imageCache.get(key);
   if (cached?.images?.length && now - cached.savedAt <= CACHE_TTL_MS) return cached.images;
 
+  const existingRequest = imageInFlight.get(key);
+  if (existingRequest) return existingRequest;
+
+  const request = (async () => {
+    try {
+      const response = await fetchImagesWithRetry(token, architecture);
+      const images = normalizeImages(response, dcConfig, architecture);
+      if (!images.length) {
+        const err = new Error(`No ${architecture} Hetzner images are currently available`);
+        err.code = 'HETZNER_IMAGE_CATALOG_EMPTY';
+        throw err;
+      }
+      imageCache.set(key, { images, savedAt: Date.now() });
+      return images;
+    } catch (error) {
+      if (cached?.images?.length && now - cached.savedAt <= STALE_CACHE_MS && isRetryableImageError(error)) {
+        console.warn('[HETZNER_IMAGE_STALE_CACHE]', {
+          architecture,
+          age_ms: now - cached.savedAt,
+          status: imageErrorStatus(error),
+          code: error?.code || null,
+        });
+        return cached.images;
+      }
+      throw error;
+    }
+  })();
+
+  imageInFlight.set(key, request);
   try {
-    const response = await fetchImagesWithRetry(token, architecture);
-    const images = normalizeImages(response, dcConfig, architecture);
-    if (!images.length) {
-      const err = new Error(`No ${architecture} Hetzner images are currently available`);
-      err.code = 'HETZNER_IMAGE_CATALOG_EMPTY';
-      throw err;
-    }
-    imageCache.set(key, { images, savedAt: now });
-    return images;
-  } catch (error) {
-    if (cached?.images?.length && now - cached.savedAt <= STALE_CACHE_MS && isRetryableImageError(error)) {
-      console.warn('[HETZNER_IMAGE_STALE_CACHE]', {
-        architecture,
-        age_ms: now - cached.savedAt,
-        status: imageErrorStatus(error),
-        code: error?.code || null,
-      });
-      return cached.images;
-    }
-    throw error;
+    return await request;
+  } finally {
+    if (imageInFlight.get(key) === request) imageInFlight.delete(key);
   }
 }
 
