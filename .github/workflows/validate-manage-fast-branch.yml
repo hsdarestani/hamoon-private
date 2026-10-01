@@ -1,0 +1,35 @@
+name: Validate Manage Fast Branch
+
+on:
+  push:
+    branches:
+      - fix/manage-fast-runtime-display-names-20261001
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Validate runtime
+        run: |
+          set -euo pipefail
+          node --check index-core.js
+          node --check server-display-names-bootstrap.js
+          node --check rebuild-bootstrap.js
+          node --check services/hetzner-additional-ip-billing.js
+          node --check scripts/validate-management-fast-path.js
+          node scripts/validate-management-fast-path.js
+          node scripts/validate-provider-visibility.js
+          node scripts/validate-purchase-performance.js
+          node - <<'NODE'
+          const fs = require('fs');
+          const vm = require('vm');
+          const runtime = require('./runtime-bootstrap').applyPatches(fs.readFileSync('index-core.js','utf8'));
+          new vm.Script(runtime, { filename: 'index-core.runtime.js' });
+          console.log('FULL_RUNTIME_OK');
+          NODE
