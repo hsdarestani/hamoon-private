@@ -98,8 +98,8 @@ function applyPatches(originalSource) {
     source,
     `async function handleServerManagement(chatId, userId, serverId, dcConfig) {`,
     `async function getProjectTrafficSummary(chatId, userId, dcConfig, projectId) {`,
-    `      : await getPurchaseByServerId(serverId);\n\n    let ip = extractServerIp(srv) || '–';`,
-    `      : await getPurchaseByServerId(serverId);\n\n    const customDisplayName = await getServerDisplayName(userId, srv.id, dcConfig.key).catch(() => null);\n    const technicalName = purchase?.server_name || srv.name || srv.id;\n    const shownName = customDisplayName || technicalName;\n    let ip = extractServerIp(srv) || '–';`,
+    `    const hetznerDeliveryPending = isHetznerDc(dcConfig) && isHetznerUndeliveredPurchase(purchase);`,
+    `    const customDisplayName = await getServerDisplayName(userId, srv.id, dcConfig.key).catch(() => null);\n    const technicalName = purchase?.server_name || srv.name || srv.id;\n    const shownName = customDisplayName || technicalName;\n    const hetznerDeliveryPending = isHetznerDc(dcConfig) && isHetznerUndeliveredPurchase(purchase);`,
     'resolve display name in management view'
   );
 

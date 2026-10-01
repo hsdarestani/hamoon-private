@@ -15,6 +15,7 @@ on:
       - 'hetzner-purchase-images.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'provider-visibility-bootstrap.js'
+      - 'server-display-names-bootstrap.js'
       - 'rebuild-bootstrap.js'
       - 'services/hetzner-additional-ip-billing.js'
       - 'scripts/validate-provider-visibility.js'
@@ -49,6 +50,7 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
           node --check hetzner-purchase-images.js
+          node --check server-display-names-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check services/hetzner-additional-ip-billing.js
           node --check scripts/validate-provider-visibility.js
@@ -112,6 +114,7 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
           node --check hetzner-purchase-images.js
+          node --check server-display-names-bootstrap.js
           node --check rebuild-bootstrap.js
           node --check services/hetzner-additional-ip-billing.js
           node --check scripts/validate-provider-visibility.js
