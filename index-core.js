@@ -368,6 +368,77 @@ const adminState = { impersonating: null };
 let orderCounter = 10000;
 const hetznerUpgradeLocks = new Map();
 
+const HETZNER_MANAGE_LIVE_CACHE_MS = Math.max(
+  5000,
+  Number(process.env.HETZNER_MANAGE_LIVE_CACHE_MS || 60 * 1000)
+);
+const hetznerManageLiveCache = new Map();
+const hetznerManageRefreshInFlight = new Map();
+
+function hetznerManageCacheKey(dcConfig, serverId) {
+  return `${String(dcConfig?.key || dcConfig?.name || 'hetzner')}:${String(serverId)}`;
+}
+
+function getCachedHetznerManageServer(dcConfig, serverId) {
+  const key = hetznerManageCacheKey(dcConfig, serverId);
+  const cached = hetznerManageLiveCache.get(key);
+  if (!cached || Date.now() - cached.savedAt > HETZNER_MANAGE_LIVE_CACHE_MS) return null;
+  return cached.server || null;
+}
+
+function scheduleHetznerManageRefresh(dcConfig, serverId) {
+  if (!isHetznerDc(dcConfig)) return;
+  const key = hetznerManageCacheKey(dcConfig, serverId);
+  const cached = hetznerManageLiveCache.get(key);
+  if (cached && Date.now() - cached.savedAt <= HETZNER_MANAGE_LIVE_CACHE_MS) return;
+  if (hetznerManageRefreshInFlight.has(key)) return;
+
+  const task = Promise.resolve()
+    .then(() => openstackApi.getServer(dcConfig, null, serverId))
+    .then(server => {
+      if (server?.id) {
+        hetznerManageLiveCache.set(key, { server, savedAt: Date.now() });
+      }
+    })
+    .catch(error => {
+      console.warn('[HETZNER_MANAGE_BACKGROUND_REFRESH_FAILED]', {
+        datacenter: dcConfig?.key || null,
+        server_id: String(serverId),
+        message: error?.message || String(error)
+      });
+    })
+    .finally(() => {
+      hetznerManageRefreshInFlight.delete(key);
+    });
+
+  hetznerManageRefreshInFlight.set(key, task);
+}
+
+function prewarmHetznerManagementCatalogs(dcConfig, purchase) {
+  if (!isHetznerDc(dcConfig)) return;
+  setImmediate(() => {
+    openstackApi.listFlavors(dcConfig).catch(error => {
+      console.warn('[HETZNER_MANAGE_PLAN_PREWARM_FAILED]', {
+        datacenter: dcConfig?.key || null,
+        message: error?.message || String(error)
+      });
+    });
+
+    const serverType = purchase?.flavor_id;
+    if (serverType) {
+      require('./hetzner-purchase-images')
+        .listCompatibleImages(dcConfig, serverType)
+        .catch(error => {
+          console.warn('[HETZNER_MANAGE_IMAGE_PREWARM_FAILED]', {
+            datacenter: dcConfig?.key || null,
+            server_id: String(purchase?.server_id || ''),
+            message: error?.message || String(error)
+          });
+        });
+    }
+  });
+}
+
 // Main menu keyboard layout
 const mainMenu = {
     reply_markup: {
@@ -3264,10 +3335,38 @@ async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig)
   try {
     const purchase = await getPurchaseForUserServer(userId, serverId, dcConfig.key);
     if (!purchase) return sendMessage(chatId, '❌ سرور پیدا نشد.');
-    const ips = await additionalIps.listAdditionalIps({ dc: dcConfig, serverId });
-    const lines = ips.length
-      ? ips.map((item, index) => `${index + 1}. ${item.ip}`).join('\n')
+
+    const database = require('./db');
+    const managedIps = await additionalIpBilling.listActiveForServer(
+      database,
+      userId,
+      serverId,
+      dcConfig.key
+    );
+    const lines = managedIps.length
+      ? managedIps.map((item, index) => `${index + 1}. ${item.floating_ip}`).join('\n')
       : 'هنوز IP اضافه‌ای برای این سرور ثبت نشده است.';
+
+    setImmediate(() => {
+      additionalIps.listAdditionalIps({ dc: dcConfig, serverId })
+        .then(providerIps => {
+          if (providerIps.length !== managedIps.length) {
+            console.warn('[HETZNER_ADDITIONAL_IP_BACKGROUND_MISMATCH]', {
+              user_id: String(userId),
+              server_id: String(serverId),
+              db_count: managedIps.length,
+              provider_count: providerIps.length
+            });
+          }
+        })
+        .catch(error => {
+          console.warn('[HETZNER_ADDITIONAL_IP_BACKGROUND_REFRESH_FAILED]', {
+            server_id: String(serverId),
+            message: error?.message || String(error)
+          });
+        });
+    });
+
     const pricing = additionalIpBilling.quote();
     const keyboard = [
       [{ text: `✅ تأیید و پرداخت ${pricing.amount.toLocaleString('fa-IR')} تومان`, callback_data: makeShortCb(userId, { action: 'HAIPC', dcKey: dcConfig.key, serverId }) }],
@@ -3278,7 +3377,7 @@ async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig)
     });
   } catch (error) {
     console.error('[HETZNER_ADDITIONAL_IP_LIST]', error.code || error.message);
-    return sendMessage(chatId, '❌ دریافت IPهای اضافه از Hetzner انجام نشد.');
+    return sendMessage(chatId, '❌ دریافت IPهای اضافه انجام نشد.');
   }
 }
 
@@ -3354,13 +3453,31 @@ async function handleServerManagement(chatId, userId, serverId, dcConfig) {
   try {
     ensureUserState(userId);
 
-    const tok = await openstackApi.getToken(dcConfig);
-    const srv = await openstackApi.getServer(dcConfig, tok, serverId);
-    const purchase = isHetznerDc(dcConfig)
+    const isHetzner = isHetznerDc(dcConfig);
+    const purchase = isHetzner
       ? (await getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null) || await getPurchaseByServerId(serverId))
       : await getPurchaseByServerId(serverId);
 
-    let ip = extractServerIp(srv) || '–';
+    let srv;
+    let ip;
+
+    if (isHetzner && purchase) {
+      const cachedLive = getCachedHetznerManageServer(dcConfig, serverId);
+      srv = cachedLive || {
+        id: String(serverId),
+        name: purchase.server_name || String(serverId),
+        status: purchase.status || 'active',
+        state: purchase.status || 'active',
+        image: { name: purchase.os_label || 'N/A' }
+      };
+      ip = purchase.public_ip || extractServerIp(cachedLive) || '–';
+      scheduleHetznerManageRefresh(dcConfig, serverId);
+      prewarmHetznerManagementCatalogs(dcConfig, purchase);
+    } else {
+      const tok = await openstackApi.getToken(dcConfig);
+      srv = await openstackApi.getServer(dcConfig, tok, serverId);
+      ip = extractServerIp(srv) || '–';
+    }
     const hetznerDeliveryPending = isHetznerDc(dcConfig) && isHetznerUndeliveredPurchase(purchase);
     if (hetznerDeliveryPending) ip = 'در حال بررسی';
 
