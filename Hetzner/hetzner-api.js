@@ -223,6 +223,7 @@ async function listHetznerServerTypes(config) {
 
 const SERVER_TYPE_CACHE_MS = Number(process.env.HETZNER_PLAN_CACHE_MS || 20 * 60 * 1000);
 const serverTypeCache = new Map();
+const serverTypeInFlight = new Map();
 
 function roundPrice(value) {
   const roundTo = Math.max(1, Number(process.env.HETZNER_PRICE_ROUND_TO || 1000));
@@ -383,30 +384,42 @@ async function getHetznerSellablePlans(config = {}) {
   const cached = serverTypeCache.get(cacheKey);
   if (cached?.plans && cached.expires > now) return cached.plans;
 
-  const locationScoped = configuredPriceLocations(config).length > 0;
+  const existingRequest = serverTypeInFlight.get(cacheKey);
+  if (existingRequest) return existingRequest;
+
+  const request = (async () => {
+    const locationScoped = configuredPriceLocations(config).length > 0;
+    try {
+      const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
+      if (plans.length) {
+        serverTypeCache.set(cacheKey, { plans, expires: Date.now() + SERVER_TYPE_CACHE_MS });
+        return plans;
+      }
+      if (locationScoped) {
+        serverTypeCache.set(cacheKey, { plans: [], expires: Date.now() + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });
+        return [];
+      }
+    } catch (e) {
+      if (locationScoped) {
+        const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');
+        err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';
+        err.cause = e;
+        console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);
+        throw err;
+      }
+      console.warn('[hetzner] using static plan fallback:', e.message);
+    }
+    const fallback = normalizeStaticHetznerPlans(config);
+    if (fallback.length) return fallback;
+    throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
+  })();
+
+  serverTypeInFlight.set(cacheKey, request);
   try {
-    const plans = normalizeHetznerServerTypes(await listHetznerServerTypes(config), config);
-    if (plans.length) {
-      serverTypeCache.set(cacheKey, { plans, expires: now + SERVER_TYPE_CACHE_MS });
-      return plans;
-    }
-    if (locationScoped) {
-      serverTypeCache.set(cacheKey, { plans: [], expires: now + Math.min(SERVER_TYPE_CACHE_MS, 60 * 1000) });
-      return [];
-    }
-  } catch (e) {
-    if (locationScoped) {
-      const err = new Error('HETZNER_LOCATION_CATALOG_UNAVAILABLE');
-      err.code = 'HETZNER_LOCATION_CATALOG_UNAVAILABLE';
-      err.cause = e;
-      console.warn('[hetzner] location catalog unavailable; refusing unsafe static fallback:', e.message);
-      throw err;
-    }
-    console.warn('[hetzner] using static plan fallback:', e.message);
+    return await request;
+  } finally {
+    if (serverTypeInFlight.get(cacheKey) === request) serverTypeInFlight.delete(cacheKey);
   }
-  const fallback = normalizeStaticHetznerPlans(config);
-  if (fallback.length) return fallback;
-  throw new Error('HETZNER_PLAN_CATALOG_UNAVAILABLE');
 }
 
 async function getHetznerServer(config, serverId) {
