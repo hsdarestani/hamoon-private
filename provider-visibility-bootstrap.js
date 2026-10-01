@@ -49,9 +49,11 @@ function applyProviderVisibilityPatches(coreSource) {
     source,
     ' const userPurchases = await getUserActivePurchases(effectiveUserId);',
     [
-      " await require('./stale-server-reconcile').reconcileStaleServersForUser(effectiveUserId).catch(error => {",
-      "   console.warn('[MANAGE_STALE_RECONCILE_FAILED]', { user_id: String(effectiveUserId), message: error?.message || String(error) });",
-      ' });',
+      " try {",
+      "   require('./stale-server-reconcile').scheduleStaleServerReconcile([effectiveUserId], 1500);",
+      " } catch (error) {",
+      "   console.warn('[MANAGE_STALE_RECONCILE_SCHEDULE_FAILED]', { user_id: String(effectiveUserId), message: error?.message || String(error) });",
+      " }",
       ' const userPurchases = await getUserActivePurchases(effectiveUserId);'
     ].join('\n'),
     'reconcile provider-deleted servers before manage list'
