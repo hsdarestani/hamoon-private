@@ -823,12 +823,31 @@ async function handleShahkarNationalCodeMessage(chatId, userId, text) {
   }
 }
 
+const CHANNEL_MEMBERSHIP_CACHE_MS = Math.max(
+  30000,
+  Number(process.env.CHANNEL_MEMBERSHIP_CACHE_MS || 5 * 60 * 1000)
+);
+const positiveChannelMembershipCache = new Map();
+
 async function isUserChannelMember(userId) {
+    const cacheKey = String(userId);
+    const cached = positiveChannelMembershipCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return true;
+
     try {
         const chatMember = await bot.getChatMember(`@${CHANNEL_USERNAME}`, userId);
         const status = chatMember.status;
-        return ['member', 'administrator', 'creator'].includes(status);
+        const isMember = ['member', 'administrator', 'creator'].includes(status);
+        if (isMember) {
+          positiveChannelMembershipCache.set(cacheKey, {
+            expiresAt: Date.now() + CHANNEL_MEMBERSHIP_CACHE_MS
+          });
+        } else {
+          positiveChannelMembershipCache.delete(cacheKey);
+        }
+        return isMember;
     } catch (error) {
+        positiveChannelMembershipCache.delete(cacheKey);
         if (error.response && error.response.body.description.includes('user not found')) {
             return false;
         }
@@ -1968,6 +1987,19 @@ const dcConfig = getUserEffectiveDCs(effectiveUserId)[dcKey];
         }).catch(() => sendMessage(effectiveChatId, `🔐 برای خرید سرورهای این دیتاسنتر، احراز هویت شاهکار لازم است.
 لطفاً کد ملی مالک همین شماره موبایل را وارد کنید:`));
       }
+      if (isHetznerDc(dcConfig)) {
+        setImmediate(() => {
+          openstackApi.listFlavors(dcConfig)
+            .then(plans => console.log('[PURCHASE_PREWARM_PLANS_OK]', {
+              datacenter: dcConfig.key,
+              plans: Array.isArray(plans) ? plans.length : 0
+            }))
+            .catch(error => console.warn('[PURCHASE_PREWARM_PLANS_FAILED]', {
+              datacenter: dcConfig.key,
+              message: error?.message || String(error)
+            }));
+        });
+      }
       return showBillingCycleSelection(effectiveChatId, effectiveUserId, q.message.message_id, dcConfig);
     }
     return;
@@ -2459,6 +2491,36 @@ async function handleCycleSelection(chatId, userId, messageId, selectedCycle, dc
     state[userId].step = 'SELECT_FLAVOR';
 
     const flavors = await openstackApi.listFlavors(dcConfig);
+    state[userId].purchaseFlavorCatalog = {
+      dcKey: dcConfig.key,
+      flavors,
+      savedAt: Date.now()
+    };
+
+    if (isHetznerDc(dcConfig) && flavors.length) {
+      const purchaseImages = require('./hetzner-purchase-images');
+      const representativeTypes = new Map();
+      for (const flavor of flavors) {
+        const serverType = flavor.id || flavor.hetzner_type || flavor.server_type;
+        const architecture = purchaseImages.architectureForServerType(serverType);
+        if (!representativeTypes.has(architecture)) representativeTypes.set(architecture, serverType);
+      }
+      setImmediate(() => {
+        Promise.allSettled(
+          [...representativeTypes.values()].map(serverType =>
+            purchaseImages.listCompatibleImages(dcConfig, serverType)
+          )
+        ).then(results => {
+          const failed = results.filter(result => result.status === 'rejected').length;
+          console.log('[PURCHASE_PREWARM_IMAGES_DONE]', {
+            datacenter: dcConfig.key,
+            architectures: results.length,
+            failed
+          });
+        });
+      });
+    }
+
     const keyboard = flavors.map(f => {
         const totalCyclePrice = getFlavorCyclePrice(f, selectedCycle);
         return [{ text: `${f.label} — ${formatToman(totalCyclePrice)} تومان`, callback_data: `FLAVOR_${f.id}` }];
@@ -2469,7 +2531,11 @@ async function handleCycleSelection(chatId, userId, messageId, selectedCycle, dc
 
 async function handleFlavorSelection(chatId, userId, messageId, selectedFlavorId, dcConfig) {
   try {
-    const flavors = await openstackApi.listFlavors(dcConfig);
+    const cachedFlavorCatalog = state[userId]?.purchaseFlavorCatalog;
+    const flavors =
+      cachedFlavorCatalog?.dcKey === dcConfig.key && Array.isArray(cachedFlavorCatalog.flavors)
+        ? cachedFlavorCatalog.flavors
+        : await openstackApi.listFlavors(dcConfig);
     const selectedFlavor = flavors.find(f => f.id === selectedFlavorId);
     if (!selectedFlavor) return sendMessage(chatId, '❌ پلن نامعتبر.');
 

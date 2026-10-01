@@ -12,9 +12,11 @@ on:
       - 'loyalty-club-bootstrap.js'
       - 'loyalty-history-bootstrap.js'
       - 'Hetzner/hetzner-api.js'
+      - 'hetzner-purchase-images.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'provider-visibility-bootstrap.js'
       - 'scripts/validate-provider-visibility.js'
+      - 'scripts/validate-purchase-performance.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
   workflow_dispatch:
@@ -43,8 +45,11 @@ jobs:
           set -euo pipefail
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
+          node --check hetzner-purchase-images.js
           node --check scripts/validate-provider-visibility.js
+          node --check scripts/validate-purchase-performance.js
           node scripts/validate-provider-visibility.js
+          node scripts/validate-purchase-performance.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
@@ -99,8 +104,11 @@ jobs:
 
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
+          node --check hetzner-purchase-images.js
           node --check scripts/validate-provider-visibility.js
+          node --check scripts/validate-purchase-performance.js
           node scripts/validate-provider-visibility.js
+          node scripts/validate-purchase-performance.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
