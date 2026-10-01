@@ -15,7 +15,10 @@ on:
       - 'hetzner-purchase-images.js'
       - 'hetzner-management-scope-bootstrap.js'
       - 'provider-visibility-bootstrap.js'
+      - 'rebuild-bootstrap.js'
+      - 'services/hetzner-additional-ip-billing.js'
       - 'scripts/validate-provider-visibility.js'
+      - 'scripts/validate-management-fast-path.js'
       - 'scripts/validate-purchase-performance.js'
       - 'scripts/validate-hetzner-management-buttons.js'
       - '.github/workflows/deploy-management-db-first.yml'
@@ -46,10 +49,14 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
           node --check hetzner-purchase-images.js
+          node --check rebuild-bootstrap.js
+          node --check services/hetzner-additional-ip-billing.js
           node --check scripts/validate-provider-visibility.js
           node --check scripts/validate-purchase-performance.js
+          node --check scripts/validate-management-fast-path.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-purchase-performance.js
+          node scripts/validate-management-fast-path.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
@@ -105,10 +112,14 @@ jobs:
           node --check hetzner-management-scope-bootstrap.js
           node --check provider-visibility-bootstrap.js
           node --check hetzner-purchase-images.js
+          node --check rebuild-bootstrap.js
+          node --check services/hetzner-additional-ip-billing.js
           node --check scripts/validate-provider-visibility.js
           node --check scripts/validate-purchase-performance.js
+          node --check scripts/validate-management-fast-path.js
           node scripts/validate-provider-visibility.js
           node scripts/validate-purchase-performance.js
+          node scripts/validate-management-fast-path.js
           node --check survey-service.js
           node --check survey-bootstrap.js
           node --check services/loyalty-club.js
