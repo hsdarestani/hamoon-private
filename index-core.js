@@ -2367,16 +2367,9 @@ bot.onText(/\/debit (\d+) (\d+) (.+)/, async (msg, match) => {
 
 
 async function handleRebuildAsk(chatId, userId, serverId, dcConfig, messageId) {
-  const purchase = isHetznerDc(dcConfig)
-    ? await getPurchaseForUserServer(userId, serverId, dcConfig.key).catch(() => null)
-    : null;
-  const serverType = purchase?.flavor_id || state[userId]?.selectedFlavor?.id || '';
-  const images = isHetznerDc(dcConfig)
-    ? await require('./hetzner-purchase-images').listCompatibleImages(dcConfig, serverType)
-    : await openstackApi.listImages(dcConfig, null);
-  const compatible = isHetznerDc(dcConfig)
-    ? images
-    : hetznerLifecycle.filterCompatibleImages(images, serverType);
+  const images = await openstackApi.listImages(dcConfig, null);
+  const serverType = state[userId]?.selectedFlavor?.id || '';
+  const compatible = hetznerLifecycle.filterCompatibleImages(images, serverType);
   state[userId] = { ...(state[userId] || {}), rebuildInfo: { serverId, dcConfig } };
   const keyboard = compatible.slice(0, 20).map(img => [{ text: img.label || img.name || String(img.id), callback_data: `rebuild:IMG:${img.id}` }]);
   return bot.sendMessage(chatId, '⚠️ بازسازی سیستم‌عامل دیسک فعلی را پاک می‌کند. ایمیج سازگار را انتخاب کنید:', { reply_markup: { inline_keyboard: keyboard } });
