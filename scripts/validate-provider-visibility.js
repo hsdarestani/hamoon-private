@@ -47,6 +47,8 @@ assert('management list falls back to owned purchases', visibilityPatched.includ
 assert('purchase fallback preserves purchase object', visibilityPatched.includes('purchase: p'));
 assert('purchase fallback only uses effective datacenters', visibilityPatched.includes('!userDCs[dcKey]'));
 assert('purchase fallback deduplicates provider results', visibilityPatched.includes('managedServerKeys.has(managedKey)'));
+assert('management does not await stale provider reconciliation', !visibilityPatched.includes("await require('./stale-server-reconcile').reconcileStaleServersForUser"));
+assert('stale provider reconciliation is deferred after response path', visibilityPatched.includes("scheduleStaleServerReconcile([effectiveUserId], 1500)"));
 assert('Tebyan buy menu is hidden from non-support users', visibilityPatched.includes("isTebyanForBuy && String(userId) !== String(SUPPORT_ID)"));
 assert('stale Tebyan BUY callbacks are blocked for non-support users', visibilityPatched.includes("isTebyanBuy && String(effectiveUserId) !== String(SUPPORT_ID)"));
 assert('final Tebyan provisioning is blocked for non-support users', visibilityPatched.includes("isTebyan && String(userId) !== String(SUPPORT_ID)"));
@@ -66,6 +68,8 @@ try {
   assert('Hetzner console patches remain active', fullyPatched.includes("case 'HCONSOLE':"));
   assert('provider visibility patch remains active', fullyPatched.includes('appendSharedNonOpenStackProviders(out, baseDatacenters)'));
   assert('DB purchase fallback remains active', fullyPatched.includes('provider list missed owned server; using purchase fallback'));
+  assert('management remains DB-first', fullyPatched.includes('const datacenterKeys = []; // MANAGE_DB_FIRST'));
+  assert('full runtime keeps stale reconcile async', !fullyPatched.includes("await require('./stale-server-reconcile').reconcileStaleServersForUser"));
   assert('Tebyan support-only purchase gate survives full runtime patching', fullyPatched.includes("isTebyan && String(userId) !== String(SUPPORT_ID)"));
 } catch (error) {
   console.error('FAIL full runtime patches', error.message);
