@@ -367,6 +367,7 @@ const state = {};
 const adminState = { impersonating: null };
 let orderCounter = 10000;
 const hetznerUpgradeLocks = new Map();
+const hetznerAdditionalIpCreateLocks = new Set();
 
 const HETZNER_MANAGE_LIVE_CACHE_MS = Math.max(
   5000,
@@ -3400,6 +3401,11 @@ async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig)
 }
 
 async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfig) {
+  const lockKey = `${String(dcConfig?.key || 'hetzner')}:${String(serverId)}`;
+  if (hetznerAdditionalIpCreateLocks.has(lockKey)) {
+    return sendMessage(chatId, '⏳ بررسی IP اضافه برای این سرور هنوز در حال انجام است. لطفاً منتظر نتیجه بمانید و دوباره روی پرداخت نزنید.');
+  }
+
   try {
     const purchase = await getPurchaseForUserServer(userId, serverId, dcConfig.key);
     if (!purchase) return sendMessage(chatId, '❌ سرور پیدا نشد.');
@@ -3407,8 +3413,16 @@ async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfi
     if (!['active', 'running', 'suspended', 'stopped', 'shutoff'].includes(status)) {
       return sendMessage(chatId, '❌ وضعیت فعلی سرور اجازه افزودن IP را نمی‌دهد.');
     }
+
     const database = require('./db');
     await additionalIpBilling.assertAffordable(database, userId);
+
+    hetznerAdditionalIpCreateLocks.add(lockKey);
+    await sendMessage(
+      chatId,
+      '⏳ درخواست ثبت شد. در حال ساخت، تنظیم و تست IP از ایران و خارج هستم. پیدا کردن IP سالم ممکن است چند دقیقه طول بکشد؛ تا اعلام نتیجه دوباره روی پرداخت نزنید.'
+    );
+
     const result = await additionalIps.addAdditionalIpv4({
       dc: dcConfig,
       serverId,
@@ -3437,6 +3451,8 @@ async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfi
       return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);
     }
     return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');
+  } finally {
+    hetznerAdditionalIpCreateLocks.delete(lockKey);
   }
 }
 
