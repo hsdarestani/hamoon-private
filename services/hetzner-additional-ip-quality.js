@@ -58,6 +58,7 @@ function sshExec({ host, password, command: cmd, timeoutMs = 30000 }) {
       done = true;
       if (hardTimer) clearTimeout(hardTimer);
       try { conn.end(); } catch (_) {}
+      try { conn.destroy(); } catch (_) {}
       error ? reject(error) : resolve(true);
     };
 
@@ -215,35 +216,45 @@ async function createVerifiedAdditionalIpv4(opts) {
   ])];
   let sshHost = null;
   let lastSshError = null;
+  const maxProbeRounds = 2;
 
-  for (const candidateHost of sshHosts) {
-    const probeTimeoutMs = Math.max(3000, Math.min(7000, remaining()));
-    if (probeTimeoutMs <= 0) throw deadlineError();
-    try {
-      await withTimeout(
-        execSsh({
-          host: candidateHost,
-          password,
-          command: command('true\n'),
-          timeoutMs: probeTimeoutMs
-        }),
-        probeTimeoutMs + 750,
-        () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
-      );
-      sshHost = candidateHost;
-      console.log('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]', {
-        server_id: String(serverId),
-        fallback: candidateHost !== host,
-        candidate_count: sshHosts.length
-      });
-      break;
-    } catch (error) {
-      lastSshError = error;
-      console.warn('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]', {
-        server_id: String(serverId),
-        fallback: candidateHost !== host,
-        code: error?.code || null
-      });
+  for (let round = 1; round <= maxProbeRounds && !sshHost; round += 1) {
+    const orderedHosts = round === 1 ? sshHosts : [...sshHosts].reverse();
+    for (const candidateHost of orderedHosts) {
+      const probeTimeoutMs = Math.max(4000, Math.min(12000, remaining()));
+      if (probeTimeoutMs <= 0) throw deadlineError();
+      try {
+        await withTimeout(
+          execSsh({
+            host: candidateHost,
+            password,
+            command: command('true\n'),
+            timeoutMs: probeTimeoutMs
+          }),
+          probeTimeoutMs + 1000,
+          () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+        );
+        sshHost = candidateHost;
+        console.log('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]', {
+          server_id: String(serverId),
+          fallback: candidateHost !== host,
+          candidate_count: sshHosts.length,
+          round
+        });
+        break;
+      } catch (error) {
+        lastSshError = error;
+        console.warn('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]', {
+          server_id: String(serverId),
+          fallback: candidateHost !== host,
+          code: error?.code || null,
+          round
+        });
+      }
+    }
+
+    if (!sshHost && round < maxProbeRounds && remaining() > 1500) {
+      await sleep(1500);
     }
   }
 
@@ -320,17 +331,36 @@ async function createVerifiedAdditionalIpv4(opts) {
         ip,
         attempt
       });
-      const bindTimeoutMs = Math.max(5000, Math.min(20000, remaining()));
-      await withTimeout(
-        execSsh({
-          host: sshHost,
-          password,
-          command: command(bindScript(ip)),
-          timeoutMs: bindTimeoutMs
-        }),
-        bindTimeoutMs + 1000,
-        () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
-      );
+      let bindError = null;
+      for (let bindAttempt = 1; bindAttempt <= 2; bindAttempt += 1) {
+        const bindTimeoutMs = Math.max(5000, Math.min(15000, remaining()));
+        try {
+          await withTimeout(
+            execSsh({
+              host: sshHost,
+              password,
+              command: command(bindScript(ip)),
+              timeoutMs: bindTimeoutMs
+            }),
+            bindTimeoutMs + 1000,
+            () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+          );
+          bindError = null;
+          break;
+        } catch (error) {
+          bindError = error;
+          console.warn('[HETZNER_ADDITIONAL_IP_BIND_RETRY]', {
+            server_id: String(serverId),
+            floating_ip_id: String(created.ip.id),
+            ip,
+            attempt,
+            bind_attempt: bindAttempt,
+            code: error?.code || null
+          });
+          if (bindAttempt < 2 && remaining() > 1500) await sleep(1500);
+        }
+      }
+      if (bindError) throw bindError;
       bound = true;
       console.log('[HETZNER_ADDITIONAL_IP_BIND_SUCCESS]', {
         server_id: String(serverId),
