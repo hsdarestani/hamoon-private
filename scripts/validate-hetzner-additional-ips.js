@@ -101,6 +101,75 @@ async function run() {
     ['DELETE', '/floating_ips/4']
   ]);
 
+  let lockedDeleteAttempts = 0;
+  const lockedDeleteRequest = async (_dc, method, path) => {
+    if (method === 'GET' && path === '/floating_ips/5') {
+      return {
+        floating_ip: {
+          id: 5,
+          ip: '192.0.2.5',
+          server: null,
+          description: 'HamoonCloud user 123 server 42',
+          protection: { delete: false }
+        }
+      };
+    }
+    if (method === 'DELETE' && path === '/floating_ips/5') {
+      lockedDeleteAttempts += 1;
+      if (lockedDeleteAttempts < 3) {
+        const error = new Error('locked');
+        error.status = 423;
+        throw error;
+      }
+      return {};
+    }
+    throw new Error(`Unexpected locked delete request: ${method} ${path}`);
+  };
+  await service.deleteAdditionalIp({
+    dc: {},
+    serverId: '42',
+    floatingIpId: '5',
+    request: lockedDeleteRequest
+  });
+  assert.strictEqual(lockedDeleteAttempts, 3);
+
+  let lockedUnassignAttempts = 0;
+  let lockedAttached = true;
+  const lockedUnassignRequest = async (_dc, method, path) => {
+    if (method === 'GET' && path === '/floating_ips/6') {
+      return {
+        floating_ip: {
+          id: 6,
+          ip: '192.0.2.6',
+          server: lockedAttached ? 42 : null,
+          description: 'HamoonCloud user 123 server 42',
+          protection: { delete: false }
+        }
+      };
+    }
+    if (method === 'POST' && path === '/floating_ips/6/actions/unassign') {
+      lockedUnassignAttempts += 1;
+      if (lockedUnassignAttempts < 3) {
+        const error = new Error('locked');
+        error.response = { status: 423 };
+        throw error;
+      }
+      lockedAttached = false;
+      return { action: { id: 88 } };
+    }
+    if (method === 'DELETE' && path === '/floating_ips/6') return {};
+    throw new Error(`Unexpected locked unassign request: ${method} ${path}`);
+  };
+  await service.deleteAdditionalIp({
+    dc: {},
+    serverId: '42',
+    floatingIpId: '6',
+    request: lockedUnassignRequest,
+    unassignTimeoutMs: 2000,
+    pollDelayMs: 1
+  });
+  assert.strictEqual(lockedUnassignAttempts, 3);
+
   assert.strictEqual(service.floatingIpServerId({ server: 42 }), '42');
   assert.strictEqual(service.floatingIpServerId({ server: { id: 42 } }), '42');
   assert.strictEqual(service.managedDescriptionServerId({ description: 'HamoonCloud user 123 server 42' }), '42');

@@ -49,6 +49,39 @@ function belongsToServerOrManagedOrphan(floatingIp, serverId) {
   return managedDescriptionServerId(floatingIp) === String(serverId);
 }
 
+function providerStatus(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return Number.isFinite(status) ? status : 0;
+}
+
+async function retryProviderLocked(fn, {
+  attempts = 6,
+  baseDelayMs = 1200,
+  maxDelayMs = 5000
+} = {}) {
+  let lastError = null;
+  const total = Math.max(1, Number(attempts) || 1);
+  for (let attempt = 1; attempt <= total; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (providerStatus(error) !== 423 || attempt >= total) throw error;
+      const delayMs = Math.min(
+        Math.max(250, Number(maxDelayMs) || 5000),
+        Math.max(250, (Number(baseDelayMs) || 1200) * attempt)
+      );
+      console.warn('[HETZNER_ADDITIONAL_IP_LOCKED_RETRY]', {
+        attempt,
+        attempts: total,
+        delay_ms: delayMs
+      });
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 async function listAdditionalIps({ dc, serverId, request }) {
   const call = request || ((...args) => require('../Hetzner/hetzner-api').hetznerRequest(...args));
   const data = await call(dc, 'GET', '/floating_ips?per_page=50');
@@ -122,7 +155,10 @@ async function deleteAdditionalIp({
   // already detached. Use the resource assignment itself as the source of
   // truth and keep this wait short so Telegram flows never hang on cleanup.
   if (assignedServerId != null) {
-    const unassign = await call(dc, 'POST', `/floating_ips/${id}/actions/unassign`, {});
+    const unassign = await retryProviderLocked(
+      () => call(dc, 'POST', `/floating_ips/${id}/actions/unassign`, {}),
+      { attempts: 6, baseDelayMs: 1200, maxDelayMs: 5000 }
+    );
     const actionId = unassign?.action?.id ?? unassign?.id ?? null;
     const timeoutMs = Math.max(
       2000,
@@ -165,7 +201,10 @@ async function deleteAdditionalIp({
     }
   }
 
-  await call(dc, 'DELETE', `/floating_ips/${id}`);
+  await retryProviderLocked(
+    () => call(dc, 'DELETE', `/floating_ips/${id}`),
+    { attempts: 8, baseDelayMs: 1500, maxDelayMs: 6000 }
+  );
   return original;
 }
 
