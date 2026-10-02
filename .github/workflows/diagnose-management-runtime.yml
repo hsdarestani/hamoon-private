@@ -80,6 +80,11 @@ jobs:
           echo '=== NEW CALLBACK TRACE ONLY ==='
           pm2 logs hamoonbot --nostream --lines 3000 2>&1 | grep -E "CALLBACK_QUERY_IN|MANAGE_CALLBACK_RECEIVED|MANAGE_PLAIN_TEXT_SEND|CALLBACK_ACK_FAILED|STALE_CALLBACK" | tail -300 || true
 
+          echo '=== PRODUCTION HEAD ==='
+          git rev-parse HEAD
+          echo '=== RECENT HETZNER 429 COUNT ==='
+          RECENT_LOGS="$(pm2 logs hamoonbot --nostream --lines 800 2>&1)"
+          printf '%s\n' "$RECENT_LOGS" | grep -c "status: 429" || true
           echo '=== ADDITIONAL IP TRACE ==='
           LOGS="$(pm2 logs hamoonbot --nostream --lines 8000 2>&1)"
           printf '%s\n' "$LOGS" | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED|HETZNER_RATE|FLOATING_IP" | tail -500 || true
