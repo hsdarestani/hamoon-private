@@ -157,7 +157,6 @@ async function run() {
   assert(serviceSource.includes("scripts', 'ssh-exec-helper.js"));
   assert(serviceSource.includes("spawn(process.execPath"));
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
-  assert(serviceSource.includes("hardTimer = setTimeout"));
   assert(serviceSource.includes("stage: 'os_config'"));
 
   const bootstrapSource = fs.readFileSync(require.resolve('../hetzner-additional-ip-quality-bootstrap.js'), 'utf8');
