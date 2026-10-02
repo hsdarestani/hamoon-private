@@ -140,5 +140,7 @@ jobs:
           printf '%s\n' "$LOGS" | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED|HETZNER_RATE|FLOATING_IP" | tail -500 || true
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
+          echo '=== RECENT ADDITIONAL IP FULL CONTEXT ==='
+          printf '%s\n' "$LOGS" | grep -A 18 -B 6 -E "\[HETZNER_ADDITIONAL_IP_(SSH_ROUTE|CREATED|BIND|QUALITY|CLEAN|CREATE|STALE)|\[SERVER_PASSWORD_SECRET_REFRESHED\]" | tail -1200 || true
 
           REMOTE
