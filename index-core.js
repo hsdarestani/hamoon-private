@@ -1389,7 +1389,7 @@ async function blockUndeliveredHetznerAction(chatId, serverId, dcConfig) {
 
 async function handleGetStoredPassword(chatId, userId, serverId, dcConfig, messageId) {
   if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
-  if (!isAfraDc(dcConfig)) return handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId);
+  if (!isAfraDc(dcConfig)) return handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId);
   try {
     let password = await getServerSecret(serverId, 'root_password');
     if (!password) {
@@ -1469,7 +1469,7 @@ async function handleResetPasswordAsk(chatId, userId, serverId, dcConfig) {
     reply_markup: { inline_keyboard: keyboard }
   });
 }
-async function handleResetPasswordConfirm(chatId, serverId, dcConfig, messageId) {
+async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId) {
   if (!requireCapabilityOrReply(chatId, dcConfig, 'resetPassword')) return;
   if (await blockUndeliveredHetznerAction(chatId, serverId, dcConfig)) return;
   try {
@@ -1501,7 +1501,25 @@ if (isAfra) {
       actualPass = newPass;
     }
 
-    const passText = actualPass ? htmlCodeBlock(actualPass) : '<code>(no password returned)</code>';
+    if (!actualPass) {
+      const resetError = new Error('RESET_PASSWORD_EMPTY');
+      resetError.code = 'RESET_PASSWORD_EMPTY';
+      throw resetError;
+    }
+    await upsertServerSecret({
+      telegramId: userId,
+      serverId,
+      datacenter: dcConfig.key || dcConfig.__baseKey || (isHetzner ? 'hetzner' : 'unknown'),
+      secretType: 'root_password',
+      secretValue: actualPass
+    });
+    console.log('[SERVER_PASSWORD_SECRET_REFRESHED]', {
+      user_id: String(userId || ''),
+      server_id: String(serverId),
+      datacenter: String(dcConfig.key || dcConfig.__baseKey || '')
+    });
+
+    const passText = htmlCodeBlock(actualPass);
     await bot.editMessageText(
       `✅ پسورد سرور ${htmlEscape(serverId)} ریست شد.\n<b>رمز جدید:</b>\n${passText}`,
       {
@@ -1970,7 +1988,7 @@ case 'RESETPW': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
   if (!dc) return sendMessage(effectiveChatId, '❌ دیتاسنتر نامعتبر.');
   if (!requireCapabilityOrReply(effectiveChatId, dc, 'resetPassword')) return;
-  return isAfraDc(dc) ? handleGetStoredPassword(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id) : handleResetPasswordConfirm(effectiveChatId, payload.serverId, dc, q.message.message_id);
+  return isAfraDc(dc) ? handleGetStoredPassword(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id) : handleResetPasswordConfirm(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id);
 }
 case 'SNAPSHOT_ASK': {
   const dc = getUserEffectiveDCs(effectiveUserId)[payload.dcKey];
@@ -2186,7 +2204,7 @@ case 'RESETPW': {
       const serverIdToReset = params[1];
       const resetPwDcConfig = getUserEffectiveDCs(effectiveUserId)[resetPwDcKey];
       if (!requireCapabilityOrReply(effectiveChatId, resetPwDcConfig, 'resetPassword')) return;
-      handleResetPasswordConfirm(effectiveChatId, serverIdToReset, resetPwDcConfig, q.message.message_id);
+      handleResetPasswordConfirm(effectiveChatId, effectiveUserId, serverIdToReset, resetPwDcConfig, q.message.message_id);
       break;
     }
     case 'CHANGECYCLE': {
