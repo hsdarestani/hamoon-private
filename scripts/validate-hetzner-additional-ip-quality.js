@@ -122,6 +122,12 @@ async function run() {
   );
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
+  assert(core.includes('async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId)'));
+  assert(core.includes("await upsertServerSecret({"));
+  assert(core.includes("secretType: 'root_password'"));
+  assert(core.includes("secretValue: actualPass"));
+  assert(core.includes("handleResetPasswordConfirm(effectiveChatId, effectiveUserId, payload.serverId, dc, q.message.message_id)"));
+  assert(core.includes("handleResetPasswordConfirm(effectiveChatId, effectiveUserId, serverIdToReset, resetPwDcConfig, q.message.message_id)"));
   const patched = bootstrap.applyHetznerAdditionalIpQualityPatches(core);
   assert(patched.includes('additionalIpQuality.createVerifiedAdditionalIpv4'));
   assert(patched.includes('NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE'));
