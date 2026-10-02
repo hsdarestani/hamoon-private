@@ -201,6 +201,60 @@ async function createVerifiedAdditionalIpv4(opts) {
     });
   }
 
+  // Do not create a new Floating IP until we know there is a usable SSH path
+  // into the server. If the primary IPv4 is filtered, an already configured
+  // Floating IPv4 on the same server is a valid management fallback.
+  const existingAdditional = await additionalIps.listAdditionalIps({
+    dc,
+    serverId,
+    request: providerRequest
+  }).catch(() => []);
+  const sshHosts = [...new Set([
+    host,
+    ...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)
+  ])];
+  let sshHost = null;
+  let lastSshError = null;
+
+  for (const candidateHost of sshHosts) {
+    const probeTimeoutMs = Math.max(3000, Math.min(7000, remaining()));
+    if (probeTimeoutMs <= 0) throw deadlineError();
+    try {
+      await withTimeout(
+        execSsh({
+          host: candidateHost,
+          password,
+          command: command('true\n'),
+          timeoutMs: probeTimeoutMs
+        }),
+        probeTimeoutMs + 750,
+        () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+      );
+      sshHost = candidateHost;
+      console.log('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]', {
+        server_id: String(serverId),
+        fallback: candidateHost !== host,
+        candidate_count: sshHosts.length
+      });
+      break;
+    } catch (error) {
+      lastSshError = error;
+      console.warn('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]', {
+        server_id: String(serverId),
+        fallback: candidateHost !== host,
+        code: error?.code || null
+      });
+    }
+  }
+
+  if (!sshHost) {
+    const cause = lastSshError || Object.assign(new Error('SSH_CONNECTION_FAILED'), { code: 'SSH_CONNECTION_FAILED' });
+    throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
+      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
+      cause
+    });
+  }
+
   const attempts = clamp(maxAttempts ?? process.env.HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS, 8, 1, 12);
   const blocked = await changeIp.recentBadRanges(db, { location }).catch(() => new Set());
   let last = null;
@@ -269,7 +323,7 @@ async function createVerifiedAdditionalIpv4(opts) {
       const bindTimeoutMs = Math.max(5000, Math.min(20000, remaining()));
       await withTimeout(
         execSsh({
-          host,
+          host: sshHost,
           password,
           command: command(bindScript(ip)),
           timeoutMs: bindTimeoutMs
@@ -322,7 +376,7 @@ async function createVerifiedAdditionalIpv4(opts) {
       });
 
       await withTimeout(
-        execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 10000 }),
+        execSsh({ host: sshHost, password, command: command(unbindScript(ip)), timeoutMs: 10000 }),
         11000,
         () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
       ).catch(() => {});
@@ -333,7 +387,7 @@ async function createVerifiedAdditionalIpv4(opts) {
         if (bound && created?.ip?.ip) {
           await withTimeout(
             execSsh({
-              host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 10000
+              host: sshHost, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 10000
             }),
             11000,
             () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })

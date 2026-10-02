@@ -150,6 +150,9 @@ async function run() {
   assert(serviceSource.includes("createdServerId !== String(serverId)"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_START]"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_SUCCESS]"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]"));
+  assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("hardTimer = setTimeout"));
   assert(serviceSource.includes("stage: 'os_config'"));
 
@@ -161,6 +164,9 @@ async function run() {
   assert(core.includes("const hetznerAdditionalIpCreateLocks = new Map();"));
   assert(core.includes("HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS"));
   assert(core.includes("[HETZNER_ADDITIONAL_IP_STALE_LOCK_RELEASED]"));
+  assert(core.includes("const recentCallbackQueries = new Map();"));
+  assert(core.includes("[CALLBACK_DUPLICATE_IGNORED]"));
+  assert(core.includes("CALLBACK_QUERY_DEDUPE_MS"));
   assert(core.includes('async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId)'));
   assert(core.includes("await upsertServerSecret({"));
   assert(core.includes("secretType: 'root_password'"));

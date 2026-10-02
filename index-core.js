@@ -368,6 +368,11 @@ const adminState = { impersonating: null };
 let orderCounter = 10000;
 const hetznerUpgradeLocks = new Map();
 const hetznerAdditionalIpCreateLocks = new Map();
+const recentCallbackQueries = new Map();
+const CALLBACK_QUERY_DEDUPE_MS = Math.max(
+  750,
+  Number(process.env.CALLBACK_QUERY_DEDUPE_MS || 2500)
+);
 const HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS = Math.max(
   180000,
   Number(process.env.HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS || 4 * 60 * 1000)
@@ -1732,10 +1737,11 @@ async function handleBuildSnapshotConfirm(chatId, userId, dcConfig, snapshotId, 
 
 // --- Main Callback Query Handler ---
 bot.on('callback_query', async q => {
-  console.log('[CALLBACK_QUERY_IN]', {
-    user_id: String(q.from?.id || ''),
-    callback: String(q.data || '')
-  });
+  const callbackUserId = String(q.from?.id || '');
+  const callbackData = String(q.data || '');
+  const callbackKey = `${callbackUserId}:${callbackData}`;
+  const now = Date.now();
+  const previousAt = Number(recentCallbackQueries.get(callbackKey) || 0);
 
   bot.answerCallbackQuery(q.id).catch(error => {
     console.warn('[CALLBACK_ACK_FAILED]', {
@@ -1743,6 +1749,27 @@ bot.on('callback_query', async q => {
       callback: String(q.data || ''),
       message: error?.message || String(error)
     });
+  });
+
+  if (previousAt && now - previousAt < CALLBACK_QUERY_DEDUPE_MS) {
+    console.warn('[CALLBACK_DUPLICATE_IGNORED]', {
+      user_id: callbackUserId,
+      callback: callbackData,
+      age_ms: now - previousAt
+    });
+    return;
+  }
+  recentCallbackQueries.set(callbackKey, now);
+  if (recentCallbackQueries.size > 2000) {
+    const cutoff = now - Math.max(30000, CALLBACK_QUERY_DEDUPE_MS * 4);
+    for (const [key, at] of recentCallbackQueries) {
+      if (Number(at) < cutoff) recentCallbackQueries.delete(key);
+    }
+  }
+
+  console.log('[CALLBACK_QUERY_IN]', {
+    user_id: callbackUserId,
+    callback: callbackData
   });
 
   const adminId = String(q.from.id);
