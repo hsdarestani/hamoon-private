@@ -509,14 +509,46 @@ async function changeHetznerServerType(config, serverId, serverType, upgradeDisk
 async function waitHetznerAction(config, actionId, timeoutMs = 300000) {
   if (!actionId) return null;
   const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const data = await hetznerRequest(config, 'GET', `/actions/${actionId}`);
+  const deadlineAt = started + Math.max(1000, Number(timeoutMs) || 300000);
+
+  while (Date.now() < deadlineAt) {
+    let data;
+    try {
+      data = await hetznerRequest(
+        config,
+        'GET',
+        `/actions/${actionId}`,
+        undefined,
+        {
+          deadlineAt,
+          timeoutMs: Math.max(500, Math.min(10000, deadlineAt - Date.now()))
+        }
+      );
+    } catch (error) {
+      if (error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') break;
+      throw error;
+    }
+
     const action = data.action;
     if (action?.status === 'success') return action;
-    if (action?.status === 'error') throw new Error(`Hetzner action ${actionId} failed: ${action.error?.message || 'unknown error'}`);
-    await new Promise(r => setTimeout(r, 5000));
+    if (action?.status === 'error') {
+      throw new Error(`Hetzner action ${actionId} failed: ${action.error?.message || 'unknown error'}`);
+    }
+
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) break;
+    try {
+      await waitWithDeadline(sleep(Math.min(1500, remaining)), deadlineAt);
+    } catch (error) {
+      if (error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') break;
+      throw error;
+    }
   }
-  throw new Error(`Hetzner action ${actionId} timed out`);
+
+  const error = new Error(`Hetzner action ${actionId} timed out`);
+  error.code = 'HETZNER_ACTION_TIMEOUT';
+  error.actionId = String(actionId);
+  throw error;
 }
 
 function client(tokenOrCfg) {

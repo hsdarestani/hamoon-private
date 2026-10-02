@@ -152,7 +152,7 @@ async function createVerifiedAdditionalIpv4(opts) {
         await cloud.waitHetznerAction(
           dc,
           actionId,
-          Math.max(3000, Math.min(20000, remainingCleanup))
+          Math.max(3000, Math.min(12000, remainingCleanup))
         );
       }
     });
@@ -201,9 +201,34 @@ async function createVerifiedAdditionalIpv4(opts) {
         request: providerRequest
       });
       const actionId = created?.action?.id ?? created?.action?.action?.id;
-      if (actionId) {
+      const createdServerId = String(created?.ip?.server_id || '');
+      console.log('[HETZNER_ADDITIONAL_IP_CREATED]', {
+        user_id: String(telegramId || ''),
+        server_id: String(serverId),
+        floating_ip_id: String(created?.ip?.id || ''),
+        provider_server_id: createdServerId || null,
+        action_id: actionId == null ? null : String(actionId),
+        attempt
+      });
+
+      // Hetzner often returns the Floating IP already assigned to the requested
+      // server even while an action object is present. Waiting on that action
+      // used to strand the Telegram flow despite the IP already existing.
+      // Only wait when the response does not yet show the expected assignment.
+      if (actionId && createdServerId !== String(serverId)) {
         if (remaining() <= 0) throw deadlineError();
-        await cloud.waitHetznerAction(dc, actionId, Math.max(5000, Math.min(45000, remaining())));
+        try {
+          await cloud.waitHetznerAction(
+            dc,
+            actionId,
+            Math.max(5000, Math.min(30000, remaining()))
+          );
+        } catch (error) {
+          if (error?.code === 'HETZNER_ACTION_TIMEOUT' || error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') {
+            throw deadlineError();
+          }
+          throw error;
+        }
       }
 
       const ip = ipv4(created?.ip?.ip);

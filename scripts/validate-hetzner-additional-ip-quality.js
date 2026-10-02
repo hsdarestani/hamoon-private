@@ -140,6 +140,11 @@ async function run() {
   assert(apiSource.includes("blockedUntil"));
   assert(apiSource.includes("HETZNER_API_DEADLINE_EXCEEDED"));
   assert(apiSource.includes("waitWithDeadline(sleep(delayMs), deadlineAt)"));
+  assert(apiSource.includes("error.code = 'HETZNER_ACTION_TIMEOUT'"));
+  assert(apiSource.includes("timeoutMs: Math.max(500, Math.min(10000, deadlineAt - Date.now()))"));
+
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_CREATED]"));
+  assert(serviceSource.includes("createdServerId !== String(serverId)"));
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
   assert(core.includes("const hetznerAdditionalIpCreateLocks = new Map();"));
