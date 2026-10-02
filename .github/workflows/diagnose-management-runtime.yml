@@ -172,6 +172,11 @@ jobs:
               console.log(JSON.stringify({server_status:data?.server?.status||null,password_present:!!password,route_count:(primary?1:0)+ips.length}));
               if(primary&&password) console.log('PRIMARY_CHILD='+JSON.stringify(run(primary,password)));
               for(let i=0;i<ips.length;i++) console.log('ADDITIONAL_CHILD_'+(i+1)+'='+JSON.stringify(run(ips[i].ip,password)));
+              const fwData=await api.hetznerRequest(dc,'GET','/firewalls?per_page=50').catch(()=>({firewalls:[]}));
+              const attached=(fwData.firewalls||[]).filter(fw=>(fw.applied_to||[]).some(item =>
+                String(item?.type||'')==='server' && String(item?.server?.id||'')===serverId
+              ));
+              console.log('EXPLICIT_FIREWALL_COUNT='+attached.length);
             } finally {
               await db.pool.end().catch(()=>{});
             }
