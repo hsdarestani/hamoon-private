@@ -166,7 +166,7 @@ async function createVerifiedAdditionalIpv4(opts) {
   };
   const cleanupCandidateBestEffort = async created => {
     try {
-      return await cleanupCandidateBestEffort(created);
+      return await cleanupCandidate(created);
     } catch (cleanupError) {
       console.warn('[HETZNER_ADDITIONAL_IP_CLEANUP_DEFERRED]', {
         server_id: String(serverId),
