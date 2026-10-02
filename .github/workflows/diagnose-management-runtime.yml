@@ -204,36 +204,33 @@ jobs:
             await waitRescue(rescuePassword);
             console.log('RESCUE_SSH_READY=1');
 
-            const cmd=String.raw`
-set -e
-mkdir -p /mnt/hamoon-target
-umount /mnt/hamoon-target >/dev/null 2>&1 || true
-ROOT=""
-for dev in $(lsblk -pnro NAME,FSTYPE,TYPE | awk '$2 ~ /^(ext4|xfs|btrfs)$/ && $3 ~ /^(part|disk|lvm)$/ {print $1}'); do
-  if mount -o ro "$dev" /mnt/hamoon-target >/dev/null 2>&1; then
-    if [ -f /mnt/hamoon-target/etc/os-release ] && grep -qi ubuntu /mnt/hamoon-target/etc/os-release; then
-      ROOT="$dev"
-      break
-    fi
-    umount /mnt/hamoon-target >/dev/null 2>&1 || true
-  fi
-done
-echo ROOT_FOUND=${ROOT:+yes}
-[ -n "$ROOT" ] || exit 20
-echo '--- OS ---'
-grep -E '^(NAME|VERSION|ID)=' /mnt/hamoon-target/etc/os-release || true
-echo '--- SSH CONFIG ---'
-grep -RhsE '^[[:space:]]*(Port|ListenAddress|PermitRootLogin|PasswordAuthentication)[[:space:]]+' /mnt/hamoon-target/etc/ssh/sshd_config /mnt/hamoon-target/etc/ssh/sshd_config.d 2>/dev/null || true
-echo '--- SSH SERVICE LINKS ---'
-ls -l /mnt/hamoon-target/etc/systemd/system/*/ssh.service /mnt/hamoon-target/etc/systemd/system/*/sshd.service 2>/dev/null || true
-echo '--- UFW ---'
-grep -E '^ENABLED=' /mnt/hamoon-target/etc/ufw/ufw.conf 2>/dev/null || true
-grep -RhsE '22(/tcp)?|dport 22|--dport 22' /mnt/hamoon-target/etc/ufw /mnt/hamoon-target/etc/iptables /mnt/hamoon-target/etc/nftables.conf 2>/dev/null | head -80 || true
-echo '--- FAIL2BAN ---'
-grep -RhsE '^[[:space:]]*(enabled|port|bantime|maxretry)[[:space:]]*=' /mnt/hamoon-target/etc/fail2ban/jail.local /mnt/hamoon-target/etc/fail2ban/jail.d 2>/dev/null | head -80 || true
-umount /mnt/hamoon-target >/dev/null 2>&1 || true
-`;
-            const inspected=await sshRun(expectedIp,rescuePassword,'bash -lc '+JSON.stringify(cmd),30000);
+            const lines=[
+              'set -e',
+              'mkdir -p /mnt/hamoon-target',
+              'umount /mnt/hamoon-target >/dev/null 2>&1 || true',
+              'ROOT=""',
+              'for dev in $(lsblk -pnro NAME,FSTYPE,TYPE | awk \'$2 ~ /^(ext4|xfs|btrfs)$/ && $3 ~ /^(part|disk|lvm)$/ {print $1}\'); do',
+              '  if mount -o ro "$dev" /mnt/hamoon-target >/dev/null 2>&1; then',
+              '    if [ -f /mnt/hamoon-target/etc/os-release ] && grep -qi ubuntu /mnt/hamoon-target/etc/os-release; then ROOT="$dev"; break; fi',
+              '    umount /mnt/hamoon-target >/dev/null 2>&1 || true',
+              '  fi',
+              'done',
+              'echo ROOT_FOUND=$([ -n "$ROOT" ] && echo yes || echo no)',
+              '[ -n "$ROOT" ] || exit 20',
+              'echo "--- OS ---"',
+              'grep -E \'^(NAME|VERSION|ID)=\' /mnt/hamoon-target/etc/os-release || true',
+              'echo "--- SSH CONFIG ---"',
+              'grep -RhsE \'^[[:space:]]*(Port|ListenAddress|PermitRootLogin|PasswordAuthentication)[[:space:]]+\' /mnt/hamoon-target/etc/ssh/sshd_config /mnt/hamoon-target/etc/ssh/sshd_config.d 2>/dev/null || true',
+              'echo "--- SSH SERVICE LINKS ---"',
+              'ls -l /mnt/hamoon-target/etc/systemd/system/*/ssh.service /mnt/hamoon-target/etc/systemd/system/*/sshd.service 2>/dev/null || true',
+              'echo "--- UFW ---"',
+              'grep -E \'^ENABLED=\' /mnt/hamoon-target/etc/ufw/ufw.conf 2>/dev/null || true',
+              'grep -RhsE \'22(/tcp)?|dport 22|--dport 22\' /mnt/hamoon-target/etc/ufw /mnt/hamoon-target/etc/iptables /mnt/hamoon-target/etc/nftables.conf 2>/dev/null | head -80 || true',
+              'echo "--- FAIL2BAN ---"',
+              'grep -RhsE \'^[[:space:]]*(enabled|port|bantime|maxretry)[[:space:]]*=\' /mnt/hamoon-target/etc/fail2ban/jail.local /mnt/hamoon-target/etc/fail2ban/jail.d 2>/dev/null | head -80 || true',
+              'umount /mnt/hamoon-target >/dev/null 2>&1 || true'
+            ];
+            const inspected=await sshRun(expectedIp,rescuePassword,'bash -lc '+JSON.stringify(lines.join('\n')),30000);
             console.log(inspected.out);
 
             await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/disable_rescue',{}).catch(()=>{});
