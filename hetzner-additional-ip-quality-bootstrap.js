@@ -35,6 +35,11 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       '      telegramId: userId,',
       '      description: `HamoonCloud user ${userId} server ${serverId}`,',
       '      onProgress: async progress => {',
+      "        if (progress?.stage === 'attempt_start') {",
+      '          const label = Number(progress.attempt || 1);',
+      '          const total = Number(progress.attempts || 1);',
+      "          await sendMessage(chatId, `🔄 در حال آماده‌سازی IP کاندید ${label} از ${total}...`);",
+      '        }',
       "        if (progress?.stage === 'quality_check') {",
       '          const label = Number(progress.attempt || 1);',
       '          const total = Number(progress.attempts || 1);',
@@ -92,6 +97,8 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       '    }',
       "    if (error.code === 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE') {",
       "      const cause = error?.cause?.code || '';",
+      "      if (cause === 'ROOT_PASSWORD_MISSING') return sendMessage(chatId, '❌ رمز روت ذخیره‌شده برای این سرور پیدا نشد. از مدیریت سرور یک بار ریست پسورد را بزنید و سپس افزودن IP را دوباره امتحان کنید. هزینه‌ای کسر نشد.');",
+      "      if (cause === 'SERVER_METADATA_MISSING') return sendMessage(chatId, '❌ اطلاعات شبکه سرور از Hetzner کامل دریافت نشد. عملیات متوقف شد و هزینه‌ای کسر نشد.');",
       "      if (cause === 'SSH_AUTH_FAILED') return sendMessage(chatId, '❌ اتصال SSH با رمز ذخیره‌شده تأیید نشد. یک بار از مدیریت سرور ریست پسورد را انجام دهید و سپس دوباره افزودن IP را بزنید. هزینه‌ای کسر نشد.');",
       "      if (cause === 'SSH_TIMEOUT' || cause === 'SSH_CONNECTION_FAILED') return sendMessage(chatId, '❌ اتصال SSH به سرور برقرار نشد. روشن بودن سرور و دسترسی پورت ۲۲ را بررسی کنید. هزینه‌ای کسر نشد.');",
       "      return sendMessage(chatId, '❌ تست خودکار IP روی سرور کامل نشد؛ برای جلوگیری از تحویل IP تأییدنشده عملیات متوقف شد و هزینه‌ای کسر نشد.');",
@@ -99,6 +106,13 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       "    return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
     ].join('\n'),
     'errors'
+  );
+
+  source = once(
+    source,
+    "    console.error('[HETZNER_ADDITIONAL_IP_CREATE]', error.code || error.message);",
+    "    console.error('[HETZNER_ADDITIONAL_IP_CREATE]', { code: error?.code || null, cause: error?.cause?.code || null, message: error?.message || String(error) });",
+    'error logging'
   );
 
   return source;
