@@ -13,6 +13,15 @@ const clamp = (v, d, min, max) => {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : d;
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function withTimeout(promise, timeoutMs, errorFactory) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(errorFactory()), Math.max(1, timeoutMs));
+    Promise.resolve(promise).then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
 const ipv4 = value => net.isIP(String(value || '').trim()) === 4 ? String(value).trim() : null;
 
 function primaryIp(server) {
@@ -168,10 +177,11 @@ async function createVerifiedAdditionalIpv4(opts) {
       bound = true;
       await progress({ stage: 'quality_check', attempt, attempts, ip, remaining_ms: remaining() });
       if (remaining() <= 0) throw deadlineError();
-      last = await Promise.race([
+      last = await withTimeout(
         quality(ip, checkQuality),
-        sleep(remaining()).then(() => { throw deadlineError(); })
-      ]);
+        remaining(),
+        deadlineError
+      );
 
       if (last?.ok) {
         console.log('[HETZNER_ADDITIONAL_IP_CLEAN_SUCCESS]', {
