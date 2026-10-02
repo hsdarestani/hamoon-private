@@ -141,31 +141,4 @@ jobs:
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
-          echo '=== TARGET ADDITIONAL-IP SSH HELPER CHECK ==='
-          timeout 35 node - <<'NODE'
-          require('dotenv').config();
-          const {spawnSync}=require('child_process');
-          const path=require('path');
-          const db=require('./db');
-          const targetId='144775241';
-          const targetIp='91.107.154.177';
-          (async()=>{
-            try{
-              const password=await db.getServerSecret(targetId,'root_password');
-              if(!password){ console.log('HELPER_RESULT=no_stored_password'); return; }
-              const p=spawnSync(process.execPath,[path.join(__dirname,'scripts','ssh-exec-helper.js')],{
-                input:JSON.stringify({host:targetIp,password,command:'true',timeoutMs:12000}),
-                encoding:'utf8',
-                timeout:16000,
-                maxBuffer:8192
-              });
-              let result={};
-              try{result=JSON.parse(String(p.stdout||'').trim().split(/\r?\n/).filter(Boolean).pop()||'{}');}catch(_){}
-              console.log('HELPER_RESULT='+JSON.stringify({status:p.status,ok:!!result.ok,code:result.code||null,timed_out:!!p.error&&p.error.code==='ETIMEDOUT'}));
-            } finally {
-              await db.pool.end().catch(()=>{});
-            }
-          })().catch(e=>{console.log('HELPER_RESULT=error:'+(e?.code||e?.message||e));process.exitCode=1;});
-          NODE
-
           REMOTE
