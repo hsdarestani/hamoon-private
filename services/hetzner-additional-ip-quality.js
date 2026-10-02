@@ -98,8 +98,25 @@ async function createVerifiedAdditionalIpv4(opts) {
   const {
     dc, serverId, telegramId, description, maxIps, request,
     db = require('../db'), getSecret, execSsh = sshExec,
-    checkQuality, maxAttempts
+    checkQuality, maxAttempts, maxDurationMs, onProgress
   } = opts;
+  const startedAt = Date.now();
+  const durationMs = clamp(
+    maxDurationMs ?? process.env.HETZNER_ADDITIONAL_IP_MAX_DURATION_MS,
+    150000,
+    30000,
+    300000
+  );
+  const deadline = startedAt + durationMs;
+  const progress = async payload => {
+    if (typeof onProgress !== 'function') return;
+    try { await onProgress(payload); } catch (_) {}
+  };
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const deadlineError = () => Object.assign(new Error('ADDITIONAL_IP_SEARCH_TIMEOUT'), {
+    code: 'ADDITIONAL_IP_SEARCH_TIMEOUT',
+    elapsed_ms: Date.now() - startedAt
+  });
   const server = await serverFor(dc, serverId, request);
   const host = primaryIp(server);
   const location = locationOf(server, dc);
@@ -120,12 +137,18 @@ async function createVerifiedAdditionalIpv4(opts) {
   let last = null;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (remaining() <= 0) throw deadlineError();
+    await progress({ stage: 'attempt_start', attempt, attempts, remaining_ms: remaining() });
+
     let created = null;
     let bound = false;
     try {
       created = await additionalIps.addAdditionalIpv4({ dc, serverId, description, maxIps, request });
       const actionId = created?.action?.id ?? created?.action?.action?.id;
-      if (actionId) await cloud.waitHetznerAction(dc, actionId, 120000);
+      if (actionId) {
+        if (remaining() <= 0) throw deadlineError();
+        await cloud.waitHetznerAction(dc, actionId, Math.max(5000, Math.min(45000, remaining())));
+      }
 
       const ip = ipv4(created?.ip?.ip);
       if (!ip) throw Object.assign(new Error('FLOATING_IP_CREATE_FAILED'), { code: 'FLOATING_IP_CREATE_FAILED' });
@@ -135,8 +158,16 @@ async function createVerifiedAdditionalIpv4(opts) {
         continue;
       }
 
-      await execSsh({ host, password, command: command(bindScript(ip)), timeoutMs: 30000 });
+      if (remaining() <= 0) throw deadlineError();
+      await execSsh({
+        host,
+        password,
+        command: command(bindScript(ip)),
+        timeoutMs: Math.max(5000, Math.min(20000, remaining()))
+      });
       bound = true;
+      await progress({ stage: 'quality_check', attempt, attempts, ip, remaining_ms: remaining() });
+      if (remaining() <= 0) throw deadlineError();
       last = await quality(ip, checkQuality);
 
       if (last?.ok) {
@@ -145,6 +176,7 @@ async function createVerifiedAdditionalIpv4(opts) {
           floating_ip_id: String(created.ip.id), attempt, ip, location,
           quality: lifecycle.qualitySummary(last)
         });
+        await progress({ stage: 'success', attempt, attempts, ip, remaining_ms: remaining() });
         return { ...created, verified: true, attempts: attempt, quality: last };
       }
 
@@ -158,21 +190,30 @@ async function createVerifiedAdditionalIpv4(opts) {
         server_id: String(serverId), attempt, ip, location,
         definitive: Boolean(last?.definitive), reason: last?.reason || 'unknown'
       });
+      await progress({
+        stage: 'candidate_rejected',
+        attempt,
+        attempts,
+        ip,
+        reason: last?.reason || 'unknown',
+        remaining_ms: remaining()
+      });
 
-      await execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 30000 }).catch(() => {});
+      await execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 15000 }).catch(() => {});
       bound = false;
       await additionalIps.deleteAdditionalIp({ dc, serverId, floatingIpId: created.ip.id, request });
     } catch (error) {
       if (created?.ip?.id) {
         if (bound && created?.ip?.ip) {
           await execSsh({
-            host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 30000
+            host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 15000
           }).catch(() => {});
         }
         await additionalIps.deleteAdditionalIp({
           dc, serverId, floatingIpId: created.ip.id, request
         }).catch(() => {});
       }
+      if (error?.code === 'ADDITIONAL_IP_SEARCH_TIMEOUT') throw error;
       if (String(error?.code || '').startsWith('SSH_')) {
         throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
           code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
@@ -183,6 +224,7 @@ async function createVerifiedAdditionalIpv4(opts) {
     }
   }
 
+  if (remaining() <= 0) throw deadlineError();
   throw Object.assign(new Error('NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE'), {
     code: 'NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE',
     attempts,
