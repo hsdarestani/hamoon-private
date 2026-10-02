@@ -168,7 +168,10 @@ async function createVerifiedAdditionalIpv4(opts) {
       bound = true;
       await progress({ stage: 'quality_check', attempt, attempts, ip, remaining_ms: remaining() });
       if (remaining() <= 0) throw deadlineError();
-      last = await quality(ip, checkQuality);
+      last = await Promise.race([
+        quality(ip, checkQuality),
+        sleep(remaining()).then(() => { throw deadlineError(); })
+      ]);
 
       if (last?.ok) {
         console.log('[HETZNER_ADDITIONAL_IP_CLEAN_SUCCESS]', {
