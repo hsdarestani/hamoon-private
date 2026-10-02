@@ -141,44 +141,4 @@ jobs:
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
-          echo '=== TARGET SSH ROUTES ==='
-          timeout 30 node - <<'NODE'
-          require('dotenv').config();
-          const {Client}=require('ssh2');
-          const db=require('./db');
-          const dcs=require('./datacenters');
-          const api=require('./Hetzner/hetzner-api');
-          const extra=require('./services/hetzner-additional-ips');
-          const serverId='144775241';
-          function probe(host,password){
-            return new Promise(resolve=>{
-              const c=new Client();
-              let done=false;
-              const finish=(result)=>{ if(done)return; done=true; try{c.end();}catch(_){} resolve(result); };
-              const t=setTimeout(()=>finish('timeout'),6000);
-              c.on('ready',()=>{clearTimeout(t);finish('ready');});
-              c.on('error',e=>{
-                clearTimeout(t);
-                const m=String(e?.message||'').toLowerCase();
-                finish(m.includes('auth')?'auth_failed':m.includes('timeout')?'timeout':'connection_failed');
-              });
-              c.connect({host,username:'root',password,readyTimeout:5000,tryKeyboard:false});
-            });
-          }
-          (async()=>{
-            try{
-              const dc=Object.values(dcs).find(x => String(x?.provider||x?.apiType||'').toLowerCase()==='hetzner');
-              const data=await api.hetznerRequest(dc,'GET','/servers/'+serverId);
-              const server=data?.server;
-              const primary=server?.public_net?.ipv4?.ip||null;
-              const password=await db.getServerSecret(serverId,'root_password');
-              const ips=await extra.listAdditionalIps({dc,serverId});
-              console.log(JSON.stringify({server_status:server?.status||null,password_present:!!password,route_count:(primary?1:0)+ips.length}));
-              if(password && primary) console.log('PRIMARY_SSH='+await probe(primary,password));
-              for(let i=0;i<ips.length;i++) console.log('ADDITIONAL_SSH_'+(i+1)+'='+await probe(ips[i].ip,password));
-            } finally {
-              await db.pool.end().catch(()=>{});
-            }
-          })().catch(e=>{console.log('TARGET_SSH_ERROR='+(e?.code||e?.message||e));process.exitCode=1;});
-          NODE
           REMOTE
