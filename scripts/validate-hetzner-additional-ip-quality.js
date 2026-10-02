@@ -154,7 +154,8 @@ async function run() {
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_RETRY]"));
   assert(serviceSource.includes("const maxProbeRounds = 2;"));
-  assert(serviceSource.includes("try { conn.destroy(); } catch (_) {}"));
+  assert(serviceSource.includes("scripts', 'ssh-exec-helper.js"));
+  assert(serviceSource.includes("spawn(process.execPath"));
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("hardTimer = setTimeout"));
   assert(serviceSource.includes("stage: 'os_config'"));
@@ -170,6 +171,8 @@ async function run() {
   assert(core.includes("const recentCallbackQueries = new Map();"));
   assert(core.includes("[CALLBACK_DUPLICATE_IGNORED]"));
   assert(core.includes("CALLBACK_QUERY_DEDUPE_MS"));
+  assert(core.includes("callbackData.startsWith('MS:')"));
+  assert(core.includes("Math.max(CALLBACK_QUERY_DEDUPE_MS, 30000)"));
   assert(core.includes('async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId)'));
   assert(core.includes("await upsertServerSecret({"));
   assert(core.includes("secretType: 'root_password'"));

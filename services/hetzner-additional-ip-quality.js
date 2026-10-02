@@ -1,7 +1,8 @@
 'use strict';
 
 const net = require('net');
-const { Client } = require('ssh2');
+const { spawn } = require('child_process');
+const path = require('path');
 const cloud = require('../cloud-api');
 const hetznerApi = require('../Hetzner/hetzner-api');
 const lifecycle = require('./hetzner-lifecycle');
@@ -50,41 +51,71 @@ IFACE="$(ip -4 route show default | awk 'NR==1 {print $5}')"
 
 function sshExec({ host, password, command: cmd, timeoutMs = 30000 }) {
   return new Promise((resolve, reject) => {
-    const conn = new Client();
-    let done = false;
-    let hardTimer = null;
-    const finish = error => {
-      if (done) return;
-      done = true;
-      if (hardTimer) clearTimeout(hardTimer);
-      try { conn.end(); } catch (_) {}
-      try { conn.destroy(); } catch (_) {}
-      error ? reject(error) : resolve(true);
+    const effectiveTimeout = Math.max(1500, Number(timeoutMs) || 30000);
+    const helper = path.join(__dirname, '..', 'scripts', 'ssh-exec-helper.js');
+    const child = spawn(process.execPath, [helper], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HAMOON_SSH_HELPER: '1' }
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.stdin.end(); } catch (_) {}
+      if (error) reject(error);
+      else resolve(value);
     };
 
-    hardTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (_) {}
       finish(Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' }));
-    }, Math.max(1000, Number(timeoutMs) || 30000));
+    }, effectiveTimeout + 2000);
 
-    conn.on('ready', () => conn.exec(cmd, (error, stream) => {
-      if (error) return finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' }));
-      stream.on('error', () => finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' })));
-      stream.on('close', code => finish(Number(code) === 0 ? null :
-        Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' })));
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk);
+      if (stdout.length > 8192) stdout = stdout.slice(-8192);
+    });
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk);
+      if (stderr.length > 8192) stderr = stderr.slice(-8192);
+    });
+    child.on('error', error => {
+      finish(Object.assign(new Error('SSH_HELPER_FAILED'), {
+        code: 'SSH_HELPER_FAILED',
+        cause: error
+      }));
+    });
+    child.on('close', code => {
+      let result = null;
+      try {
+        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+        result = JSON.parse(lines[lines.length - 1] || '{}');
+      } catch (_) {}
+
+      if (Number(code) === 0 && result?.ok) return finish(null, true);
+      const errorCode = String(result?.code || '').startsWith('SSH_')
+        ? String(result.code)
+        : (Number(code) === 124 ? 'SSH_TIMEOUT' : 'SSH_CONNECTION_FAILED');
+      const error = Object.assign(new Error(errorCode), {
+        code: errorCode,
+        helper_exit: Number(code),
+        helper_message: String(result?.message || stderr || '').slice(0, 300)
+      });
+      finish(error);
+    });
+
+    child.stdin.end(JSON.stringify({
+      host: String(host || ''),
+      password: String(password || ''),
+      command: String(cmd || ''),
+      timeoutMs: effectiveTimeout
     }));
-    conn.on('error', error => {
-      const msg = String(error?.message || '').toLowerCase();
-      const code = msg.includes('auth') ? 'SSH_AUTH_FAILED' :
-        (msg.includes('timeout') ? 'SSH_TIMEOUT' : 'SSH_CONNECTION_FAILED');
-      finish(Object.assign(new Error(code), { code }));
-    });
-    conn.connect({
-      host,
-      username: 'root',
-      password,
-      readyTimeout: Math.max(1000, Math.min(Number(timeoutMs) || 30000, 15000)),
-      tryKeyboard: false
-    });
   });
 }
 

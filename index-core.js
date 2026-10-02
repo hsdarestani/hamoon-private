@@ -1751,11 +1751,15 @@ bot.on('callback_query', async q => {
     });
   });
 
-  if (previousAt && now - previousAt < CALLBACK_QUERY_DEDUPE_MS) {
+  const duplicateWindowMs = callbackData.startsWith('MS:')
+    ? Math.max(CALLBACK_QUERY_DEDUPE_MS, 30000)
+    : CALLBACK_QUERY_DEDUPE_MS;
+  if (previousAt && now - previousAt < duplicateWindowMs) {
     console.warn('[CALLBACK_DUPLICATE_IGNORED]', {
       user_id: callbackUserId,
       callback: callbackData,
-      age_ms: now - previousAt
+      age_ms: now - previousAt,
+      window_ms: duplicateWindowMs
     });
     return;
   }
