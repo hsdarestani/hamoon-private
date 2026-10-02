@@ -5,6 +5,7 @@ const net = require('net');
 const { Client } = require('ssh2');
 const db = require('../db');
 const datacenters = require('../datacenters');
+const cloud = require('../cloud-api');
 const hetzner = require('../Hetzner/hetzner-api');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -164,13 +165,55 @@ async function main() {
     current_port22: await tcpOpen(ip)
   });
 
-  if (await tcpOpen(ip)) {
-    console.log('[SSH_REPAIR] port 22 is already reachable; no mutation needed');
-    return;
-  }
-
+  const port22Open = await tcpOpen(ip);
   const originalRootPassword = await db.getServerSecret(serverId, 'root_password');
   if (!originalRootPassword) throw new Error('STORED_ROOT_PASSWORD_MISSING');
+
+  if (port22Open) {
+    try {
+      await sshExec({
+        host: ip,
+        password: originalRootPassword,
+        command: 'true',
+        timeoutMs: 30000
+      });
+      console.log('[SSH_REPAIR] port 22 and stored credentials are healthy; no mutation needed');
+      return;
+    } catch (error) {
+      const message = String(error?.message || error || '').toLowerCase();
+      const authFailure = message.includes('authentication') ||
+        message.includes('configured authentication methods failed') ||
+        message.includes('auth');
+      if (!authFailure) throw error;
+
+      console.warn('[SSH_REPAIR] stored root credential rejected; refreshing provider password');
+      const freshPassword = await cloud.resetServerPassword(dc, null, serverId);
+      if (!freshPassword) throw new Error('RESET_PASSWORD_RETURNED_EMPTY');
+
+      await db.upsertServerSecret({
+        telegramId: purchase.telegram_id,
+        serverId,
+        datacenter: purchase.datacenter,
+        secretType: 'root_password',
+        secretValue: freshPassword
+      });
+
+      await sleep(2500);
+      await sshExec({
+        host: ip,
+        password: freshPassword,
+        command: 'true',
+        timeoutMs: 30000
+      });
+
+      await db.adminAuditLog?.('server_ssh_password_refreshed', 'automation', { type: 'server', id: serverId }, {
+        result: 'ok', datacenter: purchase.datacenter, ip
+      }, null).catch(() => {});
+
+      console.log('[SSH_REPAIR] SUCCESS', { server_id: serverId, ip, port22: true, credential_refreshed: true });
+      return;
+    }
+  }
 
   let rescueEnabled = false;
   try {
