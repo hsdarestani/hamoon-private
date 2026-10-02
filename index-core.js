@@ -4415,7 +4415,8 @@ cron.schedule('*/30 * * * *', refreshHetznerProviderStatusSnapshot);
 setTimeout(refreshHetznerProviderStatusSnapshot, 10000);
 
 // Hetzner delivery reconciler: never deliver credentials before SSH + Iran/global reachability pass.
-cron.schedule('* * * * *', async () => {
+// Keep this background repair loop light so interactive Hetzner operations are not starved.
+cron.schedule('*/2 * * * *', async () => {
   try {
     const db = require('./db');
     const results = await hetznerLifecycle.reconcileProvisioning({
