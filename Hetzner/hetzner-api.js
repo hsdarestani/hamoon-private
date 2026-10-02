@@ -22,6 +22,37 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+function deadlineError(cause = null) {
+  const error = new Error('HETZNER_API_DEADLINE_EXCEEDED');
+  error.code = 'HETZNER_API_DEADLINE_EXCEEDED';
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function remainingToDeadline(deadlineAt) {
+  const value = Number(deadlineAt);
+  if (!Number.isFinite(value) || value <= 0) return Infinity;
+  return Math.max(0, value - Date.now());
+}
+
+async function waitWithDeadline(promise, deadlineAt) {
+  const remaining = remainingToDeadline(deadlineAt);
+  if (!Number.isFinite(remaining)) return promise;
+  if (remaining <= 0) throw deadlineError();
+
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(deadlineError()), remaining);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function headerValue(headers = {}, name) {
   const target = String(name || '').toLowerCase();
   for (const [key, value] of Object.entries(headers || {})) {
@@ -38,6 +69,7 @@ function tokenGate(token) {
       limit: null,
       resetAt: null,
       nextAt: 0,
+      blockedUntil: 0,
       tail: Promise.resolve()
     });
   }
@@ -53,12 +85,23 @@ function observeRateLimitHeaders(token, headers = {}, status = null) {
   const remaining = Number(remainingRaw);
   const limit = Number(limitRaw);
   const resetSeconds = Number(resetRaw);
+  const statusCode = Number(status || 0);
 
   if (Number.isFinite(remaining) && remaining >= 0) gate.remaining = remaining;
-  else if (Number(status || 0) === 429) gate.remaining = 0;
+  else if (statusCode === 429) gate.remaining = 0;
 
   if (Number.isFinite(limit) && limit > 0) gate.limit = limit;
   if (Number.isFinite(resetSeconds) && resetSeconds > 0) gate.resetAt = resetSeconds * 1000;
+
+  if (statusCode === 429) {
+    const retryMs = Math.max(
+      HETZNER_API_LOW_RATE_INTERVAL_MS,
+      retryAfterMs(headers, 0)
+    );
+    gate.blockedUntil = Math.max(Number(gate.blockedUntil || 0), Date.now() + retryMs);
+  } else if (gate.remaining != null && gate.remaining > HETZNER_API_LOW_WATERMARK) {
+    gate.blockedUntil = 0;
+  }
 
   if (gate.remaining != null && gate.remaining <= HETZNER_API_LOW_WATERMARK) {
     gate.nextAt = Math.max(gate.nextAt || 0, Date.now() + HETZNER_API_LOW_RATE_INTERVAL_MS);
@@ -71,18 +114,23 @@ function observeRateLimitHeaders(token, headers = {}, status = null) {
   };
 }
 
-async function waitForHetznerSlot(token) {
+async function waitForHetznerSlot(token, deadlineAt = null) {
   const gate = tokenGate(token);
   let release;
   const previous = gate.tail;
   gate.tail = new Promise(resolve => { release = resolve; });
-  await previous;
 
   try {
+    await waitWithDeadline(previous, deadlineAt);
+
     const low = gate.remaining != null && gate.remaining <= HETZNER_API_LOW_WATERMARK;
     const now = Date.now();
-    const waitMs = low ? Math.max(0, Number(gate.nextAt || 0) - now) : 0;
-    if (waitMs > 0) await sleep(waitMs);
+    const targetAt = Math.max(
+      Number(gate.nextAt || 0),
+      Number(gate.blockedUntil || 0)
+    );
+    const waitMs = (low || targetAt > now) ? Math.max(0, targetAt - now) : 0;
+    if (waitMs > 0) await waitWithDeadline(sleep(waitMs), deadlineAt);
 
     if (low) {
       gate.nextAt = Date.now() + HETZNER_API_LOW_RATE_INTERVAL_MS;
@@ -163,30 +211,43 @@ function getHetznerApiToken(config = {}) {
     process.env.HETZNER_API_TOKEN || process.env.HETZNER_TOKEN || process.env.HCLOUD_TOKEN || null;
 }
 
-async function hetznerRequest(config, method, reqPath, body) {
+async function hetznerRequest(config, method, reqPath, body, options = {}) {
   const token = getHetznerApiToken(config);
   if (!token) throw new Error('Hetzner API token is missing');
+
+  const deadlineAtRaw = Number(options?.deadlineAt);
+  const deadlineAt = Number.isFinite(deadlineAtRaw) && deadlineAtRaw > 0 ? deadlineAtRaw : null;
+  const configuredTimeout = Math.max(250, Number(options?.timeoutMs || 30000));
 
   for (let attempt = 0; ; attempt += 1) {
     let res;
     try {
-      await waitForHetznerSlot(token);
+      await waitForHetznerSlot(token, deadlineAt);
+      const remaining = remainingToDeadline(deadlineAt);
+      if (Number.isFinite(remaining) && remaining <= 250) throw deadlineError();
+      const requestTimeout = Number.isFinite(remaining)
+        ? Math.max(250, Math.min(configuredTimeout, remaining))
+        : configuredTimeout;
       res = await axios({
         baseURL: BASE,
         url: reqPath,
         method,
         data: body,
-        timeout: 30000,
+        timeout: requestTimeout,
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         validateStatus: () => true
       });
     } catch (networkError) {
+      if (networkError?.code === 'HETZNER_API_DEADLINE_EXCEEDED') throw networkError;
+      if (Number.isFinite(remainingToDeadline(deadlineAt)) && remainingToDeadline(deadlineAt) <= 0) {
+        throw deadlineError(networkError);
+      }
       const verb = String(method || 'GET').toUpperCase();
       const canRetryNetwork = ['GET', 'HEAD', 'OPTIONS'].includes(verb) && attempt < HETZNER_API_RETRY_ATTEMPTS;
       if (!canRetryNetwork) throw networkError;
       const delayMs = retryAfterMs({}, attempt);
       console.warn('[HETZNER_API_RETRY_NETWORK]', { method: verb, path: reqPath, attempt: attempt + 1, delay_ms: delayMs });
-      await sleep(delayMs);
+      await waitWithDeadline(sleep(delayMs), deadlineAt);
       continue;
     }
 
@@ -204,7 +265,7 @@ async function hetznerRequest(config, method, reqPath, body) {
         attempt: attempt + 1,
         delay_ms: delayMs
       });
-      await sleep(delayMs);
+      await waitWithDeadline(sleep(delayMs), deadlineAt);
       continue;
     }
 

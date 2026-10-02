@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     paths:
+      - 'Hetzner/hetzner-api.js'
+      - 'index-core.js'
       - 'services/hetzner-additional-ips.js'
       - 'services/hetzner-additional-ip-quality.js'
       - 'hetzner-additional-ip-quality-bootstrap.js'
@@ -42,7 +44,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --check Hetzner/hetzner-api.js
+          node --check index-core.js
           node --check services/hetzner-additional-ips.js
+          node --check services/hetzner-additional-ip-quality.js
           node --check scripts/reconcile-hetzner-additional-ip-orphans.js
           node scripts/validate-hetzner-additional-ips.js
           node scripts/validate-hetzner-additional-ip-quality.js

@@ -133,8 +133,18 @@ async function run() {
   assert(serviceSource.includes("ADDITIONAL_IP_SEARCH_TIMEOUT"));
   assert(serviceSource.includes("withTimeout("));
   assert(serviceSource.includes("stage: 'candidate_rejected'"));
+  assert(serviceSource.includes("deadlineAt: deadline"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_CLEANUP_FAILED]"));
+
+  const apiSource = fs.readFileSync(require.resolve('../Hetzner/hetzner-api.js'), 'utf8');
+  assert(apiSource.includes("blockedUntil"));
+  assert(apiSource.includes("HETZNER_API_DEADLINE_EXCEEDED"));
+  assert(apiSource.includes("waitWithDeadline(sleep(delayMs), deadlineAt)"));
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
+  assert(core.includes("const hetznerAdditionalIpCreateLocks = new Map();"));
+  assert(core.includes("HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS"));
+  assert(core.includes("[HETZNER_ADDITIONAL_IP_STALE_LOCK_RELEASED]"));
   assert(core.includes('async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId)'));
   assert(core.includes("await upsertServerSecret({"));
   assert(core.includes("secretType: 'root_password'"));

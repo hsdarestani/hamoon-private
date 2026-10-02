@@ -367,7 +367,11 @@ const state = {};
 const adminState = { impersonating: null };
 let orderCounter = 10000;
 const hetznerUpgradeLocks = new Map();
-const hetznerAdditionalIpCreateLocks = new Set();
+const hetznerAdditionalIpCreateLocks = new Map();
+const HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS = Math.max(
+  180000,
+  Number(process.env.HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS || 4 * 60 * 1000)
+);
 
 const HETZNER_MANAGE_LIVE_CACHE_MS = Math.max(
   5000,
@@ -3402,8 +3406,18 @@ async function handleHetznerAdditionalIpMenu(chatId, userId, serverId, dcConfig)
 
 async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfig) {
   const lockKey = `${String(dcConfig?.key || 'hetzner')}:${String(serverId)}`;
-  if (hetznerAdditionalIpCreateLocks.has(lockKey)) {
-    return sendMessage(chatId, '⏳ بررسی IP اضافه برای این سرور هنوز در حال انجام است. لطفاً منتظر نتیجه بمانید و دوباره روی پرداخت نزنید.');
+  const lockStartedAt = Number(hetznerAdditionalIpCreateLocks.get(lockKey) || 0);
+  if (lockStartedAt) {
+    const lockAgeMs = Math.max(0, Date.now() - lockStartedAt);
+    if (lockAgeMs < HETZNER_ADDITIONAL_IP_CREATE_LOCK_TTL_MS) {
+      return sendMessage(chatId, '⏳ بررسی IP اضافه برای این سرور هنوز در حال انجام است. لطفاً منتظر نتیجه بمانید و دوباره روی پرداخت نزنید.');
+    }
+    console.warn('[HETZNER_ADDITIONAL_IP_STALE_LOCK_RELEASED]', {
+      server_id: String(serverId),
+      datacenter: String(dcConfig?.key || 'hetzner'),
+      age_ms: lockAgeMs
+    });
+    hetznerAdditionalIpCreateLocks.delete(lockKey);
   }
 
   try {
@@ -3417,7 +3431,7 @@ async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfi
     const database = require('./db');
     await additionalIpBilling.assertAffordable(database, userId);
 
-    hetznerAdditionalIpCreateLocks.add(lockKey);
+    hetznerAdditionalIpCreateLocks.set(lockKey, Date.now());
     await sendMessage(
       chatId,
       '⏳ درخواست ثبت شد. در حال ساخت، تنظیم و تست IP از ایران و خارج هستم. پیدا کردن IP سالم ممکن است چند دقیقه طول بکشد؛ تا اعلام نتیجه دوباره روی پرداخت نزنید.'
