@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'services/hetzner-additional-ips.js'
+      - 'services/hetzner-additional-ip-quality.js'
+      - 'hetzner-additional-ip-quality-bootstrap.js'
       - 'scripts/reconcile-hetzner-additional-ip-orphans.js'
       - 'scripts/validate-hetzner-additional-ips.js'
       - 'scripts/validate-hetzner-additional-ip-quality.js'
