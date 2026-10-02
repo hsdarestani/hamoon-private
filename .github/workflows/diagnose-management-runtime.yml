@@ -145,23 +145,29 @@ jobs:
           ps -eo pid,ppid,lstart,args | grep -E "node .*index(\.js)?|node .*hamoon|pm2" | grep -v grep | tail -80 || true
           echo '=== POLLING CONFLICT RECENCY ==='
           pm2 logs hamoonbot --nostream --lines 2000 2>&1 | grep -E "409 Conflict|polling_error" | tail -80 || true
-          echo '=== ONE-OFF SINGLE BOT ENFORCEMENT ==='
-          PM2_PID="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(String(p?.pid||''))})")"
-          test -n "$PM2_PID"
-          echo "PM2_BOT_PID=$PM2_PID"
-          EXTRA_PIDS=""
+          echo '=== ONE-OFF SINGLE BOT ENFORCEMENT V2 ==='
+          echo 'Stopping PM2-managed bot before clearing stale same-app workers'
+          pm2 stop hamoonbot >/dev/null || true
+          sleep 3
+          STALE=""
           for pid in $(pgrep -f 'node .*index\.js' || true); do
-            [ "$pid" = "$PM2_PID" ] && continue
             CWD="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
-            CMD="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-            if [ "$CWD" = "$APP_PATH" ] && printf '%s' "$CMD" | grep -Eq 'node .*index\.js'; then
-              EXTRA_PIDS="$EXTRA_PIDS $pid"
+            if [ "$CWD" = "$APP_PATH" ]; then
+              STALE="$STALE $pid"
             fi
           done
-          echo "EXTRA_SAME_APP_PIDS=\${EXTRA_PIDS:-none}"
-          for pid in $EXTRA_PIDS; do kill -TERM "$pid" 2>/dev/null || true; done
-          sleep 4
-          for pid in $EXTRA_PIDS; do if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi; done
+          echo "STALE_SAME_APP_PIDS=$STALE"
+          for pid in $STALE; do kill -TERM "$pid" 2>/dev/null || true; done
+          sleep 3
+          for pid in $STALE; do if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi; done
+          sleep 2
+          LEFT=0
+          for pid in $(pgrep -f 'node .*index\.js' || true); do
+            CWD="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+            [ "$CWD" = "$APP_PATH" ] && LEFT=$((LEFT+1))
+          done
+          echo "SAME_APP_INDEX_COUNT_STOPPED=$LEFT"
+          test "$LEFT" -eq 0
           pm2 restart hamoonbot --update-env >/dev/null
           pm2 save >/dev/null || true
           sleep 8
@@ -180,10 +186,13 @@ jobs:
           ERR_LOG="$(pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s);const p=a.find(x=>x.name==='hamoonbot');process.stdout.write(String(p?.pm2_env?.pm_err_log_path||''))})")"
           START_LINES=0
           [ -f "$ERR_LOG" ] && START_LINES="$(wc -l < "$ERR_LOG")"
-          sleep 12
+          sleep 15
+          NEW409=0
           if [ -f "$ERR_LOG" ]; then
-            tail -n +$((START_LINES+1)) "$ERR_LOG" | grep -E "409 Conflict|polling_error" || true
+            NEW409="$(tail -n +$((START_LINES+1)) "$ERR_LOG" | grep -c "409 Conflict" || true)"
           fi
+          echo "NEW_409_COUNT=$NEW409"
+          test "$NEW409" -eq 0
           echo '=== RECENT ADDITIONAL IP FULL CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 18 -B 6 -E "\[HETZNER_ADDITIONAL_IP_(SSH_ROUTE|CREATED|BIND|QUALITY|CLEAN|CREATE|STALE)|\[SERVER_PASSWORD_SECRET_REFRESHED\]" | tail -1200 || true
 
