@@ -53,7 +53,8 @@ async function listAllHetznerServers(dcConfig, options = {}) {
       continue;
     }
 
-    return [...rawById.values()].map(normalizeServer);
+    const values = [...rawById.values()];
+    return options.raw ? values : values.map(normalizeServer);
   }
 
   const error = new Error('HETZNER_SERVER_PAGINATION_LIMIT_REACHED');
