@@ -154,8 +154,9 @@ async function run() {
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_RETRY]"));
   assert(serviceSource.includes("const maxProbeRounds = 2;"));
-  assert(serviceSource.includes("scripts', 'ssh-exec-helper.js"));
-  assert(serviceSource.includes("spawn(process.execPath"));
+  assert(serviceSource.includes("const { Client } = require('ssh2');"));
+  assert(serviceSource.includes("keepaliveInterval: 5000"));
+  assert(serviceSource.includes("try { conn.destroy(); } catch (_) {}"));
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("stage: 'os_config'"));
 
