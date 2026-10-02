@@ -70,8 +70,13 @@ function applyRuntimeSafetyDefaults() {
     // cap low so external probe outages cannot trap the request for a long time.
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '10',
     HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '3',
-    HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS: '8',
-    HETZNER_ADDITIONAL_IP_QUALITY_RECHECKS: '2',
+    // Additional Floating IP purchase is interactive: keep the search bounded so
+    // the Telegram request always reaches a result instead of appearing hung.
+    HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS: '4',
+    HETZNER_ADDITIONAL_IP_QUALITY_RECHECKS: '1',
+    HETZNER_ADDITIONAL_IP_QUALITY_POLLS: '8',
+    HETZNER_ADDITIONAL_IP_QUALITY_POLL_DELAY_MS: '1000',
+    HETZNER_ADDITIONAL_IP_MAX_DURATION_MS: '150000',
     HETZNER_TRAFFIC_EUR_TO_TOMAN: '250000',
     LOYALTY_SILVER_CASHBACK: '2',
     LOYALTY_GOLD_CASHBACK: '4',
