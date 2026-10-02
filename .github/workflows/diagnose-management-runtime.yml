@@ -108,6 +108,33 @@ jobs:
           echo '=== RECENT HETZNER 429 COUNT ==='
           RECENT_LOGS="$(pm2 logs hamoonbot --nostream --lines 800 2>&1)"
           printf '%s\n' "$RECENT_LOGS" | grep -c "status: 429" || true
+          echo '=== ADDITIONAL IP STATE ==='
+          timeout 25 node - <<'NODE'
+          require('dotenv').config();
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          (async()=>{
+            try {
+              const [billed] = await db.pool.query(
+                "SELECT floating_ip_id,server_id,telegram_id,datacenter,status,created_at,updated_at FROM hetzner_additional_ip_billing ORDER BY created_at DESC LIMIT 12"
+              ).catch(()=>[[]]);
+              const [wallet] = await db.pool.query(
+                "SELECT telegram_id,amount,type,created_at FROM wallet_logs WHERE type IN ('hetzner_additional_ip','hetzner_additional_ip_renewal') ORDER BY created_at DESC LIMIT 12"
+              ).catch(()=>[[]]);
+              const dc=Object.values(dcs).find(x => String(x?.provider || x?.apiType || '').toLowerCase()==='hetzner');
+              let provider=[];
+              if(dc){
+                const data=await api.hetznerRequest(dc,'GET','/floating_ips?per_page=50').catch(e=>({__error:e?.code||e?.message}));
+                provider=(data?.floating_ips||[]).map(x=>({id:String(x.id),server_id:String(x.server?.id||''),description:x.description||null,created:x.created||null}));
+                if(data?.__error) provider=[{error:data.__error}];
+              }
+              console.log(JSON.stringify({billed,wallet,provider},null,2));
+            } finally {
+              await db.pool.end().catch(()=>{});
+            }
+          })().catch(e=>{ console.error(e); process.exitCode=1; });
+          NODE
           echo '=== ADDITIONAL IP TRACE ==='
           LOGS="$(pm2 logs hamoonbot --nostream --lines 8000 2>&1)"
           printf '%s\n' "$LOGS" | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED|HETZNER_RATE|FLOATING_IP" | tail -500 || true
