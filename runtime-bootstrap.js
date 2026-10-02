@@ -70,7 +70,7 @@ function applyRuntimeSafetyDefaults() {
     // cap low so external probe outages cannot trap the request for a long time.
     HETZNER_CHANGE_IP_CLEAN_ATTEMPTS: '10',
     HETZNER_CHANGE_IP_INCONCLUSIVE_CANDIDATES: '3',
-    // ADDITIONAL_IP_BOUNDED_FLOW_V2
+    // ADDITIONAL_IP_BOUNDED_FLOW_V3
     // Additional Floating IP purchase is interactive: keep the search bounded so
     // the Telegram request always reaches a result instead of appearing hung.
     HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS: '4',
