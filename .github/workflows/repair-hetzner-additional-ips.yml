@@ -1,0 +1,84 @@
+name: Repair Hetzner Additional IPs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/hetzner-additional-ips.js'
+      - 'scripts/reconcile-hetzner-additional-ip-orphans.js'
+      - 'scripts/validate-hetzner-additional-ips.js'
+      - 'scripts/validate-hetzner-additional-ip-quality.js'
+      - '.github/workflows/repair-hetzner-additional-ips.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: hamoon-hetzner-additional-ip-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-repair-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - name: Validate additional IP runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check services/hetzner-additional-ips.js
+          node --check scripts/reconcile-hetzner-additional-ip-orphans.js
+          node scripts/validate-hetzner-additional-ips.js
+          node scripts/validate-hetzner-additional-ip-quality.js
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy, clean orphan IPs, restart bot
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          git fetch origin main
+          git checkout main
+          git merge --ff-only origin/main
+          node scripts/restore-server-secret-key.js .env >/dev/null
+
+          node scripts/validate-hetzner-additional-ips.js
+          node scripts/validate-hetzner-additional-ip-quality.js
+          node scripts/reconcile-hetzner-additional-ip-orphans.js --apply
+
+          pm2 restart hamoonbot --update-env >/dev/null
+          sleep 5
+          node - <<'NODE'
+          const {execSync}=require('child_process');
+          const list=JSON.parse(execSync('pm2 jlist',{encoding:'utf8'}));
+          const p=list.find(x=>x.name==='hamoonbot');
+          const status=p?.pm2_env?.status||'missing';
+          console.log('HAMOONBOT_STATUS='+status);
+          if(status!=='online') process.exit(1);
+          NODE
+          REMOTE
