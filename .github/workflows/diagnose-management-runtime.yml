@@ -193,9 +193,43 @@ jobs:
             }
           })().catch(e=>{console.error('TARGET_SERVER_DIAG_FAILED',e);process.exitCode=1;});
           NODE
+          echo '=== STORED SSH AUTH DIAG ==='
+          node - <<'NODE'
+          const {Client}=require('ssh2');
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          const targets=['144775241','144775975'];
+          function auth(host,password,timeoutMs=12000){
+            return new Promise(resolve=>{
+              const c=new Client();
+              let done=false;
+              const finish=(r)=>{ if(done)return; done=true; try{c.end();}catch{} try{c.destroy();}catch{} resolve(r); };
+              const timer=setTimeout(()=>finish({ok:false,code:'SSH_TIMEOUT'}),timeoutMs);
+              c.on('ready',()=>{clearTimeout(timer);finish({ok:true});});
+              c.on('error',e=>{clearTimeout(timer);const m=String(e?.message||'').toLowerCase();finish({ok:false,code:m.includes('auth')?'SSH_AUTH_FAILED':(m.includes('timeout')?'SSH_TIMEOUT':'SSH_CONNECTION_FAILED')});});
+              c.connect({host,port:22,username:'root',password,readyTimeout:Math.min(timeoutMs,10000),tryKeyboard:false});
+            });
+          }
+          (async()=>{
+            try{
+              for(const id of targets){
+                const p=await db.getPurchaseByServerId(id);
+                const secret=await db.getServerSecret(id,'root_password').catch(()=>null);
+                let ip=p?.public_ip||null;
+                if(p && dcs[p.datacenter]){
+                  const r=await api.hetznerRequest(dcs[p.datacenter],'GET',`/servers/${id}`).catch(()=>null);
+                  ip=r?.server?.public_net?.ipv4?.ip||ip;
+                }
+                const result=(secret&&ip)?await auth(ip,secret):{ok:false,code:secret?'NO_IP':'NO_STORED_SECRET'};
+                console.log(JSON.stringify({server_id:id,has_secret:!!secret,ip_present:!!ip,ssh_auth:result}));
+              }
+            } finally { await db.pool.end().catch(()=>{}); }
+          })().catch(e=>{console.error('STORED_SSH_AUTH_DIAG_FAILED',e?.message||String(e));process.exitCode=1;});
+          NODE
           echo '=== ADDITIONAL IP TRACE ==='
           LOGS="$(pm2 logs hamoonbot --nostream --lines 8000 2>&1)"
-          printf '%s\n' "$LOGS" | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED|HETZNER_RATE|FLOATING_IP" | tail -500 || true
+          printf '%s\n' "$LOGS" | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|HETZNER_CHANGE_IP|CHANGE_IP|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED|HETZNER_RATE|FLOATING_IP" | tail -1000 || true
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
