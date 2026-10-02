@@ -1828,6 +1828,10 @@ async function listDeletionPending() {
 }
 
 async function listPendingProvisioning() {
+  const batchSize = Math.max(
+    1,
+    Math.min(20, Number(process.env.HETZNER_RECONCILE_BATCH_SIZE || 6))
+  );
   const [rows] = await pool.execute(
     `SELECT *
      FROM purchases
@@ -1842,7 +1846,8 @@ async function listPendingProvisioning() {
          LOWER(datacenter) = 'hetzner'
          OR LOWER(datacenter) LIKE 'hetzner-%'
        )
-     ORDER BY lifecycle_updated_at ASC, updated_at ASC`
+     ORDER BY lifecycle_updated_at ASC, updated_at ASC
+     LIMIT ${batchSize}`
   );
 
   return rows;
