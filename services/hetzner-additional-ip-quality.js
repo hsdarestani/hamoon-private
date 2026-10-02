@@ -239,7 +239,10 @@ async function createVerifiedAdditionalIpv4(opts) {
   ])];
   let sshHost = null;
   let lastSshError = null;
-  // SSH can be briefly unavailable after provider/network operations. Give the existing server\n  // a few bounded retries before failing the purchase flow. This remains inside the overall\n  // additional-IP deadline and avoids false failures from short SSH stalls.\n  const maxProbeRounds = 4;
+  // SSH can be briefly unavailable after provider/network operations. Give the existing server
+  // a few bounded retries before failing the purchase flow. This remains inside the overall
+  // additional-IP deadline and avoids false failures from short SSH stalls.
+  const maxProbeRounds = 4;
 
   for (let round = 1; round <= maxProbeRounds && !sshHost; round += 1) {
     const orderedHosts = round === 1 ? sshHosts : [...sshHosts].reverse();
