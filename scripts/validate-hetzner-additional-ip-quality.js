@@ -13,6 +13,7 @@ async function run() {
   let deleted = 0;
   let qualityCalls = 0;
   const calls = [];
+  const progressEvents = [];
 
   const request = async (_dc, method, path, body) => {
     calls.push({ method, path, body });
@@ -97,7 +98,8 @@ async function run() {
         global: { selected: 6, success: 6 }
       };
     },
-    maxAttempts: 3
+    maxAttempts: 3,
+    onProgress: async event => progressEvents.push(event)
   });
 
   assert.strictEqual(result.ip.ip, '192.0.3.10');
@@ -106,6 +108,9 @@ async function run() {
   assert.strictEqual(created, 2);
   assert.strictEqual(deleted, 1, 'dirty candidate must be deleted before retry');
   assert.strictEqual(qualityCalls, 2);
+  assert(progressEvents.some(event => event.stage === 'quality_check' && event.attempt === 1));
+  assert(progressEvents.some(event => event.stage === 'candidate_rejected' && event.attempt === 1));
+  assert(progressEvents.some(event => event.stage === 'success' && event.attempt === 2));
 
   await assert.rejects(
     quality.createVerifiedAdditionalIpv4({
@@ -121,6 +126,11 @@ async function run() {
     error => error.code === 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'
   );
 
+  const serviceSource = fs.readFileSync(require.resolve('../services/hetzner-additional-ip-quality.js'), 'utf8');
+  assert(serviceSource.includes("ADDITIONAL_IP_SEARCH_TIMEOUT"));
+  assert(serviceSource.includes("Promise.race(["));
+  assert(serviceSource.includes("stage: 'candidate_rejected'"));
+
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
   assert(core.includes('async function handleResetPasswordConfirm(chatId, userId, serverId, dcConfig, messageId)'));
   assert(core.includes("await upsertServerSecret({"));
@@ -131,6 +141,8 @@ async function run() {
   const patched = bootstrap.applyHetznerAdditionalIpQualityPatches(core);
   assert(patched.includes('additionalIpQuality.createVerifiedAdditionalIpv4'));
   assert(patched.includes('NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE'));
+  assert(patched.includes('ADDITIONAL_IP_SEARCH_TIMEOUT'));
+  assert(patched.includes("progress?.stage === 'quality_check'"));
   assert(patched.includes('additionalIpQuality.deleteVerifiedAdditionalIp'));
   new vm.Script(patched, { filename: 'index-core.additional-ip-quality.patched.js' });
 
