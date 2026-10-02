@@ -141,28 +141,125 @@ jobs:
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
-          echo '=== ONE-OFF EXIT RESCUE ==='
-          timeout 150 node - <<'NODE'
+          echo '=== ONE-OFF RESCUE INSPECTION 2 ==='
+          timeout 360 node - <<'NODE'
           require('dotenv').config();
+          const {Client}=require('ssh2');
           const dcs=require('./datacenters');
           const api=require('./Hetzner/hetzner-api');
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           const targetId='144775241';
           const expectedIp='91.107.154.177';
           const expectedName='Srv-HET-8a3198';
+
+          function sshRun(host,password,command,timeoutMs=15000){
+            return new Promise((resolve,reject)=>{
+              const c=new Client();
+              let done=false,out='',err='',timer=null;
+              const finish=(e,v)=>{
+                if(done)return;
+                done=true;
+                if(timer)clearTimeout(timer);
+                try{c.end();}catch(_){}
+                try{c.destroy();}catch(_){}
+                e?reject(e):resolve(v);
+              };
+              timer=setTimeout(()=>finish(Object.assign(new Error('SSH_TIMEOUT'),{code:'SSH_TIMEOUT',out,err})),timeoutMs);
+              c.on('ready',()=>c.exec(command,(e,stream)=>{
+                if(e)return finish(Object.assign(new Error('SSH_EXEC_START_FAILED'),{code:'SSH_EXEC_START_FAILED',cause:e}));
+                stream.on('data',d=>out+=String(d));
+                stream.stderr.on('data',d=>err+=String(d));
+                stream.on('error',e=>finish(Object.assign(new Error('SSH_STREAM_FAILED'),{code:'SSH_STREAM_FAILED',cause:e,out,err})));
+                stream.on('close',code=>{
+                  if(Number(code)===0)finish(null,{out,err,code:Number(code)});
+                  else finish(Object.assign(new Error('SSH_COMMAND_FAILED'),{code:'SSH_COMMAND_FAILED',exitCode:Number(code),out,err}));
+                });
+              }));
+              c.on('error',e=>finish(Object.assign(new Error('SSH_CONNECT_FAILED'),{code:'SSH_CONNECT_FAILED',cause:e,out,err})));
+              c.connect({host,port:22,username:'root',password,readyTimeout:10000,tryKeyboard:false});
+            });
+          }
+
+          async function waitSsh(password){
+            let last;
+            for(let i=1;i<=20;i++){
+              try{await sshRun(expectedIp,password,'echo READY',8000);console.log('RESCUE_SSH_ATTEMPT='+i);return;}
+              catch(e){last=e;await sleep(3000);}
+            }
+            throw last||new Error('RESCUE_SSH_UNAVAILABLE');
+          }
+
+          async function exitRescue(dc){
+            await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/disable_rescue',{}).catch(()=>{});
+            const back=await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/reboot',{}).catch(()=>null);
+            if(back?.action?.id) await api.waitHetznerAction(dc,back.action.id,120000).catch(()=>{});
+            console.log('EXIT_RESCUE_ATTEMPTED=1');
+          }
+
           (async()=>{
             const dc=Object.values(dcs).find(x=>String(x?.provider||x?.apiType||'').toLowerCase()==='hetzner');
-            const before=await api.hetznerRequest(dc,'GET','/servers/'+targetId);
-            const s=before?.server||{};
-            const actual={id:String(s.id||''),name:String(s.name||''),ip:String(s?.public_net?.ipv4?.ip||'')};
-            console.log('VERIFY='+JSON.stringify(actual));
-            if(actual.id!==targetId||actual.name!==expectedName||actual.ip!==expectedIp) throw new Error('TARGET_MISMATCH');
-            await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/disable_rescue',{}).catch(()=>{});
-            const reboot=await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/reboot',{});
-            if(reboot?.action?.id) await api.waitHetznerAction(dc,reboot.action.id,120000).catch(()=>{});
-            const after=await api.hetznerRequest(dc,'GET','/servers/'+targetId);
-            console.log('AFTER='+JSON.stringify({id:String(after?.server?.id||''),name:String(after?.server?.name||''),ip:String(after?.server?.public_net?.ipv4?.ip||''),status:String(after?.server?.status||'')}));
-            console.log('EXIT_RESCUE_DONE=1');
-          })().catch(e=>{console.error('EXIT_RESCUE_ERROR='+(e?.code||e?.message||String(e)));process.exitCode=1;});
+            if(!dc) throw new Error('HETZNER_DC_NOT_FOUND');
+            let rescueActive=false;
+            try{
+              const before=await api.hetznerRequest(dc,'GET','/servers/'+targetId);
+              const srv=before?.server||{};
+              const actual={id:String(srv.id||''),name:String(srv.name||''),ip:String(srv?.public_net?.ipv4?.ip||''),status:String(srv.status||'')};
+              console.log('VERIFY='+JSON.stringify(actual));
+              if(actual.id!==targetId||actual.name!==expectedName||actual.ip!==expectedIp) throw new Error('TARGET_MISMATCH');
+
+              const rescue=await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/enable_rescue',{type:'linux64'});
+              const rescuePassword=String(rescue?.root_password||'');
+              if(!rescuePassword) throw new Error('RESCUE_PASSWORD_MISSING');
+              rescueActive=true;
+              console.log('RESCUE_ENABLED=1');
+
+              const reboot=await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/reboot',{});
+              if(reboot?.action?.id) await api.waitHetznerAction(dc,reboot.action.id,120000).catch(()=>{});
+              await waitSsh(rescuePassword);
+              console.log('RESCUE_SSH_READY=1');
+
+              const inspect=[
+                'set -e',
+                'mkdir -p /mnt/hamoon-target',
+                'umount /mnt/hamoon-target >/dev/null 2>&1 || true',
+                'ROOT=""',
+                'for dev in $(blkid -o device 2>/dev/null); do',
+                '  umount /mnt/hamoon-target >/dev/null 2>&1 || true',
+                '  if mount -o ro "$dev" /mnt/hamoon-target >/dev/null 2>&1; then',
+                '    if [ -f /mnt/hamoon-target/etc/os-release ] && grep -qi ubuntu /mnt/hamoon-target/etc/os-release; then ROOT="$dev"; break; fi',
+                '  fi',
+                'done',
+                'echo ROOT_DEVICE="$ROOT"',
+                '[ -n "$ROOT" ] || exit 20',
+                'echo SECTION_OS',
+                'grep -E "^(NAME|VERSION|ID)=" /mnt/hamoon-target/etc/os-release || true',
+                'echo SECTION_SSH_CONFIG',
+                'grep -RhsE "^[[:space:]]*(Port|ListenAddress|PermitRootLogin|PasswordAuthentication|PubkeyAuthentication)[[:space:]]+" /mnt/hamoon-target/etc/ssh/sshd_config /mnt/hamoon-target/etc/ssh/sshd_config.d 2>/dev/null || true',
+                'echo SECTION_SSH_SERVICE',
+                'ls -l /mnt/hamoon-target/etc/systemd/system/multi-user.target.wants/ssh.service /mnt/hamoon-target/etc/systemd/system/sshd.service 2>/dev/null || true',
+                'echo SECTION_UFW',
+                'cat /mnt/hamoon-target/etc/ufw/ufw.conf 2>/dev/null | head -40 || true',
+                'grep -RhsE "22(/tcp)?|dport 22|--dport 22" /mnt/hamoon-target/etc/ufw /mnt/hamoon-target/etc/iptables /mnt/hamoon-target/etc/nftables.conf 2>/dev/null | head -120 || true',
+                'echo SECTION_FAIL2BAN',
+                'grep -RhsE "^[[:space:]]*(enabled|port|bantime|maxretry)[[:space:]]*=" /mnt/hamoon-target/etc/fail2ban/jail.local /mnt/hamoon-target/etc/fail2ban/jail.d 2>/dev/null | head -120 || true',
+                'echo SECTION_AUTH_LOG',
+                'tail -120 /mnt/hamoon-target/var/log/auth.log 2>/dev/null | grep -Ei "sshd|fail2ban|ban|block" | tail -80 || true',
+                'umount /mnt/hamoon-target >/dev/null 2>&1 || true'
+              ].join('\n');
+
+              const result=await sshRun(expectedIp,rescuePassword,inspect,45000);
+              console.log('INSPECT_OUT_BEGIN');
+              console.log(result.out);
+              console.log('INSPECT_OUT_END');
+            }catch(e){
+              console.error('RESCUE_INSPECT_ERROR='+(e?.code||e?.message||String(e)));
+              if(e?.out) console.error('RESCUE_INSPECT_STDOUT='+String(e.out).slice(-12000));
+              if(e?.err) console.error('RESCUE_INSPECT_STDERR='+String(e.err).slice(-12000));
+              process.exitCode=1;
+            }finally{
+              if(rescueActive) await exitRescue(dc);
+            }
+          })();
           NODE
 
           REMOTE
