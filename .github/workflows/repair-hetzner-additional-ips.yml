@@ -76,8 +76,16 @@ jobs:
 
           node scripts/validate-hetzner-additional-ips.js
           node scripts/validate-hetzner-additional-ip-quality.js
-          node scripts/reconcile-hetzner-additional-ip-orphans.js --apply
 
+          RECONCILE_STATUS=0
+          node scripts/reconcile-hetzner-additional-ip-orphans.js --apply || RECONCILE_STATUS=$?
+          if [ "$RECONCILE_STATUS" -ne 0 ]; then
+            echo "ORPHAN_RECONCILE_WARNING=$RECONCILE_STATUS"
+          fi
+
+          # Deployment must not be held hostage by a slow provider-side
+          # unassign action. Restart onto the validated code even if orphan
+          # cleanup needs another reconciliation pass.
           pm2 restart hamoonbot --update-env >/dev/null
           sleep 5
           node - <<'NODE'

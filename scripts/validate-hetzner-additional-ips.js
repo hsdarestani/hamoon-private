@@ -37,34 +37,73 @@ async function run() {
   );
 
   const deleteCalls = [];
+  let attached = true;
   const deleteRequest = async (_dc, method, path, body) => {
     deleteCalls.push({ method, path, body });
     if (method === 'GET' && path === '/floating_ips/3') {
-      return { floating_ip: { id: 3, ip: '192.0.2.3', server: 42, protection: { delete: false } } };
+      return {
+        floating_ip: {
+          id: 3,
+          ip: '192.0.2.3',
+          server: attached ? 42 : null,
+          description: 'HamoonCloud user 123 server 42',
+          protection: { delete: false }
+        }
+      };
     }
     if (method === 'POST' && path === '/floating_ips/3/actions/unassign') {
+      attached = false;
       return { action: { id: 77 } };
     }
     if (method === 'DELETE' && path === '/floating_ips/3') return {};
     throw new Error(`Unexpected delete request: ${method} ${path}`);
   };
-  let waitedFor = null;
   await service.deleteAdditionalIp({
     dc: {},
     serverId: '42',
     floatingIpId: '3',
     request: deleteRequest,
-    waitAction: async actionId => { waitedFor = actionId; }
+    unassignTimeoutMs: 2000,
+    pollDelayMs: 1
   });
-  assert.strictEqual(waitedFor, 77);
   assert.deepStrictEqual(deleteCalls.map(x => [x.method, x.path]), [
     ['GET', '/floating_ips/3'],
     ['POST', '/floating_ips/3/actions/unassign'],
+    ['GET', '/floating_ips/3'],
     ['DELETE', '/floating_ips/3']
+  ]);
+
+  const orphanCalls = [];
+  const orphanRequest = async (_dc, method, path) => {
+    orphanCalls.push([method, path]);
+    if (method === 'GET' && path === '/floating_ips/4') {
+      return {
+        floating_ip: {
+          id: 4,
+          ip: '192.0.2.4',
+          server: null,
+          description: 'HamoonCloud user 123 server 42',
+          protection: { delete: false }
+        }
+      };
+    }
+    if (method === 'DELETE' && path === '/floating_ips/4') return {};
+    throw new Error(`Unexpected orphan request: ${method} ${path}`);
+  };
+  await service.deleteAdditionalIp({
+    dc: {},
+    serverId: '42',
+    floatingIpId: '4',
+    request: orphanRequest
+  });
+  assert.deepStrictEqual(orphanCalls, [
+    ['GET', '/floating_ips/4'],
+    ['DELETE', '/floating_ips/4']
   ]);
 
   assert.strictEqual(service.floatingIpServerId({ server: 42 }), '42');
   assert.strictEqual(service.floatingIpServerId({ server: { id: 42 } }), '42');
+  assert.strictEqual(service.managedDescriptionServerId({ description: 'HamoonCloud user 123 server 42' }), '42');
   console.log('Hetzner additional IP validation passed');
 }
 

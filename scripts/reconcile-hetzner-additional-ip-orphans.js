@@ -30,7 +30,9 @@ async function main() {
   const now = Date.now();
   const candidates = (data?.floating_ips || []).filter(ip => {
     if (!isManaged(ip) || billed.has(String(ip.id))) return false;
-    const serverId = additionalIps.floatingIpServerId(ip);
+    const serverId =
+      additionalIps.floatingIpServerId(ip) ||
+      additionalIps.managedDescriptionServerId(ip);
     if (!serverId) return false;
     const created = Date.parse(String(ip.created || ''));
     return Number.isFinite(created) && now - created >= minAgeMs;
@@ -46,7 +48,9 @@ async function main() {
   };
 
   for (const ip of candidates) {
-    const serverId = additionalIps.floatingIpServerId(ip);
+    const serverId =
+      additionalIps.floatingIpServerId(ip) ||
+      additionalIps.managedDescriptionServerId(ip);
     if (!apply) {
       summary.deleted.push({ id: String(ip.id), server_id: serverId, dry_run: true });
       continue;
