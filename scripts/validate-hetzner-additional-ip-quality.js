@@ -128,7 +128,7 @@ async function run() {
 
   const serviceSource = fs.readFileSync(require.resolve('../services/hetzner-additional-ip-quality.js'), 'utf8');
   assert(serviceSource.includes("ADDITIONAL_IP_SEARCH_TIMEOUT"));
-  assert(serviceSource.includes("Promise.race(["));
+  assert(serviceSource.includes("withTimeout("));
   assert(serviceSource.includes("stage: 'candidate_rejected'"));
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
