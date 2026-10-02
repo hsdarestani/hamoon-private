@@ -141,4 +141,63 @@ jobs:
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
+          echo '=== ONE-OFF VERIFIED REBOOT ==='
+          timeout 150 node - <<'NODE'
+          require('dotenv').config();
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          const targetId='144775241';
+          const expectedIp='91.107.154.177';
+          const expectedName='Srv-HET-8a3198';
+
+          function serverIp(server) {
+            return String(server?.public_net?.ipv4?.ip || '');
+          }
+
+          (async()=>{
+            const dc=Object.values(dcs).find(x => String(x?.provider || x?.apiType || '').toLowerCase()==='hetzner');
+            if(!dc) throw new Error('HETZNER_DC_NOT_FOUND');
+
+            const before=await api.hetznerRequest(dc,'GET','/servers/'+targetId);
+            const server=before?.server || null;
+            const actual={
+              id:String(server?.id || ''),
+              name:String(server?.name || ''),
+              ip:serverIp(server),
+              status:String(server?.status || '')
+            };
+            console.log('VERIFY='+JSON.stringify(actual));
+
+            if(actual.id!==targetId || actual.ip!==expectedIp || actual.name!==expectedName){
+              console.log('REBOOT_SKIPPED=TARGET_MISMATCH');
+              process.exitCode=2;
+              return;
+            }
+
+            const reboot=await api.hetznerRequest(dc,'POST','/servers/'+targetId+'/actions/reboot',{});
+            const actionId=reboot?.action?.id || null;
+            console.log('REBOOT_ACTION_ID='+String(actionId || ''));
+            if(actionId) await api.waitHetznerAction(dc, actionId, 120000);
+
+            const started=Date.now();
+            let after=null;
+            while(Date.now()-started<60000){
+              const data=await api.hetznerRequest(dc,'GET','/servers/'+targetId);
+              after=data?.server || null;
+              if(String(after?.status||'')==='running') break;
+              await new Promise(r=>setTimeout(r,3000));
+            }
+            console.log('AFTER='+JSON.stringify({
+              id:String(after?.id || ''),
+              name:String(after?.name || ''),
+              ip:serverIp(after),
+              status:String(after?.status || '')
+            }));
+            console.log('REBOOT_DONE=1');
+          })().catch(e=>{
+            console.error('REBOOT_ERROR='+(e?.code || e?.message || String(e)));
+            process.exitCode=1;
+          });
+          NODE
+
           REMOTE
