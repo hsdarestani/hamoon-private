@@ -73,4 +73,7 @@ jobs:
 
           echo '=== NEW CALLBACK TRACE ONLY ==='
           pm2 logs hamoonbot --nostream --lines 3000 2>&1 | grep -E "CALLBACK_QUERY_IN|MANAGE_CALLBACK_RECEIVED|MANAGE_PLAIN_TEXT_SEND|CALLBACK_ACK_FAILED|STALE_CALLBACK" | tail -300 || true
+
+          echo '=== ADDITIONAL IP TRACE ==='
+          pm2 logs hamoonbot --nostream --lines 5000 2>&1 | grep -E "HETZNER_ADDITIONAL_IP|ADDITIONAL_IP_SEARCH_TIMEOUT|SSH_(AUTH|TIMEOUT|CONNECTION|COMMAND)|SERVER_PASSWORD_SECRET_REFRESHED" | tail -400 || true
           REMOTE
