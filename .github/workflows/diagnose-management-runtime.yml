@@ -126,7 +126,7 @@ jobs:
               let provider=[];
               if(dc){
                 const data=await api.hetznerRequest(dc,'GET','/floating_ips?per_page=50').catch(e=>({__error:e?.code||e?.message}));
-                provider=(data?.floating_ips||[]).map(x=>({id:String(x.id),server_id:String(x.server?.id||''),description:x.description||null,created:x.created||null}));
+                provider=(data?.floating_ips||[]).map(x=>({id:String(x.id),server:x.server??null,server_id:String(x.server?.id||x.server||''),home_location:x.home_location?.name||x.home_location||null,description:x.description||null,created:x.created||null,keys:Object.keys(x||{})}));
                 if(data?.__error) provider=[{error:data.__error}];
               }
               console.log(JSON.stringify({billed,wallet,provider},null,2));
