@@ -51,8 +51,14 @@ jobs:
             "[MANAGE_CALLBACK_RECEIVED]",
             "[MANAGE_PLAIN_TEXT_SEND]",
             "makeDirectManageCb(payload)",
-            "parseDirectManageCb(data)"
+            "parseDirectManageCb(data)",
+            "[HETZNER_TRAFFIC_MONITOR_SERVER_FAILED]"
           ]) console.log(JSON.stringify({needle:n,count:src.split(n).length-1}));
+          const trafficIdx=src.indexOf("[HETZNER_TRAFFIC_MONITOR_SERVER_FAILED]");
+          if(trafficIdx>=0){
+            console.log('--- TRAFFIC MONITOR RUNTIME CONTEXT ---');
+            console.log(src.slice(Math.max(0,trafficIdx-7000),trafficIdx+9000));
+          }
           const i=src.indexOf("bot.on('callback_query'");
           console.log('--- CALLBACK HANDLER ---');
           console.log(src.slice(i,i+3200));
