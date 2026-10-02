@@ -39,6 +39,7 @@ const { installHetznerPowerStateBarrier } = require('./services/hetzner-power-st
 installFastLocationFallbackModule();
 const { installHetznerReconcilePolicy } = require('./services/hetzner-reconcile-policy');
 
+// HETZNER_API_PRESSURE_REDUCTION_V1
 const DELIVERED_STATUS_REPAIR_MARK = Symbol.for('hamoon.deliveredStatusRepairInstalled');
 
 function applyRuntimeSafetyDefaults() {
