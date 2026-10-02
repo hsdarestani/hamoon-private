@@ -44,6 +44,9 @@ async function run() {
       return { floating_ip: floating.get(String(id)) || null };
     }
     if (method === 'POST' && path.endsWith('/actions/unassign')) {
+      const id = path.split('/')[2];
+      const item = floating.get(String(id));
+      if (item) floating.set(String(id), { ...item, server: null });
       return { action: null };
     }
     if (method === 'DELETE' && path.startsWith('/floating_ips/')) {
@@ -134,7 +137,7 @@ async function run() {
   assert(serviceSource.includes("withTimeout("));
   assert(serviceSource.includes("stage: 'candidate_rejected'"));
   assert(serviceSource.includes("deadlineAt: deadline"));
-  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_CLEANUP_FAILED]"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_CLEANUP_DEFERRED]"));
 
   const apiSource = fs.readFileSync(require.resolve('../Hetzner/hetzner-api.js'), 'utf8');
   assert(apiSource.includes("blockedUntil"));

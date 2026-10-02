@@ -147,11 +147,11 @@ async function createVerifiedAdditionalIpv4(opts) {
   });
   const cleanupCandidate = async created => {
     if (!created?.ip?.id) return false;
-    const cleanupDeadlineAt = Date.now() + 30000;
+    const cleanupDeadlineAt = Date.now() + 20000;
     const cleanupRequest = request || ((providerDc, method, path, body) =>
       hetznerApi.hetznerRequest(providerDc, method, path, body, {
         deadlineAt: cleanupDeadlineAt,
-        timeoutMs: 10000
+        timeoutMs: 8000
       })
     );
     await additionalIps.deleteAdditionalIp({
@@ -159,17 +159,23 @@ async function createVerifiedAdditionalIpv4(opts) {
       serverId,
       floatingIpId: created.ip.id,
       request: cleanupRequest,
-      waitAction: async actionId => {
-        const remainingCleanup = Math.max(0, cleanupDeadlineAt - Date.now());
-        if (remainingCleanup <= 0) throw deadlineError();
-        await cloud.waitHetznerAction(
-          dc,
-          actionId,
-          Math.max(3000, Math.min(12000, remainingCleanup))
-        );
-      }
+      unassignTimeoutMs: Math.max(3000, Math.min(8000, cleanupDeadlineAt - Date.now())),
+      pollDelayMs: 800
     });
     return true;
+  };
+  const cleanupCandidateBestEffort = async created => {
+    try {
+      return await cleanupCandidateBestEffort(created);
+    } catch (cleanupError) {
+      console.warn('[HETZNER_ADDITIONAL_IP_CLEANUP_DEFERRED]', {
+        server_id: String(serverId),
+        floating_ip_id: String(created?.ip?.id || ''),
+        code: cleanupError?.code || null,
+        message: String(cleanupError?.message || cleanupError).slice(0, 160)
+      });
+      return false;
+    }
   };
 
   let server;
@@ -248,7 +254,7 @@ async function createVerifiedAdditionalIpv4(opts) {
       if (!ip) throw Object.assign(new Error('FLOATING_IP_CREATE_FAILED'), { code: 'FLOATING_IP_CREATE_FAILED' });
       const range = changeIp.ipv4Range24(ip);
       if (range && blocked.has(range)) {
-        await cleanupCandidate(created);
+        await cleanupCandidateBestEffort(created);
         continue;
       }
 
@@ -321,7 +327,7 @@ async function createVerifiedAdditionalIpv4(opts) {
         () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
       ).catch(() => {});
       bound = false;
-      await cleanupCandidate(created);
+      await cleanupCandidateBestEffort(created);
     } catch (error) {
       if (created?.ip?.id) {
         if (bound && created?.ip?.ip) {
@@ -333,14 +339,7 @@ async function createVerifiedAdditionalIpv4(opts) {
             () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
           ).catch(() => {});
         }
-        await cleanupCandidate(created).catch(cleanupError => {
-          console.warn('[HETZNER_ADDITIONAL_IP_CLEANUP_FAILED]', {
-            server_id: String(serverId),
-            floating_ip_id: String(created.ip.id),
-            code: cleanupError?.code || null,
-            message: String(cleanupError?.message || cleanupError).slice(0, 160)
-          });
-        });
+        await cleanupCandidateBestEffort(created);
       }
       if (error?.code === 'ADDITIONAL_IP_SEARCH_TIMEOUT') throw error;
       if (error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') throw deadlineError();
