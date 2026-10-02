@@ -33,7 +33,7 @@ async function run() {
         id: 100 + created,
         ip: created === 1 ? '192.0.2.10' : '192.0.3.10',
         type: 'ipv4',
-        server: { id: 42 },
+        server: 42,
         home_location: { name: 'nbg1' }
       };
       floating.set(String(item.id), item);
@@ -42,6 +42,9 @@ async function run() {
     if (method === 'GET' && path.startsWith('/floating_ips/')) {
       const id = path.split('/').pop();
       return { floating_ip: floating.get(String(id)) || null };
+    }
+    if (method === 'POST' && path.endsWith('/actions/unassign')) {
+      return { action: null };
     }
     if (method === 'DELETE' && path.startsWith('/floating_ips/')) {
       const id = path.split('/').pop();
