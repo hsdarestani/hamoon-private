@@ -52,12 +52,19 @@ function sshExec({ host, password, command: cmd, timeoutMs = 30000 }) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     let done = false;
+    let hardTimer = null;
     const finish = error => {
       if (done) return;
       done = true;
+      if (hardTimer) clearTimeout(hardTimer);
       try { conn.end(); } catch (_) {}
       error ? reject(error) : resolve(true);
     };
+
+    hardTimer = setTimeout(() => {
+      finish(Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' }));
+    }, Math.max(1000, Number(timeoutMs) || 30000));
+
     conn.on('ready', () => conn.exec(cmd, (error, stream) => {
       if (error) return finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' }));
       stream.on('error', () => finish(Object.assign(new Error('SSH_COMMAND_FAILED'), { code: 'SSH_COMMAND_FAILED' })));
@@ -70,7 +77,13 @@ function sshExec({ host, password, command: cmd, timeoutMs = 30000 }) {
         (msg.includes('timeout') ? 'SSH_TIMEOUT' : 'SSH_CONNECTION_FAILED');
       finish(Object.assign(new Error(code), { code }));
     });
-    conn.connect({ host, username: 'root', password, readyTimeout: timeoutMs, tryKeyboard: false });
+    conn.connect({
+      host,
+      username: 'root',
+      password,
+      readyTimeout: Math.max(1000, Math.min(Number(timeoutMs) || 30000, 15000)),
+      tryKeyboard: false
+    });
   });
 }
 
@@ -240,13 +253,31 @@ async function createVerifiedAdditionalIpv4(opts) {
       }
 
       if (remaining() <= 0) throw deadlineError();
-      await execSsh({
-        host,
-        password,
-        command: command(bindScript(ip)),
-        timeoutMs: Math.max(5000, Math.min(20000, remaining()))
+      await progress({ stage: 'os_config', attempt, attempts, ip, remaining_ms: remaining() });
+      console.log('[HETZNER_ADDITIONAL_IP_BIND_START]', {
+        server_id: String(serverId),
+        floating_ip_id: String(created.ip.id),
+        ip,
+        attempt
       });
+      const bindTimeoutMs = Math.max(5000, Math.min(20000, remaining()));
+      await withTimeout(
+        execSsh({
+          host,
+          password,
+          command: command(bindScript(ip)),
+          timeoutMs: bindTimeoutMs
+        }),
+        bindTimeoutMs + 1000,
+        () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+      );
       bound = true;
+      console.log('[HETZNER_ADDITIONAL_IP_BIND_SUCCESS]', {
+        server_id: String(serverId),
+        floating_ip_id: String(created.ip.id),
+        ip,
+        attempt
+      });
       await progress({ stage: 'quality_check', attempt, attempts, ip, remaining_ms: remaining() });
       if (remaining() <= 0) throw deadlineError();
       last = await withTimeout(
@@ -284,15 +315,23 @@ async function createVerifiedAdditionalIpv4(opts) {
         remaining_ms: remaining()
       });
 
-      await execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 15000 }).catch(() => {});
+      await withTimeout(
+        execSsh({ host, password, command: command(unbindScript(ip)), timeoutMs: 10000 }),
+        11000,
+        () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+      ).catch(() => {});
       bound = false;
       await cleanupCandidate(created);
     } catch (error) {
       if (created?.ip?.id) {
         if (bound && created?.ip?.ip) {
-          await execSsh({
-            host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 15000
-          }).catch(() => {});
+          await withTimeout(
+            execSsh({
+              host, password, command: command(unbindScript(created.ip.ip)), timeoutMs: 10000
+            }),
+            11000,
+            () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
+          ).catch(() => {});
         }
         await cleanupCandidate(created).catch(cleanupError => {
           console.warn('[HETZNER_ADDITIONAL_IP_CLEANUP_FAILED]', {

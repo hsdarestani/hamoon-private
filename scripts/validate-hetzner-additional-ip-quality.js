@@ -145,6 +145,14 @@ async function run() {
 
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_CREATED]"));
   assert(serviceSource.includes("createdServerId !== String(serverId)"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_START]"));
+  assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_SUCCESS]"));
+  assert(serviceSource.includes("hardTimer = setTimeout"));
+  assert(serviceSource.includes("stage: 'os_config'"));
+
+  const bootstrapSource = fs.readFileSync(require.resolve('../hetzner-additional-ip-quality-bootstrap.js'), 'utf8');
+  assert(bootstrapSource.includes("progress?.stage === 'os_config'"));
+  assert(bootstrapSource.includes("در حال فعال‌سازی آن روی سیستم‌عامل سرور"));
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
   assert(core.includes("const hetznerAdditionalIpCreateLocks = new Map();"));
