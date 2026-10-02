@@ -112,9 +112,9 @@ async function createVerifiedAdditionalIpv4(opts) {
   const startedAt = Date.now();
   const durationMs = clamp(
     maxDurationMs ?? process.env.HETZNER_ADDITIONAL_IP_MAX_DURATION_MS,
-    150000,
+    90000,
     30000,
-    300000
+    180000
   );
   const deadline = startedAt + durationMs;
   const progress = async payload => {
@@ -131,13 +131,15 @@ async function createVerifiedAdditionalIpv4(opts) {
   const location = locationOf(server, dc);
   if (!server?.id || !host || !location) {
     throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
-      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'
+      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
+      cause: Object.assign(new Error('SERVER_METADATA_MISSING'), { code: 'SERVER_METADATA_MISSING' })
     });
   }
   const password = await (getSecret || (id => db.getServerSecret(id, 'root_password')))(serverId);
   if (!password) {
     throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
-      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'
+      code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
+      cause: Object.assign(new Error('ROOT_PASSWORD_MISSING'), { code: 'ROOT_PASSWORD_MISSING' })
     });
   }
 
