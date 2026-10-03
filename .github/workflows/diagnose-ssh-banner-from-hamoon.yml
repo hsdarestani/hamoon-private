@@ -1,0 +1,70 @@
+name: Diagnose SSH Banner From Hamoon
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-ssh-banner-from-hamoon.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare control SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Banner from Hamoon host
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node - <<'NODE'
+          const net=require('net');
+          const host='91.107.151.74';
+          const started=Date.now();
+          const s=net.createConnection({host,port:22});
+          let done=false;
+          const finish=x=>{if(done)return;done=true;try{s.destroy()}catch{};console.log(JSON.stringify({...x,elapsed_ms:Date.now()-started}));};
+          s.setTimeout(10000,()=>finish({ok:false,stage:'banner',code:'timeout'}));
+          s.on('connect',()=>console.log(JSON.stringify({stage:'tcp_connected',elapsed_ms:Date.now()-started})));
+          s.on('data',d=>finish({ok:true,stage:'banner',banner:d.toString('utf8').slice(0,120)}));
+          s.on('error',e=>finish({ok:false,stage:'socket',code:e.code||'error',message:e.message}));
+          NODE
+          echo '--- SYSTEM_SSH_NONE ---'
+          timeout 15 ssh -vv -o BatchMode=yes -o PreferredAuthentications=none -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@91.107.151.74 true 2>&1 | tail -35 || true
+          REMOTE
+      - name: Banner from GitHub runner
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const net=require('net');
+          const host='91.107.151.74';
+          const started=Date.now();
+          const s=net.createConnection({host,port:22});
+          let done=false;
+          const finish=x=>{if(done)return;done=true;try{s.destroy()}catch{};console.log(JSON.stringify({...x,elapsed_ms:Date.now()-started}));};
+          s.setTimeout(10000,()=>finish({ok:false,stage:'banner',code:'timeout'}));
+          s.on('connect',()=>console.log(JSON.stringify({stage:'tcp_connected',elapsed_ms:Date.now()-started})));
+          s.on('data',d=>finish({ok:true,stage:'banner',banner:d.toString('utf8').slice(0,120)}));
+          s.on('error',e=>finish({ok:false,stage:'socket',code:e.code||'error',message:e.message}));
+          NODE
