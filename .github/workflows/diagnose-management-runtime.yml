@@ -141,4 +141,45 @@ jobs:
           echo '=== HETZNER RETRY CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 7 -B 1 "\[HETZNER_API_RETRY\]" | tail -500 || true
 
+
+          echo '=== IP OPS FULL CONTEXT ==='
+          printf '%s\n' "$LOGS" | grep -A 14 -B 2 -E "\\[HETZNER_(CHANGE_IP|ADDITIONAL_IP)" | tail -2200 || true
+
+          echo '=== SSH EXEC COMMAND COMPARISON ==='
+          timeout 45 node - <<'NODE'
+          require('dotenv').config();
+          const {Client}=require('ssh2');
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          const serverId='144775241';
+          function exec(host,password,command,timeoutMs=12000){
+            return new Promise(resolve=>{
+              const conn=new Client(); let done=false; const started=Date.now();
+              const finish=(result)=>{if(done)return;done=true;try{conn.end();}catch{}try{conn.destroy();}catch{}resolve({...result,elapsed_ms:Date.now()-started});};
+              const timer=setTimeout(()=>finish({ok:false,code:'SSH_TIMEOUT'}),timeoutMs);
+              conn.on('ready',()=>conn.exec(command,(err,stream)=>{
+                if(err){clearTimeout(timer);return finish({ok:false,code:'SSH_EXEC_OPEN_FAILED',message:err.message});}
+                let out='',errout='';
+                stream.on('data',d=>out+=d.toString());
+                stream.stderr.on('data',d=>errout+=d.toString());
+                stream.on('close',code=>{clearTimeout(timer);finish({ok:Number(code)===0,code:'EXIT_'+code,stdout:out.slice(-120),stderr:errout.slice(-120)});});
+              }));
+              conn.on('error',e=>{clearTimeout(timer);finish({ok:false,code:/auth/i.test(e.message||'')?'SSH_AUTH_FAILED':'SSH_CONNECTION_FAILED',message:e.message});});
+              conn.connect({host,port:22,username:'root',password,readyTimeout:10000,tryKeyboard:false,keepaliveInterval:5000,keepaliveCountMax:3});
+            });
+          }
+          (async()=>{
+            try{
+              const p=await db.getPurchaseByServerId(serverId);
+              const secret=await db.getServerSecret(serverId,'root_password');
+              const dc=dcs[p.datacenter];
+              const sr=await api.hetznerRequest(dc,'GET','/servers/'+serverId);
+              const host=sr?.server?.public_net?.ipv4?.ip || p.public_ip;
+              const wrapped="printf '%s' '"+Buffer.from('true\n').toString('base64')+"' | base64 -d | /bin/sh";
+              console.log(JSON.stringify({server_id:serverId,host_present:!!host,plain:await exec(host,secret,'true'),wrapped:await exec(host,secret,wrapped)}));
+            } finally { await db.pool.end().catch(()=>{}); }
+          })().catch(e=>{console.log(JSON.stringify({error:e?.code||e?.message||String(e)}));});
+          NODE
+
           REMOTE
