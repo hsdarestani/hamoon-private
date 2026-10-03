@@ -7,6 +7,7 @@ const hetznerApi = require('../Hetzner/hetzner-api');
 const lifecycle = require('./hetzner-lifecycle');
 const additionalIps = require('./hetzner-additional-ips');
 const changeIp = require('./hetzner-change-ip');
+const networkOps = require('./hetzner-network-operation-lock');
 
 const clamp = (v, d, min, max) => {
   const n = Number(v);
@@ -140,7 +141,7 @@ async function serverFor(dc, serverId, request) {
   return hetznerApi.getHetznerServer(dc, serverId);
 }
 
-async function createVerifiedAdditionalIpv4(opts) {
+async function createVerifiedAdditionalIpv4Unlocked(opts) {
   const {
     dc, serverId, telegramId, description, maxIps, request,
     db = require('../db'), getSecret, execSsh = sshExec,
@@ -469,6 +470,20 @@ async function createVerifiedAdditionalIpv4(opts) {
     attempts,
     quality: last
   });
+}
+
+async function createVerifiedAdditionalIpv4(opts) {
+  const lock = networkOps.acquire({
+    dc: opts?.dc,
+    datacenter: opts?.datacenter,
+    serverId: opts?.serverId,
+    operation: 'add_ip'
+  });
+  try {
+    return await createVerifiedAdditionalIpv4Unlocked(opts);
+  } finally {
+    networkOps.release(lock);
+  }
 }
 
 async function deleteVerifiedAdditionalIp(opts) {
