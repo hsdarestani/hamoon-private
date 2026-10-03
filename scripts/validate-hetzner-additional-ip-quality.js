@@ -158,9 +158,10 @@ async function run() {
   assert(serviceSource.includes("stage: 'ssh_wait'"));
   assert(serviceSource.includes("const latestServer = await serverFor(dc, serverId, providerRequest)"));
   assert(serviceSource.includes("if (error?.code === 'SSH_AUTH_FAILED') break;"));
-  assert(serviceSource.includes("const { Client } = require('ssh2');"));
-  assert(serviceSource.includes("keepaliveInterval: 5000"));
-  assert(serviceSource.includes("try { conn.destroy(); } catch (_) {}"));
+  assert(serviceSource.includes("scripts', 'ssh-exec-helper.js"));
+  assert(serviceSource.includes("spawn(process.execPath"));
+  assert(serviceSource.includes("helper_message: 'parent_hard_timeout'"));
+  assert(!serviceSource.includes("const { Client } = require('ssh2');"));
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("stage: 'os_config'"));
 
