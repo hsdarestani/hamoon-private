@@ -273,6 +273,119 @@ async function waitAction(dc, action) {
   return cloud.waitHetznerAction(dc, id, Number(process.env.HETZNER_CHANGE_IP_ACTION_TIMEOUT_MS || 180000));
 }
 
+
+function floatingIpServerId(floatingIp) {
+  const server = floatingIp?.server;
+  const id = server && typeof server === 'object' ? server.id : server;
+  return id == null ? null : String(id);
+}
+
+async function attachedFloatingIpv4s(dc, serverId) {
+  const data = await hetznerApi.hetznerRequest(dc, 'GET', '/floating_ips?per_page=50');
+  return (data?.floating_ips || [])
+    .filter(item => String(item?.type || '').toLowerCase() === 'ipv4')
+    .filter(item => floatingIpServerId(item) === String(serverId))
+    .map(item => ({
+      id: String(item.id),
+      ip: normalizeIpv4(item.ip),
+      description: item.description || null
+    }));
+}
+
+async function waitForFloatingAssignment(dc, floatingIpId, expectedServerId, timeoutMs = 30000) {
+  const deadline = Date.now() + Math.max(3000, Number(timeoutMs) || 30000);
+  let lastServerId = null;
+  while (Date.now() < deadline) {
+    const data = await hetznerApi.hetznerRequest(
+      dc,
+      'GET',
+      `/floating_ips/${encodeURIComponent(floatingIpId)}`
+    );
+    lastServerId = floatingIpServerId(data?.floating_ip);
+    if (
+      (expectedServerId == null && lastServerId == null) ||
+      (expectedServerId != null && lastServerId === String(expectedServerId))
+    ) {
+      return data?.floating_ip || null;
+    }
+    await sleep(700);
+  }
+  const error = new Error('FLOATING_IP_ASSIGNMENT_TIMEOUT');
+  error.code = 'FLOATING_IP_ASSIGNMENT_TIMEOUT';
+  error.floatingIpId = String(floatingIpId);
+  error.expectedServerId = expectedServerId == null ? null : String(expectedServerId);
+  error.lastServerId = lastServerId;
+  throw error;
+}
+
+async function detachFloatingIpv4s(dc, serverId, floatingIps = []) {
+  for (const floating of floatingIps || []) {
+    const id = String(floating?.id || '');
+    if (!id) continue;
+    const current = await hetznerApi.hetznerRequest(
+      dc,
+      'GET',
+      `/floating_ips/${encodeURIComponent(id)}`
+    );
+    const assigned = floatingIpServerId(current?.floating_ip);
+    if (assigned == null) continue;
+    if (assigned !== String(serverId)) {
+      const error = new Error('FLOATING_IP_OWNERSHIP_CHANGED');
+      error.code = 'FLOATING_IP_OWNERSHIP_CHANGED';
+      error.floatingIpId = id;
+      throw error;
+    }
+
+    const action = await hetznerApi.hetznerRequest(
+      dc,
+      'POST',
+      `/floating_ips/${encodeURIComponent(id)}/actions/unassign`,
+      {}
+    );
+    await waitAction(dc, action?.action || action);
+    await waitForFloatingAssignment(dc, id, null);
+    console.log('[HETZNER_CHANGE_IP_FLOATING_DETACHED]', {
+      server_id: String(serverId),
+      floating_ip_id: id,
+      ip: floating?.ip || null
+    });
+  }
+}
+
+async function restoreFloatingIpv4s(dc, serverId, floatingIps = []) {
+  for (const floating of floatingIps || []) {
+    const id = String(floating?.id || '');
+    if (!id) continue;
+    const current = await hetznerApi.hetznerRequest(
+      dc,
+      'GET',
+      `/floating_ips/${encodeURIComponent(id)}`
+    );
+    const assigned = floatingIpServerId(current?.floating_ip);
+    if (assigned === String(serverId)) continue;
+    if (assigned != null && assigned !== String(serverId)) {
+      const error = new Error('FLOATING_IP_OWNERSHIP_CHANGED');
+      error.code = 'FLOATING_IP_OWNERSHIP_CHANGED';
+      error.floatingIpId = id;
+      throw error;
+    }
+
+    const action = await hetznerApi.hetznerRequest(
+      dc,
+      'POST',
+      `/floating_ips/${encodeURIComponent(id)}/actions/assign`,
+      { server: Number(serverId) }
+    );
+    await waitAction(dc, action?.action || action);
+    await waitForFloatingAssignment(dc, id, serverId);
+    console.log('[HETZNER_CHANGE_IP_FLOATING_RESTORED]', {
+      server_id: String(serverId),
+      floating_ip_id: id,
+      ip: floating?.ip || null
+    });
+  }
+}
+
 async function deletePrimaryIpWithRetry(dc, primaryIpId, attempts = 4) {
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -695,7 +808,7 @@ async function waitForNewIp(dc, serverId, expectedIp, timeoutMs = Number(process
   throw error;
 }
 
-async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp }) {
+async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp, floatingIps = [] }) {
   const oldId = oldPrimaryId == null ? null : String(oldPrimaryId);
   const newId = newPrimaryId == null ? null : String(newPrimaryId);
   const refresh = () => hetznerApi.getHetznerServer(dc, serverId).catch(() => null);
@@ -708,6 +821,11 @@ async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp })
 
     raw = await refresh();
     let attachedId = primaryIpv4Id(raw);
+
+    // A Floating IPv4 requires a Primary IPv4 on the server. Detach provider-side
+    // assignments before swapping Primary IPv4s, then restore the exact same
+    // Floating IP resources after the Primary IPv4 is back in place.
+    await detachFloatingIpv4s(dc, serverId, floatingIps);
 
     // Only unassign the candidate if it is still the attached Primary IPv4.
     if (newId && attachedId === newId) {
@@ -738,6 +856,8 @@ async function rollbackSwap(dc, { serverId, oldPrimaryId, newPrimaryId, oldIp })
       }
     }
 
+    await restoreFloatingIpv4s(dc, serverId, floatingIps);
+
     raw = await refresh();
     if (String(raw?.status || '').toLowerCase() !== 'running') {
       await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
@@ -763,6 +883,7 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
   let oldPrimaryId = null;
   let newPrimary = null;
   let oldIp = null;
+  let floatingIps = [];
   let rollbackDone = false;
   try {
     const purchase = await db.getPurchaseForOwner(telegramId, serverId, datacenter);
@@ -782,9 +903,12 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
       dc, telegramId, datacenter, serverId, location, oldIp
     });
 
+    floatingIps = await attachedFloatingIpv4s(dc, serverId);
     await waitAction(dc, await cloud.powerOffHetznerServer(dc, serverId));
+    await detachFloatingIpv4s(dc, serverId, floatingIps);
     await waitAction(dc, await cloud.unassignPrimaryIp(dc, null, oldPrimaryId));
     await waitAction(dc, await cloud.assignPrimaryIp(dc, null, newPrimary.id, serverId));
+    await restoreFloatingIpv4s(dc, serverId, floatingIps);
     await waitAction(dc, await cloud.powerOnHetznerServer(dc, serverId));
 
     const ready = await waitForNewIp(dc, serverId, newPrimary.ip);
@@ -824,7 +948,8 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
           serverId,
           oldPrimaryId,
           newPrimaryId: newPrimary.id,
-          oldIp
+          oldIp,
+          floatingIps
         });
         if (rollbackDone) {
           await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
@@ -854,7 +979,8 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
         serverId,
         oldPrimaryId,
         newPrimaryId: newPrimary.id,
-        oldIp
+        oldIp,
+        floatingIps
       });
       if (rollbackDone) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
       const error = new Error('OLD_PRIMARY_IP_CLEANUP_FAILED');
@@ -880,7 +1006,8 @@ async function changeHetznerPublicIp({ db, dc, telegramId, serverId, datacenter,
         serverId,
         oldPrimaryId,
         newPrimaryId: newPrimary.id,
-        oldIp
+        oldIp,
+        floatingIps
       });
       if (rollbackDone && oldIp) await db.updatePublicIp(telegramId, serverId, datacenter, oldIp).catch(() => {});
     } else if (newPrimary?.id && !oldPrimaryId) {
@@ -943,6 +1070,9 @@ module.exports = {
   reserveUniquePrimaryIpv4,
   waitForNewIp,
   rollbackSwap,
+  attachedFloatingIpv4s,
+  detachFloatingIpv4s,
+  restoreFloatingIpv4s,
   changeHetznerPublicIp,
   userMessageForError,
 };
