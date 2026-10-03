@@ -10,6 +10,7 @@ on:
       - 'services/hetzner-additional-ip-quality.js'
       - 'hetzner-additional-ip-quality-bootstrap.js'
       - 'scripts/reconcile-hetzner-additional-ip-orphans.js'
+      - 'scripts/ssh-exec-helper.js'
       - 'scripts/validate-hetzner-additional-ips.js'
       - 'scripts/validate-hetzner-additional-ip-quality.js'
       - '.github/workflows/repair-hetzner-additional-ips.yml'
@@ -48,6 +49,7 @@ jobs:
           node --check index-core.js
           node --check services/hetzner-additional-ips.js
           node --check services/hetzner-additional-ip-quality.js
+          node --check scripts/ssh-exec-helper.js
           node --check scripts/reconcile-hetzner-additional-ip-orphans.js
           node scripts/validate-hetzner-additional-ips.js
           node scripts/validate-hetzner-additional-ip-quality.js
