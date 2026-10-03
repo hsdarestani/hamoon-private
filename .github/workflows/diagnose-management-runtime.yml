@@ -162,6 +162,29 @@ jobs:
           })().catch(e=>console.log(JSON.stringify({error:e?.code||null,status:e?.status||null,message:e?.message||String(e),data:e?.data||null})));
           NODE
 
+          echo '=== PRIMARY/SERVER ACTION HISTORY ==='
+          timeout 20 node - <<'NODE'
+          require('dotenv').config();
+          const api=require('./Hetzner/hetzner-api');
+          const dcs=require('./datacenters');
+          const slim=a=>({
+            id:a?.id,status:a?.status,command:a?.command,started:a?.started,finished:a?.finished,
+            error:a?.error||null,resources:a?.resources||null
+          });
+          (async()=>{
+            const dc=dcs.hetzner;
+            const [pa,sa]=await Promise.all([
+              api.hetznerRequest(dc,'GET','/primary_ips/137540886/actions?sort=id:desc&per_page=20').catch(e=>({error:{status:e?.status,data:e?.data,message:e?.message}})),
+              api.hetznerRequest(dc,'GET','/servers/144775241/actions?sort=id:desc&per_page=20').catch(e=>({error:{status:e?.status,data:e?.data,message:e?.message}}))
+            ]);
+            console.log(JSON.stringify({
+              primary:(pa?.actions||[]).map(slim),
+              server:(sa?.actions||[]).map(slim),
+              primary_error:pa?.error||null,server_error:sa?.error||null
+            },null,2));
+          })().catch(e=>console.log(JSON.stringify({error:e?.code||e?.message||String(e)})));
+          NODE
+
           echo '=== SSH EXEC COMMAND COMPARISON ==='
           timeout 45 node - <<'NODE'
           require('dotenv').config();
