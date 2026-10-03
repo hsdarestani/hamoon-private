@@ -150,9 +150,9 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
   const startedAt = Date.now();
   const durationMs = clamp(
     maxDurationMs ?? process.env.HETZNER_ADDITIONAL_IP_MAX_DURATION_MS,
-    90000,
-    30000,
-    180000
+    300000,
+    60000,
+    600000
   );
   const deadline = startedAt + durationMs;
   const providerRequest = request || ((providerDc, method, path, body) =>
@@ -210,7 +210,7 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
     if (error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') throw deadlineError();
     throw error;
   }
-  const host = primaryIp(server);
+  let host = primaryIp(server);
   const location = locationOf(server, dc);
   if (!server?.id || !host || !location) {
     throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
@@ -226,30 +226,61 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
     });
   }
 
-  // Do not create a new Floating IP until we know there is a usable SSH path
-  // into the server. If the primary IPv4 is filtered, an already configured
-  // Floating IPv4 on the same server is a valid management fallback.
-  const existingAdditional = await additionalIps.listAdditionalIps({
-    dc,
-    serverId,
-    request: providerRequest
-  }).catch(() => []);
-  const sshHosts = [...new Set([
-    host,
-    ...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)
-  ])];
+  // Do not create or bill a new Floating IP until the VM is actually ready
+  // for authenticated SSH. A Primary-IP change can report "running" several
+  // minutes before DHCP/network/sshd inside the guest is fully usable.
+  // Refresh provider state on every round so we never keep probing a stale
+  // Primary IPv4 after a recent Change-IP operation.
   let sshHost = null;
   let lastSshError = null;
-  // SSH can be briefly unavailable after provider/network operations. Give the existing server
-  // a few bounded retries before failing the purchase flow. This remains inside the overall
-  // additional-IP deadline and avoids false failures from short SSH stalls.
-  const maxProbeRounds = 4;
+  let probeRound = 0;
+  const sshReadyWindowMs = clamp(
+    process.env.HETZNER_ADDITIONAL_IP_SSH_READY_WINDOW_MS,
+    210000,
+    30000,
+    300000
+  );
+  const sshReadyDeadline = Math.min(deadline, Date.now() + sshReadyWindowMs);
 
-  for (let round = 1; round <= maxProbeRounds && !sshHost; round += 1) {
-    const orderedHosts = round === 1 ? sshHosts : [...sshHosts].reverse();
-    for (const candidateHost of orderedHosts) {
-      const probeTimeoutMs = Math.max(4000, Math.min(12000, remaining()));
-      if (probeTimeoutMs <= 0) throw deadlineError();
+  while (!sshHost && Date.now() < sshReadyDeadline && remaining() > 0) {
+    probeRound += 1;
+
+    try {
+      const latestServer = await serverFor(dc, serverId, providerRequest);
+      if (latestServer?.id) {
+        server = latestServer;
+        host = primaryIp(latestServer) || host;
+      }
+    } catch (error) {
+      if (error?.code === 'HETZNER_API_DEADLINE_EXCEEDED') throw deadlineError();
+    }
+
+    const existingAdditional = await additionalIps.listAdditionalIps({
+      dc,
+      serverId,
+      request: providerRequest
+    }).catch(() => []);
+
+    const sshHosts = [...new Set([
+      host,
+      ...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)
+    ].filter(Boolean))];
+
+    if (probeRound === 1 || probeRound % 4 === 0) {
+      await progress({
+        stage: 'ssh_wait',
+        round: probeRound,
+        primary_ip: host,
+        candidate_count: sshHosts.length,
+        remaining_ms: Math.max(0, sshReadyDeadline - Date.now())
+      });
+    }
+
+    for (const candidateHost of sshHosts) {
+      const readinessRemaining = Math.max(0, sshReadyDeadline - Date.now());
+      const probeTimeoutMs = Math.min(7000, remaining(), readinessRemaining);
+      if (probeTimeoutMs < 1500) break;
+
       try {
         await withTimeout(
           execSsh({
@@ -258,30 +289,39 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
             command: command('true\n'),
             timeoutMs: probeTimeoutMs
           }),
-          probeTimeoutMs + 1000,
+          probeTimeoutMs + 750,
           () => Object.assign(new Error('SSH_TIMEOUT'), { code: 'SSH_TIMEOUT' })
         );
         sshHost = candidateHost;
         console.log('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]', {
           server_id: String(serverId),
+          host: candidateHost,
+          primary_ip: host,
           fallback: candidateHost !== host,
           candidate_count: sshHosts.length,
-          round
+          round: probeRound
         });
         break;
       } catch (error) {
         lastSshError = error;
         console.warn('[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]', {
           server_id: String(serverId),
+          host: candidateHost,
+          primary_ip: host,
           fallback: candidateHost !== host,
           code: error?.code || null,
-          round
+          round: probeRound
         });
+
+        // Authentication errors are not boot-readiness races. Retrying them for
+        // minutes only delays the useful error shown to the customer.
+        if (error?.code === 'SSH_AUTH_FAILED') break;
       }
     }
 
-    if (!sshHost && round < maxProbeRounds && remaining() > 1500) {
-      await sleep(1500);
+    if (lastSshError?.code === 'SSH_AUTH_FAILED') break;
+    if (!sshHost && Date.now() < sshReadyDeadline && remaining() > 3500) {
+      await sleep(3000);
     }
   }
 
@@ -289,7 +329,8 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
     const cause = lastSshError || Object.assign(new Error('SSH_CONNECTION_FAILED'), { code: 'SSH_CONNECTION_FAILED' });
     throw Object.assign(new Error('ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE'), {
       code: 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE',
-      cause
+      cause,
+      waited_ms: Math.min(sshReadyWindowMs, Date.now() - startedAt)
     });
   }
 
