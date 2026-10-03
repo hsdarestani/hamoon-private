@@ -145,6 +145,23 @@ jobs:
           echo '=== IP OPS FULL CONTEXT ==='
           printf '%s\n' "$LOGS" | grep -A 14 -B 2 -E "\\[HETZNER_(CHANGE_IP|ADDITIONAL_IP)" | tail -2200 || true
 
+          echo '=== PRIMARY IP 137540886 STATE ==='
+          timeout 20 node - <<'NODE'
+          require('dotenv').config();
+          const api=require('./Hetzner/hetzner-api');
+          const dcs=require('./datacenters');
+          (async()=>{
+            const dc=dcs.hetzner;
+            const p=await api.hetznerRequest(dc,'GET','/primary_ips/137540886');
+            const x=p?.primary_ip||null;
+            console.log(JSON.stringify(x?{
+              id:x.id,ip:x.ip,type:x.type,assignee_id:x.assignee_id,
+              assignee_type:x.assignee_type,auto_delete:x.auto_delete,
+              blocked:x.blocked,protection:x.protection,location:x.location?.name||x.location||null
+            }:null));
+          })().catch(e=>console.log(JSON.stringify({error:e?.code||null,status:e?.status||null,message:e?.message||String(e),data:e?.data||null})));
+          NODE
+
           echo '=== SSH EXEC COMMAND COMPARISON ==='
           timeout 45 node - <<'NODE'
           require('dotenv').config();
