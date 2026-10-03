@@ -1,0 +1,92 @@
+name: Verify Additional IP SSH Helper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-additional-ip-ssh-helper.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Verify helper on production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          APP_PATH="$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          cd "$APP_PATH"
+          echo "PRODUCTION_HEAD=$(git rev-parse HEAD)"
+          grep -q "ssh-exec-helper.js" services/hetzner-additional-ip-quality.js
+          grep -q "spawn(process.execPath" services/hetzner-additional-ip-quality.js
+          if grep -q "const { Client } = require('ssh2');" services/hetzner-additional-ip-quality.js; then
+            echo "DIRECT_SSH_REGRESSION=true"
+            exit 1
+          fi
+          timeout 40 node - <<'NODE'
+          require('dotenv').config();
+          const {spawn}=require('child_process');
+          const path=require('path');
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          const serverId='144775241';
+          function runHelper(payload){
+            return new Promise(resolve=>{
+              const child=spawn(process.execPath,[path.join(process.cwd(),'scripts','ssh-exec-helper.js')],{stdio:['pipe','pipe','pipe']});
+              let out='',err='';
+              const started=Date.now();
+              child.stdout.on('data',d=>out+=d.toString());
+              child.stderr.on('data',d=>err+=d.toString());
+              child.on('close',code=>{
+                let result=null;
+                try{result=JSON.parse(out.trim().split(/\r?\n/).filter(Boolean).pop()||'{}');}catch{}
+                resolve({exit:code,result,stderr:err.slice(-160),elapsed_ms:Date.now()-started});
+              });
+              child.stdin.end(JSON.stringify(payload));
+            });
+          }
+          (async()=>{
+            try{
+              const p=await db.getPurchaseByServerId(serverId);
+              if(!p) throw new Error('PURCHASE_NOT_FOUND');
+              const secret=await db.getServerSecret(serverId,'root_password');
+              const dc=dcs[p.datacenter];
+              const sr=await api.hetznerRequest(dc,'GET','/servers/'+serverId);
+              const host=sr?.server?.public_net?.ipv4?.ip || p.public_ip;
+              const wrapped="printf '%s' '"+Buffer.from('true\n').toString('base64')+"' | base64 -d | /bin/sh";
+              const helper=await runHelper({host,password:secret,command:wrapped,timeoutMs:12000});
+              console.log(JSON.stringify({server_id:serverId,host,helper}));
+              if(helper.exit!==0 || !helper.result?.ok) process.exitCode=2;
+            } finally {
+              await db.pool.end().catch(()=>{});
+            }
+          })().catch(e=>{
+            console.error(JSON.stringify({error:e?.code||e?.message||String(e)}));
+            process.exitCode=1;
+          });
+          NODE
+          REMOTE
