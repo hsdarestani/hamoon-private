@@ -3,6 +3,7 @@
 const net = require('net');
 const base = require('./hetzner-change-ip');
 const lifecycle = require('./hetzner-lifecycle');
+const networkOps = require('./hetzner-network-operation-lock');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -165,7 +166,7 @@ async function verifyCleanCandidate(ip, args = {}) {
   };
 }
 
-async function changeHetznerPublicIp(args) {
+async function changeHetznerPublicIpUnlocked(args) {
   // Manual Change-IP operates on an already-delivered VM. Unlike initial
   // provisioning, it cannot safely rebuild the customer's machine in another
   // Hetzner location just to obtain a different address. Bound the number of
@@ -283,6 +284,20 @@ async function changeHetznerPublicIp(args) {
   error.verification = lastVerification;
   error.attempts = maxAttempts;
   throw error;
+}
+
+async function changeHetznerPublicIp(args) {
+  const lock = networkOps.acquire({
+    dc: args?.dc,
+    datacenter: args?.datacenter,
+    serverId: args?.serverId,
+    operation: 'change_ip'
+  });
+  try {
+    return await changeHetznerPublicIpUnlocked(args);
+  } finally {
+    networkOps.release(lock);
+  }
 }
 
 function userMessageForError(error) {
