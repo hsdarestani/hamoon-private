@@ -1,0 +1,107 @@
+name: Diagnose Additional IP SSH Path Now
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-add-ip-path-now.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare control SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
+          chmod 600 ~/.ssh/hamoon_server_key
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Diagnose from Hamoon production host
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/hamoon_server_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          timeout 80 node - <<'NODE'
+          require('dotenv').config();
+          const net=require('net');
+          const {spawn}=require('child_process');
+          const path=require('path');
+          const db=require('./db');
+          const dcs=require('./datacenters');
+          const api=require('./Hetzner/hetzner-api');
+          const serverId='144775241';
+          const tcp=(host,timeoutMs=4000)=>new Promise(resolve=>{
+            const started=Date.now();
+            const s=net.createConnection({host,port:22});
+            let done=false;
+            const finish=(ok,code)=>{if(done)return;done=true;try{s.destroy();}catch{};resolve({ok,code,elapsed_ms:Date.now()-started});};
+            s.setTimeout(timeoutMs,()=>finish(false,'timeout'));
+            s.once('connect',()=>finish(true,'connect'));
+            s.once('error',e=>finish(false,e.code||'error'));
+          });
+          const helper=(host,password)=>new Promise(resolve=>{
+            const child=spawn(process.execPath,[path.join(process.cwd(),'scripts','ssh-exec-helper.js')],{stdio:['pipe','pipe','pipe']});
+            let out='',err=''; const started=Date.now();
+            child.stdout.on('data',d=>out+=d.toString());
+            child.stderr.on('data',d=>err+=d.toString());
+            child.on('close',code=>{let result=null;try{result=JSON.parse(out.trim().split(/\r?\n/).filter(Boolean).pop()||'{}')}catch{};resolve({exit:code,result,stderr:err.slice(-120),elapsed_ms:Date.now()-started});});
+            child.stdin.end(JSON.stringify({host,password,command:'true',timeoutMs:8000}));
+          });
+          (async()=>{
+            try{
+              const p=await db.getPurchaseByServerId(serverId);
+              const dc=dcs[p.datacenter];
+              const secret=await db.getServerSecret(serverId,'root_password');
+              const sr=await api.hetznerRequest(dc,'GET','/servers/'+serverId);
+              const s=sr.server;
+              const primary=s?.public_net?.ipv4?.ip||p.public_ip;
+              const floatingData=await api.hetznerRequest(dc,'GET','/floating_ips?per_page=50');
+              const floats=(floatingData.floating_ips||[]).filter(x=>String(x?.server?.id||x?.server||'')===serverId).map(x=>x.ip);
+              const fw=await api.hetznerRequest(dc,'GET','/firewalls?bound_to=server:'+serverId+'&per_page=50').catch(e=>({error:e.message}));
+              const hosts=[primary,...floats].filter(Boolean);
+              const probes={};
+              for(const host of hosts){
+                probes[host]=[];
+                for(let i=0;i<6;i++){probes[host].push(await tcp(host)); await new Promise(r=>setTimeout(r,700));}
+              }
+              const ssh={};
+              for(const host of hosts) ssh[host]=await helper(host,secret);
+              console.log(JSON.stringify({
+                production_head:require('child_process').execSync('git rev-parse HEAD').toString().trim(),
+                server:{id:serverId,status:s?.status,primary,floating:floats,locked:s?.locked,rescue:s?.rescue_enabled},
+                firewalls:Array.isArray(fw.firewalls)?fw.firewalls.map(x=>({id:x.id,name:x.name,rules:x.rules})):fw,
+                tcp:probes,ssh
+              },null,2));
+            } finally { await db.pool.end().catch(()=>{}); }
+          })().catch(e=>{console.error(JSON.stringify({error:e?.code||e?.message||String(e)}));process.exitCode=1;});
+          NODE
+          REMOTE
+      - name: Probe target from GitHub runner
+        shell: bash
+        run: |
+          set +e
+          for i in 1 2 3 4 5; do
+            if timeout 5 bash -c '</dev/tcp/91.107.151.74/22' 2>/dev/null; then
+              echo "RUNNER_TCP_22_$i=ok"
+            else
+              echo "RUNNER_TCP_22_$i=failed"
+            fi
+            sleep 1
+          done
