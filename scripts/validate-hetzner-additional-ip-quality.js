@@ -153,7 +153,11 @@ async function run() {
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_SELECTED]"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_SSH_ROUTE_FAILED]"));
   assert(serviceSource.includes("[HETZNER_ADDITIONAL_IP_BIND_RETRY]"));
-  assert(serviceSource.includes("const maxProbeRounds = 4;"));
+  assert(serviceSource.includes("HETZNER_ADDITIONAL_IP_SSH_READY_WINDOW_MS"));
+  assert(serviceSource.includes("while (!sshHost && Date.now() < sshReadyDeadline"));
+  assert(serviceSource.includes("stage: 'ssh_wait'"));
+  assert(serviceSource.includes("const latestServer = await serverFor(dc, serverId, providerRequest)"));
+  assert(serviceSource.includes("if (error?.code === 'SSH_AUTH_FAILED') break;"));
   assert(serviceSource.includes("const { Client } = require('ssh2');"));
   assert(serviceSource.includes("keepaliveInterval: 5000"));
   assert(serviceSource.includes("try { conn.destroy(); } catch (_) {}"));
