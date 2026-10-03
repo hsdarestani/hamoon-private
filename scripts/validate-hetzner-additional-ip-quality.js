@@ -165,6 +165,13 @@ async function run() {
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("stage: 'os_config'"));
 
+  const helperSource = fs.readFileSync(require.resolve('./ssh-exec-helper.js'), 'utf8');
+  assert(helperSource.includes("fs.existsSync('/usr/bin/ssh')"));
+  assert(helperSource.includes("SSH_ASKPASS_REQUIRE: 'force'"));
+  assert(helperSource.includes("HAMOON_ASKPASS_SOCKET"));
+  assert(helperSource.includes("PreferredAuthentications=password,keyboard-interactive"));
+  assert(!helperSource.includes("require('ssh2')"));
+
   const bootstrapSource = fs.readFileSync(require.resolve('../hetzner-additional-ip-quality-bootstrap.js'), 'utf8');
   assert(bootstrapSource.includes("progress?.stage === 'os_config'"));
   assert(bootstrapSource.includes("در حال فعال‌سازی آن روی سیستم‌عامل سرور"));
