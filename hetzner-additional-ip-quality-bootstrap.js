@@ -21,6 +21,30 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
 
   source = once(
     source,
+    "async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfig) {\n  const lockKey",
+    "async function handleHetznerAdditionalIpCreate(chatId, userId, serverId, dcConfig) {\n  let additionalIpProgressMessage = null;\n  const lockKey",
+    'progress state'
+  );
+
+  source = once(
+    source,
+    [
+      "    await sendMessage(",
+      "      chatId,",
+      "      '⏳ درخواست ثبت شد. در حال ساخت، تنظیم و تست IP از ایران و خارج هستم. پیدا کردن IP سالم ممکن است چند دقیقه طول بکشد؛ تا اعلام نتیجه دوباره روی پرداخت نزنید.'",
+      "    );"
+    ].join('\n'),
+    [
+      "    additionalIpProgressMessage = await sendMessage(",
+      "      chatId,",
+      "      '⏳ در حال پیدا کردن IP سالم هستم. تست سریع انجام می‌شود و فقط کاندید مناسب وارد بررسی کامل خواهد شد.'",
+      "    );"
+    ].join('\n'),
+    'progress message'
+  );
+
+  source = once(
+    source,
     [
       '    const result = await additionalIps.addAdditionalIpv4({',
       '      dc: dcConfig,',
@@ -34,32 +58,12 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       '      serverId,',
       '      telegramId: userId,',
       '      description: `HamoonCloud user ${userId} server ${serverId}`,',
-      '      maxAttempts: 8,',
+      '      maxAttempts: 6,',
       '      onProgress: async progress => {',
-      "        if (progress?.stage === 'attempt_start') {",
-      '          const label = Number(progress.attempt || 1);',
-      '          const total = Number(progress.attempts || 1);',
-      "          await sendMessage(chatId, `🔄 در حال آماده‌سازی IP کاندید ${label} از ${total}...`);",
-      '        }',
-      "        if (progress?.stage === 'os_config') {",
-      '          const label = Number(progress.attempt || 1);',
-      '          const total = Number(progress.attempts || 1);',
-      "          await sendMessage(chatId, `🛠 IP کاندید ${label} از ${total} ساخته شد. در حال فعال‌سازی آن روی سیستم‌عامل سرور...`);",
-      '        }',
-      "        if (progress?.stage === 'quality_check') {",
-      '          const label = Number(progress.attempt || 1);',
-      '          const total = Number(progress.attempts || 1);',
-      "          await sendMessage(chatId, `🔎 IP کاندید ${label} از ${total} روی سرور فعال شد و الان دسترسی آن از ایران و خارج در حال تست است...`);",
-      '        }',
-      "        if (progress?.stage === 'candidate_rejected' && Number(progress.attempt || 0) < Number(progress.attempts || 0)) {",
-      '          const next = Number(progress.attempt || 0) + 1;',
-      '          const total = Number(progress.attempts || 1);',
-      '          const ir = progress?.iran || {};',
-      '          const gl = progress?.global || {};',
-      '          const irText = Number(ir.selected || 0) ? `ایران ${Number(ir.success || 0)}/${Number(ir.selected || 0)}` : `ایران نامشخص`;',
-      '          const glText = Number(gl.selected || 0) ? `خارج ${Number(gl.success || 0)}/${Number(gl.selected || 0)}` : `خارج نامشخص`;',
-      "          await sendMessage(chatId, `🔄 این IP مناسب نبود (${irText}، ${glText}). در حال امتحان IP ${next} از ${total}...`);",
-      '        }',
+      "        if (progress?.stage !== 'attempt_start') return;",
+      '        const label = Number(progress.attempt || 1);',
+      '        const total = Number(progress.attempts || 1);',
+      "        await editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, `⏳ در حال جستجوی IP سالم... کاندید ${label} از ${total}`);",
       '      }',
       '    });'
     ].join('\n'),
@@ -83,7 +87,7 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
   source = once(
     source,
     "    return sendMessage(chatId, `✅ IPv4 اضافه با موفقیت ساخته و به سرور متصل شد:\\n${result.ip.ip}\\n💳 مبلغ ${pricing.amount.toLocaleString('fa-IR')} تومان از کیف پول کسر شد (اعتبار ۳۰ روز).\\n\\n⚠️ برای قابل استفاده شدن، این Floating IP را داخل سیستم‌عامل سرور هم پیکربندی کنید.`);",
-    "    return sendMessage(chatId, `✅ IPv4 اضافه ساخته شد و تست دسترسی از ایران را پاس کرد:\\n${result.ip.ip}\\n💳 مبلغ ${pricing.amount.toLocaleString('fa-IR')} تومان از کیف پول کسر شد (اعتبار ۳۰ روز).\\n\\n✅ IP روی سیستم‌عامل سرور هم فعال شد. در صورت ریبوت سرور، تنظیم persistent شبکه باید حفظ/بررسی شود.`);",
+    "    return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, `✅ IPv4 اضافه ساخته شد و تست دسترسی از ایران و خارج را پاس کرد:\\n${result.ip.ip}\\n💳 مبلغ ${pricing.amount.toLocaleString('fa-IR')} تومان از کیف پول کسر شد (اعتبار ۳۰ روز).\\n\\n✅ IP روی سیستم‌عامل سرور هم فعال شد.`);",
     'success text'
   );
 
@@ -93,17 +97,17 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       "    if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {",
       "      return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);",
       '    }',
-      "    return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
+      "    return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
     ].join('\n'),
     [
       "    if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {",
       "      return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);",
       '    }',
       "    if (error.code === 'ADDITIONAL_IP_SEARCH_TIMEOUT') {",
-      "      return sendMessage(chatId, '⏱ در بازه زمانی تعیین‌شده IP سالم و تأییدشده پیدا نشد. عملیات خودکار متوقف شد، IP موقت پاک شد و هیچ هزینه‌ای کسر نشد. دوباره تلاش کنید.');",
+      "      return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '⏱ در بازه زمانی تعیین‌شده IP سالم و تأییدشده پیدا نشد. عملیات متوقف شد و هیچ هزینه‌ای کسر نشد. دوباره تلاش کنید.');",
       '    }',
       "    if (error.code === 'NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE') {",
-      "      return sendMessage(chatId, '❌ چند IPv4 بررسی شد اما فعلاً IP سالم و تأییدشده‌ای پیدا نشد. هیچ IP تأییدنشده‌ای ثبت نشد و هزینه‌ای هم کسر نشد.');",
+      "      return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ چند IPv4 از چند pool بررسی شد اما فعلاً IP سالم پیدا نشد. هیچ IP تأییدنشده‌ای ثبت نشد و هزینه‌ای هم کسر نشد.');",
       '    }',
       "    if (error.code === 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE') {",
       "      const cause = error?.cause?.code || '';",
@@ -111,9 +115,9 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       "      if (cause === 'SERVER_METADATA_MISSING') return sendMessage(chatId, '❌ اطلاعات شبکه سرور از Hetzner کامل دریافت نشد. عملیات متوقف شد و هزینه‌ای کسر نشد.');",
       "      if (cause === 'SSH_AUTH_FAILED') return sendMessage(chatId, '❌ اتصال SSH با رمز ذخیره‌شده تأیید نشد. یک بار از مدیریت سرور ریست پسورد را انجام دهید و سپس دوباره افزودن IP را بزنید. هزینه‌ای کسر نشد.');",
       "      if (cause === 'SSH_TIMEOUT' || cause === 'SSH_CONNECTION_FAILED') return sendMessage(chatId, '❌ اتصال SSH به سرور برقرار نشد. روشن بودن سرور و دسترسی پورت ۲۲ را بررسی کنید. هزینه‌ای کسر نشد.');",
-      "      return sendMessage(chatId, '❌ تست خودکار IP روی سرور کامل نشد؛ برای جلوگیری از تحویل IP تأییدنشده عملیات متوقف شد و هزینه‌ای کسر نشد.');",
+      "      return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ تست خودکار IP کامل نشد؛ برای جلوگیری از تحویل IP تأییدنشده عملیات متوقف شد و هزینه‌ای کسر نشد.');",
       '    }',
-      "    return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
+      "    return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
     ].join('\n'),
     'errors'
   );
