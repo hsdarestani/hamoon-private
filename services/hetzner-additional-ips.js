@@ -88,7 +88,7 @@ async function listAdditionalIps({ dc, serverId, request }) {
   return (data?.floating_ips || []).filter(ip => belongsToServer(ip, serverId)).map(normalizeFloatingIp);
 }
 
-async function addAdditionalIpv4({ dc, serverId, description, maxIps, request }) {
+async function addAdditionalIpv4({ dc, serverId, description, maxIps, request, homeLocation }) {
   const call = request || ((...args) => require('../Hetzner/hetzner-api').hetznerRequest(...args));
   const serverData = await call(dc, 'GET', `/servers/${encodeURIComponent(serverId)}`);
   if (!serverData?.server?.id) {
@@ -111,17 +111,49 @@ async function addAdditionalIpv4({ dc, serverId, description, maxIps, request })
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 100);
-  const data = await call(dc, 'POST', '/floating_ips', {
+  const requestedHomeLocation = String(homeLocation || '').trim().toLowerCase();
+  if (!requestedHomeLocation) {
+    const data = await call(dc, 'POST', '/floating_ips', {
+      type: 'ipv4',
+      server: Number(serverId),
+      description: safeDescription || `HamoonCloud server ${serverId}`
+    });
+    if (!data?.floating_ip?.id || !data?.floating_ip?.ip) {
+      const error = new Error('FLOATING_IP_CREATE_FAILED');
+      error.code = 'FLOATING_IP_CREATE_FAILED';
+      throw error;
+    }
+    return { ip: normalizeFloatingIp(data.floating_ip), action: data.action || null };
+  }
+
+  const created = await call(dc, 'POST', '/floating_ips', {
     type: 'ipv4',
-    server: Number(serverId),
+    home_location: requestedHomeLocation,
     description: safeDescription || `HamoonCloud server ${serverId}`
   });
-  if (!data?.floating_ip?.id || !data?.floating_ip?.ip) {
+  if (!created?.floating_ip?.id || !created?.floating_ip?.ip) {
     const error = new Error('FLOATING_IP_CREATE_FAILED');
     error.code = 'FLOATING_IP_CREATE_FAILED';
     throw error;
   }
-  return { ip: normalizeFloatingIp(data.floating_ip), action: data.action || null };
+
+  const floatingId = encodeURIComponent(created.floating_ip.id);
+  try {
+    const assigned = await retryProviderLocked(
+      () => call(dc, 'POST', `/floating_ips/${floatingId}/actions/assign`, {
+        server: Number(serverId)
+      }),
+      { attempts: 5, baseDelayMs: 700, maxDelayMs: 2500 }
+    );
+    return {
+      ip: normalizeFloatingIp(created.floating_ip),
+      action: assigned?.action || assigned || null,
+      requested_home_location: requestedHomeLocation
+    };
+  } catch (error) {
+    await call(dc, 'DELETE', `/floating_ips/${floatingId}`).catch(() => {});
+    throw error;
+  }
 }
 
 async function deleteAdditionalIp({
