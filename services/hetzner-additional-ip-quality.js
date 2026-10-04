@@ -353,11 +353,16 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
 
   const attempts = clamp(maxAttempts ?? process.env.HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS, 8, 1, 12);
   const blocked = await changeIp.recentBadRanges(db, { location }).catch(() => new Set());
+  const seenIps = new Set();
+  const seenRanges = new Set();
+  const maxProviderDraws = Math.max(attempts, attempts * 4);
+  let providerDraws = 0;
   let last = null;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (remaining() <= 0) throw deadlineError();
-    await progress({ stage: 'attempt_start', attempt, attempts, remaining_ms: remaining() });
+    providerDraws += 1;
+    if (providerDraws > maxProviderDraws) break;
 
     let created = null;
     let bound = false;
@@ -403,12 +408,27 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
       const ip = ipv4(created?.ip?.ip);
       if (!ip) throw Object.assign(new Error('FLOATING_IP_CREATE_FAILED'), { code: 'FLOATING_IP_CREATE_FAILED' });
       const range = changeIp.ipv4Range24(ip);
-      if (range && blocked.has(range)) {
+      const duplicateInRequest = seenIps.has(ip) || Boolean(range && seenRanges.has(range));
+      const knownBadRange = Boolean(range && blocked.has(range));
+      if (duplicateInRequest || knownBadRange) {
+        console.warn('[HETZNER_ADDITIONAL_IP_CANDIDATE_SKIPPED]', {
+          server_id: String(serverId),
+          attempt,
+          provider_draw: providerDraws,
+          ip,
+          range: range || null,
+          reason: duplicateInRequest ? 'duplicate_in_request' : 'known_bad_range'
+        });
         await cleanupCandidateBestEffort(created);
+        attempt -= 1;
         continue;
       }
 
+      seenIps.add(ip);
+      if (range) seenRanges.add(range);
+
       if (remaining() <= 0) throw deadlineError();
+      await progress({ stage: 'attempt_start', attempt, attempts, ip, remaining_ms: remaining() });
       await progress({ stage: 'os_config', attempt, attempts, ip, remaining_ms: remaining() });
       console.log('[HETZNER_ADDITIONAL_IP_BIND_START]', {
         server_id: String(serverId),
@@ -477,9 +497,14 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
         }).catch(() => {});
         if (range) blocked.add(range);
       }
+      const qualitySummary = lifecycle.qualitySummary(last);
       console.warn('[HETZNER_ADDITIONAL_IP_QUALITY_REJECTED]', {
         server_id: String(serverId), attempt, ip, location,
-        definitive: Boolean(last?.definitive), reason: last?.reason || 'unknown'
+        definitive: Boolean(last?.definitive),
+        reason: last?.reason || 'unknown',
+        quality: qualitySummary,
+        iran: last?.iran || null,
+        global: last?.global || null
       });
       await progress({
         stage: 'candidate_rejected',
@@ -487,6 +512,9 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
         attempts,
         ip,
         reason: last?.reason || 'unknown',
+        quality_summary: qualitySummary,
+        iran: last?.iran || null,
+        global: last?.global || null,
         remaining_ms: remaining()
       });
 
