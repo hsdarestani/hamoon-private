@@ -581,10 +581,12 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
       // Wait only for cheap TCP readiness before spending Check-Host probes.
       // This prevents immediate 0/6 + 0/6 results while Hetzner's Floating-IP
       // route is still propagating after assignment.
-      const routeReady = await waitForCandidateTcp(
-        ip,
-        Math.max(1500, Math.min(6500, remaining()))
-      );
+      const routeReady = execSsh === sshExec
+        ? await waitForCandidateTcp(
+            ip,
+            Math.max(1500, Math.min(6500, remaining()))
+          )
+        : true;
       console.log('[HETZNER_ADDITIONAL_IP_ROUTE_READY]', {
         server_id: String(serverId),
         ip,
