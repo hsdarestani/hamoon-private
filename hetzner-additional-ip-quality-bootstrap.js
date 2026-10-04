@@ -97,7 +97,7 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       "    if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {",
       "      return sendMessage(chatId, `❌ سقف IP اضافه این سرور (حداکثر ${error.limit}) پر شده است.`);",
       '    }',
-      "    return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
+      "    return sendMessage(chatId, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
     ].join('\n'),
     [
       "    if (error.code === 'ADDITIONAL_IP_LIMIT_REACHED') {",
@@ -111,10 +111,10 @@ function applyHetznerAdditionalIpQualityPatches(coreSource) {
       '    }',
       "    if (error.code === 'ADDITIONAL_IP_QUALITY_VERIFY_UNAVAILABLE') {",
       "      const cause = error?.cause?.code || '';",
-      "      if (cause === 'ROOT_PASSWORD_MISSING') return sendMessage(chatId, '❌ رمز روت ذخیره‌شده برای این سرور پیدا نشد. از مدیریت سرور یک بار ریست پسورد را بزنید و سپس افزودن IP را دوباره امتحان کنید. هزینه‌ای کسر نشد.');",
-      "      if (cause === 'SERVER_METADATA_MISSING') return sendMessage(chatId, '❌ اطلاعات شبکه سرور از Hetzner کامل دریافت نشد. عملیات متوقف شد و هزینه‌ای کسر نشد.');",
-      "      if (cause === 'SSH_AUTH_FAILED') return sendMessage(chatId, '❌ اتصال SSH با رمز ذخیره‌شده تأیید نشد. یک بار از مدیریت سرور ریست پسورد را انجام دهید و سپس دوباره افزودن IP را بزنید. هزینه‌ای کسر نشد.');",
-      "      if (cause === 'SSH_TIMEOUT' || cause === 'SSH_CONNECTION_FAILED') return sendMessage(chatId, '❌ اتصال SSH به سرور برقرار نشد. روشن بودن سرور و دسترسی پورت ۲۲ را بررسی کنید. هزینه‌ای کسر نشد.');",
+      "      if (cause === 'ROOT_PASSWORD_MISSING') return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ رمز روت ذخیره‌شده برای این سرور پیدا نشد. از مدیریت سرور یک بار ریست پسورد را بزنید و سپس افزودن IP را دوباره امتحان کنید. هزینه‌ای کسر نشد.');",
+      "      if (cause === 'SERVER_METADATA_MISSING') return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ اطلاعات شبکه سرور از Hetzner کامل دریافت نشد. عملیات متوقف شد و هزینه‌ای کسر نشد.');",
+      "      if (cause === 'SSH_AUTH_FAILED') return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ اتصال SSH با رمز ذخیره‌شده تأیید نشد. یک بار از مدیریت سرور ریست پسورد را انجام دهید و سپس دوباره افزودن IP را بزنید. هزینه‌ای کسر نشد.');",
+      "      if (cause === 'SSH_TIMEOUT' || cause === 'SSH_CONNECTION_FAILED') return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ اتصال SSH به سرور برقرار نشد. روشن بودن سرور و دسترسی پورت ۲۲ را بررسی کنید. هزینه‌ای کسر نشد.');",
       "      return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ تست خودکار IP کامل نشد؛ برای جلوگیری از تحویل IP تأییدنشده عملیات متوقف شد و هزینه‌ای کسر نشد.');",
       '    }',
       "    return editOrSendMessage(chatId, additionalIpProgressMessage?.message_id, '❌ ساخت IP اضافه در Hetzner انجام نشد. لطفاً دوباره تلاش کنید.');"
