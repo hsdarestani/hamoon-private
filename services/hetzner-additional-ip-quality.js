@@ -26,6 +26,35 @@ function withTimeout(promise, timeoutMs, errorFactory) {
 }
 const ipv4 = value => net.isIP(String(value || '').trim()) === 4 ? String(value).trim() : null;
 
+async function waitForCandidateTcp(ip, timeoutMs = 7000) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 7000);
+  while (Date.now() < deadline) {
+    const ok = await new Promise(resolve => {
+      const socket = net.createConnection({ host: ip, port: 22 });
+      let done = false;
+      const finish = value => {
+        if (done) return;
+        done = true;
+        try { socket.destroy(); } catch (_) {}
+        resolve(value);
+      };
+      socket.setTimeout(1200, () => finish(false));
+      socket.once('connect', () => finish(true));
+      socket.once('error', () => finish(false));
+    });
+    if (ok) return true;
+    await sleep(450);
+  }
+  return false;
+}
+
+function alternateHomeLocations(location) {
+  const current = String(location || '').toLowerCase();
+  const eu = ['nbg1', 'fsn1', 'hel1'];
+  if (!eu.includes(current)) return [current].filter(Boolean);
+  return [current, ...eu.filter(x => x !== current)];
+}
+
 function primaryIp(server) {
   return ipv4(server?.public_net?.ipv4?.ip || server?.public_ip || server?.ip);
 }
@@ -137,17 +166,88 @@ function globalReady(q) {
   return selected > 0 && success >= required;
 }
 
+function regionAllFailed(region) {
+  const selected = Number(region?.selected || 0);
+  const completed = Number(region?.completed || 0);
+  const success = Number(region?.success || 0);
+  return selected > 0 && completed >= selected && success === 0;
+}
+
+function iranStillPending(q) {
+  const selected = Number(q?.iran?.selected || 0);
+  const completed = Number(q?.iran?.completed || 0);
+  const required = Number(q?.iran?.required || 0);
+  const success = Number(q?.iran?.success || 0);
+  return selected > 0 && completed < selected && success < Math.max(1, required);
+}
+
 async function quality(ip, check = lifecycle.checkIpQuality) {
-  const tries = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_RECHECKS, 2, 1, 4);
-  const polls = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLLS, 15, 6, 24);
-  const delay = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLL_DELAY_MS, 1500, 750, 4000);
-  let last = null;
-  for (let i = 0; i < tries; i += 1) {
-    last = await check(ip, { polls, pollDelayMs: delay });
-    if (last?.ok || (last?.definitive && globalReady(last))) return last;
-    if (i + 1 < tries) await sleep(2500);
+  const fastPolls = clamp(process.env.HETZNER_ADDITIONAL_IP_FAST_POLLS, 4, 2, 8);
+  const fastDelay = clamp(process.env.HETZNER_ADDITIONAL_IP_FAST_POLL_DELAY_MS, 650, 350, 1500);
+  const fullPolls = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLLS, 7, 4, 14);
+  const fullDelay = clamp(process.env.HETZNER_ADDITIONAL_IP_QUALITY_POLL_DELAY_MS, 800, 500, 1800);
+
+  let fast = await check(ip, {
+    iranCount: 3,
+    iranMin: 2,
+    globalCount: 3,
+    globalRatio: 0.67,
+    polls: fastPolls,
+    pollDelayMs: fastDelay
+  });
+
+  // A brand-new Floating IP can need a moment before every route/probe sees it.
+  // If the first tiny sample is completely dark or incomplete, retry that same
+  // IP once instead of deleting it and paying the provider/API cost of another candidate.
+  if (!fast?.ok && (regionAllFailed(fast?.iran) && regionAllFailed(fast?.global) || !fast?.definitive)) {
+    await sleep(1200);
+    fast = await check(ip, {
+      iranCount: 3,
+      iranMin: 2,
+      globalCount: 3,
+      globalRatio: 0.67,
+      polls: fastPolls,
+      pollDelayMs: fastDelay
+    });
   }
-  return last;
+
+  // Clearly dead on both sides: reject cheaply without a 12-node confirmation.
+  if (!fast?.ok && regionAllFailed(fast?.iran) && regionAllFailed(fast?.global)) {
+    return { ...fast, phase: 'fast_reject' };
+  }
+
+  // If the global side is definitively dead, the address is not deliverable.
+  if (!fast?.ok && fast?.definitive && regionAllFailed(fast?.global)) {
+    return { ...fast, phase: 'fast_reject' };
+  }
+
+  // Any promising or inconclusive candidate gets one full confirmation.
+  let full = await check(ip, {
+    iranCount: 6,
+    iranMin: 3,
+    globalCount: 6,
+    globalRatio: 0.67,
+    polls: fullPolls,
+    pollDelayMs: fullDelay
+  });
+  if (full?.ok) return { ...full, phase: 'full_confirm' };
+
+  // Important: when the outside world is good but Iran nodes simply have not
+  // answered yet, keep the same candidate briefly and recheck it. This avoids
+  // throwing away a potentially clean IP merely because the Iran probe was slow.
+  if (!full?.definitive && globalReady(full) && iranStillPending(full)) {
+    await sleep(1800);
+    full = await check(ip, {
+      iranCount: 6,
+      iranMin: 3,
+      globalCount: 6,
+      globalRatio: 0.67,
+      polls: fullPolls,
+      pollDelayMs: fullDelay
+    });
+  }
+
+  return { ...full, phase: 'full_confirm' };
 }
 
 async function serverFor(dc, serverId, request) {
@@ -351,8 +451,9 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
     });
   }
 
-  const attempts = clamp(maxAttempts ?? process.env.HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS, 8, 1, 12);
+  const attempts = clamp(maxAttempts ?? process.env.HETZNER_ADDITIONAL_IP_CLEAN_ATTEMPTS, 6, 1, 10);
   const blocked = await changeIp.recentBadRanges(db, { location }).catch(() => new Set());
+  const homeLocations = alternateHomeLocations(location);
   const seenIps = new Set();
   const seenRanges = new Set();
   const maxProviderDraws = Math.max(attempts, attempts * 4);
@@ -367,12 +468,14 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
     let created = null;
     let bound = false;
     try {
+      const candidateHomeLocation = homeLocations[(attempt - 1) % homeLocations.length] || location;
       created = await additionalIps.addAdditionalIpv4({
         dc,
         serverId,
         description,
         maxIps,
-        request: providerRequest
+        request: providerRequest,
+        homeLocation: candidateHomeLocation !== location ? candidateHomeLocation : undefined
       });
       const actionId = created?.action?.id ?? created?.action?.action?.id;
       const createdServerId = String(created?.ip?.server_id || '');
@@ -382,6 +485,7 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
         floating_ip_id: String(created?.ip?.id || ''),
         provider_server_id: createdServerId || null,
         action_id: actionId == null ? null : String(actionId),
+        home_location: created?.ip?.home_location || candidateHomeLocation || null,
         attempt
       });
 
@@ -473,6 +577,21 @@ async function createVerifiedAdditionalIpv4Unlocked(opts) {
         ip,
         attempt
       });
+
+      // Wait only for cheap TCP readiness before spending Check-Host probes.
+      // This prevents immediate 0/6 + 0/6 results while Hetzner's Floating-IP
+      // route is still propagating after assignment.
+      const routeReady = await waitForCandidateTcp(
+        ip,
+        Math.max(1500, Math.min(6500, remaining()))
+      );
+      console.log('[HETZNER_ADDITIONAL_IP_ROUTE_READY]', {
+        server_id: String(serverId),
+        ip,
+        attempt,
+        ready: routeReady
+      });
+
       await progress({ stage: 'quality_check', attempt, attempts, ip, remaining_ms: remaining() });
       if (remaining() <= 0) throw deadlineError();
       last = await withTimeout(
