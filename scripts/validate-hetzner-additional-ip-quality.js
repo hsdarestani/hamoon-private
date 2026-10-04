@@ -33,11 +33,17 @@ async function run() {
         id: 100 + created,
         ip: created === 1 ? '192.0.2.10' : '192.0.3.10',
         type: 'ipv4',
-        server: 42,
-        home_location: { name: 'nbg1' }
+        server: body?.server ? 42 : null,
+        home_location: { name: body?.home_location || 'nbg1' }
       };
       floating.set(String(item.id), item);
       return { floating_ip: item, action: null };
+    }
+    if (method === 'POST' && path.endsWith('/actions/assign')) {
+      const id = path.split('/')[2];
+      const item = floating.get(String(id));
+      if (item) floating.set(String(id), { ...item, server: Number(body?.server || 42) });
+      return { action: null };
     }
     if (method === 'GET' && path.startsWith('/floating_ips/')) {
       const id = path.split('/').pop();
@@ -113,7 +119,7 @@ async function run() {
   assert.strictEqual(result.attempts, 2);
   assert.strictEqual(created, 2);
   assert.strictEqual(deleted, 1, 'dirty candidate must be deleted before retry');
-  assert.strictEqual(qualityCalls, 2);
+  assert(qualityCalls >= 3 && qualityCalls <= 5, 'adaptive quality should use bounded fast/full probes');
   assert(progressEvents.some(event => event.stage === 'quality_check' && event.attempt === 1));
   assert(progressEvents.some(event => event.stage === 'candidate_rejected' && event.attempt === 1));
   assert(progressEvents.some(event => event.stage === 'success' && event.attempt === 2));
@@ -164,6 +170,10 @@ async function run() {
   assert(!serviceSource.includes("const { Client } = require('ssh2');"));
   assert(serviceSource.includes("...existingAdditional.map(item => ipv4(item?.ip)).filter(Boolean)"));
   assert(serviceSource.includes("stage: 'os_config'"));
+  assert(serviceSource.includes("HETZNER_ADDITIONAL_IP_ROUTE_READY"));
+  assert(serviceSource.includes("iranCount: 3"));
+  assert(serviceSource.includes("full_confirm"));
+  assert(serviceSource.includes("alternateHomeLocations(location)"));
 
   const helperSource = fs.readFileSync(require.resolve('./ssh-exec-helper.js'), 'utf8');
   assert(helperSource.includes("fs.existsSync('/usr/bin/ssh')"));
@@ -173,8 +183,9 @@ async function run() {
   assert(!helperSource.includes("require('ssh2')"));
 
   const bootstrapSource = fs.readFileSync(require.resolve('../hetzner-additional-ip-quality-bootstrap.js'), 'utf8');
-  assert(bootstrapSource.includes("progress?.stage === 'os_config'"));
-  assert(bootstrapSource.includes("در حال فعال‌سازی آن روی سیستم‌عامل سرور"));
+  assert(bootstrapSource.includes("progress?.stage !== 'attempt_start'"));
+  assert(bootstrapSource.includes("editOrSendMessage(chatId, additionalIpProgressMessage?.message_id"));
+  assert(bootstrapSource.includes("maxAttempts: 6"));
 
   const core = fs.readFileSync(require.resolve('../index-core.js'), 'utf8');
   assert(core.includes("const hetznerAdditionalIpCreateLocks = new Map();"));
@@ -195,7 +206,8 @@ async function run() {
   assert(patched.includes('additionalIpQuality.createVerifiedAdditionalIpv4'));
   assert(patched.includes('NO_CLEAN_ADDITIONAL_IPV4_AVAILABLE'));
   assert(patched.includes('ADDITIONAL_IP_SEARCH_TIMEOUT'));
-  assert(patched.includes("progress?.stage === 'quality_check'"));
+  assert(patched.includes("progress?.stage !== 'attempt_start'"));
+  assert(patched.includes("additionalIpProgressMessage = await sendMessage"));
   assert(patched.includes('additionalIpQuality.deleteVerifiedAdditionalIp'));
   new vm.Script(patched, { filename: 'index-core.additional-ip-quality.patched.js' });
 
