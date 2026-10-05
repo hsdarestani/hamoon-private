@@ -81,6 +81,94 @@ Success:
 { "ok": true, "status": "renamed", "name": "Customer Production" }
 ```
 
+### `POST /servers/{id}/billing-cycle`
+Changes an existing server between hourly and monthly billing.
+
+The settlement is prorated like the Telegram bot: HamoonCloud calculates the unused value of the current billing cycle, applies it as credit, calculates the new cycle price, and then charges or refunds only the net difference. The wallet update and billing-cycle update are committed atomically.
+
+Request body:
+
+```json
+{
+  "duration": "monthly"
+}
+```
+
+Allowed values for `duration`:
+
+- `hourly`
+- `monthly`
+
+Example: change a server to monthly billing:
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/billing-cycle \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"duration":"monthly"}'
+```
+
+Example: change it back to hourly billing:
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers/123456/billing-cycle \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"duration":"hourly"}'
+```
+
+Successful response:
+
+```json
+{
+  "ok": true,
+  "status": "billing_cycle_changed",
+  "previous_duration": "hourly",
+  "duration": "monthly",
+  "price": 2500000,
+  "pricing_mode": "legacy",
+  "monthly_basis_price": null,
+  "unused_credit": 3200,
+  "wallet_adjustment": 2496800,
+  "charged": 2496800,
+  "refunded": 0,
+  "wallet_balance": 5400000
+}
+```
+
+Settlement fields:
+
+- `price`: full price of the new billing cycle.
+- `unused_credit`: unused value remaining from the previous cycle.
+- `wallet_adjustment`: net wallet adjustment. A positive number means money was charged; a negative number means money was refunded.
+- `charged`: amount deducted from the wallet.
+- `refunded`: amount returned to the wallet.
+- `wallet_balance`: wallet balance after the atomic settlement.
+
+If the server is already on the requested cycle, the API returns `status: "unchanged"` and does not change the wallet.
+
+If the available wallet is not enough, HTTP `402` is returned:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "INSUFFICIENT_WALLET",
+    "message": "موجودی قابل استفاده برای تغییر دوره کافی نیست.",
+    "details": {
+      "target_cycle_price": 2500000,
+      "unused_credit": 3200,
+      "wallet_adjustment": 2496800,
+      "spendable_wallet": 1000000,
+      "reserved_wallet": 0,
+      "missing": 1496800
+    }
+  }
+}
+```
+
+The change is rejected with HTTP `409` if the server has not been fully delivered yet or if another billing-cycle change happened concurrently.
+
 ### `POST /servers/{id}/reset-password`
 Requests a new root password from Hetzner and returns it once in the response. Store/transmit this value securely and do not log it.
 
@@ -219,6 +307,7 @@ Direct reboot is not advertised in v1 and currently returns `501 UNSUPPORTED_ACT
 | Feature | Method | Endpoint |
 |---|---|---|
 | Rename/display name | `PATCH` | `/servers/{id}/name` |
+| Change billing cycle | `POST` | `/servers/{id}/billing-cycle` |
 | Reset root password | `POST` | `/servers/{id}/reset-password` |
 | Create snapshot | `POST` | `/servers/{id}/snapshots` |
 | List snapshots | `GET` | `/servers/{id}/snapshots` |
@@ -247,7 +336,7 @@ Errors use this shape:
 }
 ```
 
-Common codes include `AUTH_REQUIRED`, `INVALID_API_KEY`, `NOT_ALLOWED`, `SERVER_NOT_FOUND`, `SERVER_STATE_CONFLICT`, `OPERATION_IN_PROGRESS`, `RATE_LIMITED`, `IMAGE_REQUIRED`, `NAME_REQUIRED`, `NAME_TOO_LONG`, `ROOT_PASSWORD_UNAVAILABLE`, and provider-specific errors.
+Common codes include `AUTH_REQUIRED`, `INVALID_API_KEY`, `NOT_ALLOWED`, `SERVER_NOT_FOUND`, `SERVER_STATE_CONFLICT`, `OPERATION_IN_PROGRESS`, `RATE_LIMITED`, `INVALID_DURATION`, `INVALID_CURRENT_DURATION`, `PLAN_NOT_FOUND`, `PRICE_UNAVAILABLE`, `INSUFFICIENT_WALLET`, `SERVER_NOT_DELIVERED`, `BILLING_CYCLE_CONFLICT`, `IMAGE_REQUIRED`, `NAME_REQUIRED`, `NAME_TOO_LONG`, `ROOT_PASSWORD_UNAVAILABLE`, and provider-specific errors.
 
 Every API response includes an `X-Request-Id` header for troubleshooting.
 
