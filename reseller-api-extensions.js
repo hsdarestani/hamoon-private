@@ -123,23 +123,110 @@ function createResellerApiExtensionsRouter() {
   router.post('/servers/:id/billing-cycle', auth, ownedPurchase, async (req, res, next) => {
     try {
       const duration = String(requestInput(req).duration || '').trim().toLowerCase();
-      if (!['hourly', 'monthly'].includes(duration)) return apiError(res, 400, 'INVALID_DURATION', 'دوره پرداخت معتبر نیست.');
-      if (String(req.purchase.duration || '').toLowerCase() === duration) {
-        return res.json({ ok: true, status: 'unchanged', duration, price: Number(req.purchase.amount || 0) });
+      if (!['hourly', 'monthly'].includes(duration)) {
+        return apiError(res, 400, 'INVALID_DURATION', 'دوره پرداخت معتبر نیست. فقط hourly و monthly مجاز هستند.');
       }
+
+      const currentDuration = String(req.purchase.duration || '').trim().toLowerCase();
+      if (!['hourly', 'monthly'].includes(currentDuration)) {
+        return apiError(res, 409, 'INVALID_CURRENT_DURATION', 'دوره پرداخت فعلی سرور برای تغییر از طریق API پشتیبانی نمی‌شود.');
+      }
+      if (currentDuration === duration) {
+        return res.json({
+          ok: true,
+          status: 'unchanged',
+          previous_duration: currentDuration,
+          duration,
+          price: Number(req.purchase.amount || 0),
+          wallet_adjustment: 0,
+          charged: 0,
+          refunded: 0
+        });
+      }
+
       const plans = await getHetznerSellablePlans(req.dc);
       const plan = plans.find(p => String(p.id || '').toLowerCase() === String(req.purchase.flavor_id || '').toLowerCase());
       if (!plan) return apiError(res, 404, 'PLAN_NOT_FOUND', 'پلن فعلی سرور در کاتالوگ پیدا نشد.');
-      const pricing = createApiPricingSnapshot(req.apiClient, plan, duration);
-      if (!(Number(pricing.amount) > 0)) return apiError(res, 503, 'PRICE_UNAVAILABLE', 'قیمت دوره جدید در دسترس نیست.');
-      await db.updatePurchaseCycle(req.params.id, duration, pricing.amount, 2);
+
+      const currentPricing = createApiPricingSnapshot(req.apiClient, plan, currentDuration);
+      const targetPricing = createApiPricingSnapshot(req.apiClient, plan, duration);
+      const targetPrice = Math.max(1, Math.round(Number(targetPricing.amount || 0)));
+      if (!(targetPrice > 0)) return apiError(res, 503, 'PRICE_UNAVAILABLE', 'قیمت دوره جدید در دسترس نیست.');
+
+      const cycleHours = currentDuration === 'monthly' ? 720 : 1;
+      const storedAmount = Number(req.purchase.amount || 0);
+      if (!(storedAmount > 0)) return apiError(res, 409, 'INVALID_BILLING_AMOUNT', 'مبلغ دوره فعلی سرور معتبر نیست.');
+
+      // Keep parity with the Telegram bot's legacy-amount recovery. Some old
+      // non-hourly rows stored an hourly amount instead of the full cycle.
+      let currentCycleAmount = storedAmount;
+      if (currentDuration !== 'hourly' && Number(currentPricing.amount) > 0) {
+        const expectedCurrentAmount = Number(currentPricing.amount);
+        const expandedLegacyAmount = Math.round(storedAmount * cycleHours);
+        const storedDistance = Math.abs(storedAmount - expectedCurrentAmount);
+        const expandedDistance = Math.abs(expandedLegacyAmount - expectedCurrentAmount);
+        if (expandedDistance < storedDistance) currentCycleAmount = expandedLegacyAmount;
+      }
+
+      const now = new Date();
+      const lastBilledDate = new Date(req.purchase.last_billed_at || req.purchase.created_at || now);
+      const elapsedHours = Number.isNaN(lastBilledDate.getTime())
+        ? 0
+        : Math.max(0, (now.getTime() - lastBilledDate.getTime()) / 3600000);
+      const hourlyPrice = currentCycleAmount / cycleHours;
+      const unusedHours = Math.max(0, cycleHours - elapsedHours);
+      const unusedCreditRaw = unusedHours * hourlyPrice;
+      const unusedCredit = Math.max(0, Math.round(unusedCreditRaw));
+      const walletDifference = Math.round(targetPrice - unusedCreditRaw);
+
+      let result;
+      try {
+        result = await db.changePurchaseCycleAtomic({
+          telegramId: req.apiClient.telegram_id,
+          serverId: req.params.id,
+          datacenter: req.purchase.datacenter,
+          expectedCurrentCycle: currentDuration,
+          newCycle: duration,
+          newAmount: targetPrice,
+          walletDifference,
+          serverName: req.purchase.server_name
+        });
+      } catch (error) {
+        if (error?.code === 'INSUFFICIENT_WALLET') {
+          const pendingReserved = Math.max(0, Number(error.pendingReserved || 0));
+          const spendableWallet = Math.max(0, Number(error.spendableWallet || 0));
+          const missing = Math.max(0, walletDifference - spendableWallet);
+          return apiError(res, 402, 'INSUFFICIENT_WALLET', 'موجودی قابل استفاده برای تغییر دوره کافی نیست.', {
+            target_cycle_price: targetPrice,
+            unused_credit: unusedCredit,
+            wallet_adjustment: walletDifference,
+            spendable_wallet: spendableWallet,
+            reserved_wallet: pendingReserved,
+            missing
+          });
+        }
+        if (error?.code === 'SERVER_NOT_DELIVERED') {
+          return apiError(res, 409, 'SERVER_NOT_DELIVERED', 'تغییر دوره فقط پس از تحویل کامل سرور امکان‌پذیر است.');
+        }
+        if (error?.code === 'PURCHASE_CYCLE_CHANGED' || error?.code === 'PURCHASE_CYCLE_CONCURRENT_UPDATE') {
+          return apiError(res, 409, 'BILLING_CYCLE_CONFLICT', 'دوره پرداخت هم‌زمان تغییر کرده است. اطلاعات سرور را دوباره دریافت و تلاش کنید.');
+        }
+        throw error;
+      }
+
       return res.json({
         ok: true,
         status: 'billing_cycle_changed',
+        previous_duration: currentDuration,
         duration,
-        price: Number(pricing.amount),
-        pricing_mode: pricing.pricingMode,
-        monthly_basis_price: pricing.monthlyBasisPrice
+        price: targetPrice,
+        pricing_mode: targetPricing.pricingMode,
+        monthly_basis_price: targetPricing.monthlyBasisPrice,
+        unused_credit: unusedCredit,
+        wallet_adjustment: walletDifference,
+        charged: Math.max(0, walletDifference),
+        refunded: Math.max(0, -walletDifference),
+        wallet_balance: Number(result.newWallet)
       });
     } catch (error) { next(error); }
   });
