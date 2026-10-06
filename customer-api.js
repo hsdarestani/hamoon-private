@@ -61,6 +61,22 @@ function isHetznerDc(dcConfigOrKey) {
   return provider === 'hetzner' || apiType === 'hetzner' || key === 'hetzner' || key.startsWith('hetzner-') || !!dcConfigOrKey.HETZNER_LOCATION;
 }
 function hetznerDcKeys() { return Object.keys(datacenters).filter(key => isHetznerDc(datacenters[key])); }
+function apiHetznerLocations(client) {
+  return Object.entries(datacenters)
+    .filter(([key, dc]) => isHetznerDc({ ...(dc || {}), key }) && dc?.enabled !== false)
+    .map(([key, dc]) => ({
+      datacenter: key,
+      location: String(dc.HETZNER_LOCATION || '').trim().toLowerCase(),
+      name: dc.name || dc.label || key,
+      provider: 'hetzner'
+    }))
+    .filter(item =>
+      item.location &&
+      isAllowed(client?.allowed_datacenters, item.datacenter) &&
+      isAllowed(client?.allowed_locations, item.location)
+    )
+    .sort((a, b) => a.name.localeCompare(b.name, 'fa'));
+}
 async function findUserHetznerPurchase(telegramId, serverId) {
   for (const dcKey of hetznerDcKeys()) {
     const p = await db.getPurchaseForUserServer(telegramId, serverId, dcKey);
@@ -169,6 +185,13 @@ function createCustomerApiRouter() {
         : baseDc;
       res.json({ ok: true, location: location || null, plans: await getHetznerSellablePlans(locationDc) });
     } catch (e) { next(e); }
+  });
+
+  router.get('/locations', (req, res) => {
+    res.json({
+      ok: true,
+      locations: apiHetznerLocations(req.apiClient)
+    });
   });
 
   router.get('/usage', async (req, res, next) => {
