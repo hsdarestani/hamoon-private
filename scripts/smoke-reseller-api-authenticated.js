@@ -50,7 +50,7 @@ async function main() {
       name: 'Automated reseller API smoke',
       notes: 'Temporary CI smoke client; safe to delete',
       maxServers: 1,
-      allowedDatacenters: 'hetzner',
+      allowedDatacenters: 'hetzner,hetzner-us-east,hetzner-us-west,hetzner-singapore',
       minWalletBalance: 0,
       isActive: 1
     });
@@ -69,6 +69,19 @@ async function main() {
     const prices = await request('/api/v1/prices', key.rawKey);
     if (!Array.isArray(prices.plans) || prices.plans.length === 0) throw new Error('No sellable plans returned');
     console.log(`PASS authenticated /api/v1/prices (${prices.plans.length} plans)`);
+
+    const locations = await request('/api/v1/locations', key.rawKey);
+    if (!Array.isArray(locations.locations)) throw new Error('Locations payload invalid');
+    const expectedLocations = new Map([
+      ['hetzner-singapore', 'sin'],
+      ['hetzner-us-east', 'ash'],
+      ['hetzner-us-west', 'hil']
+    ]);
+    for (const [datacenter, location] of expectedLocations) {
+      const found = locations.locations.some(item => item?.datacenter === datacenter && item?.location === location);
+      if (!found) throw new Error(`Missing reseller location ${datacenter}/${location}`);
+    }
+    console.log('PASS authenticated /api/v1/locations (Singapore + US East + US West)');
 
     const servers = await request('/api/v1/servers', key.rawKey);
     if (!Array.isArray(servers.servers)) throw new Error('Servers payload invalid');
