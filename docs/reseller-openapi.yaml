@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: HamoonCloud Reseller API
-  version: 1.1.0
+  version: 1.2.0
   description: Backend API for HamoonCloud reseller integrations.
 servers:
   - url: https://pay.hamooncloud.ir/api/v1
@@ -20,6 +20,11 @@ paths:
       responses:
         '200': { description: Current wallet balance }
         '401': { $ref: '#/components/responses/AuthError' }
+  /locations:
+    get:
+      summary: List enabled Hetzner provisioning locations
+      responses:
+        '200': { description: Datacenter/location pairs allowed for this reseller API client }
   /usage:
     get:
       summary: Get API/account usage summary
@@ -246,7 +251,10 @@ components:
           description: Plan ID/type returned by GET /prices.
         name: { type: string, maxLength: 63 }
         image: { type: string, default: ubuntu-24.04 }
-        location: { type: string }
+        location:
+          type: string
+          description: Hetzner location code. Current regional codes include nbg1, fsn1, hel1, ash, hil and sin.
+          examples: [nbg1, ash, hil, sin]
         duration:
           type: string
           enum: [hourly, monthly]
@@ -254,6 +262,8 @@ components:
         datacenter:
           type: string
           default: hetzner
+          description: HamoonCloud datacenter key. Regional keys include hetzner-us-east, hetzner-us-west and hetzner-singapore.
+          examples: [hetzner, hetzner-us-east, hetzner-us-west, hetzner-singapore]
         ssh_key:
           type: string
           maxLength: 4096
