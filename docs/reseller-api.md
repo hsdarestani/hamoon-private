@@ -37,6 +37,27 @@ Returns API-client usage summary. This is API/account usage, not per-server netw
 ### `GET /prices`
 Returns currently sellable Hetzner plans and reseller prices. Always use this endpoint instead of hard-coding plan prices.
 
+### `GET /locations`
+Returns the Hetzner locations/datacenters enabled for this API client. Use the returned `datacenter` and `location` values when creating a server.
+
+Current HamoonCloud Hetzner region mapping:
+
+| Region | `datacenter` | `location` |
+|---|---|---|
+| Germany, Nuremberg | `hetzner` | `nbg1` |
+| Germany, Falkenstein | `hetzner-falkenstein` | `fsn1` |
+| Finland | `hetzner-finland` | `hel1` |
+| USA East | `hetzner-us-east` | `ash` |
+| USA West | `hetzner-us-west` | `hil` |
+| Singapore | `hetzner-singapore` | `sin` |
+
+Example:
+
+```bash
+curl https://pay.hamooncloud.ir/api/v1/locations \
+  -H "Authorization: Bearer $HAMOON_API_KEY"
+```
+
 ## Server endpoints
 
 ### `GET /servers`
@@ -64,6 +85,58 @@ curl -X POST https://pay.hamooncloud.ir/api/v1/servers \
 ```
 
 Supported creation fields: `server_type` (required), `name`, `image`, `location`, `duration`, `datacenter`, and `ssh_key`.
+
+For regional servers, keep using the same `POST /servers` endpoint and send the regional pair returned by `GET /locations`.
+
+Singapore:
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "sg-customer-001",
+    "server_type": "cpx22",
+    "image": "ubuntu-24.04",
+    "datacenter": "hetzner-singapore",
+    "location": "sin",
+    "duration": "monthly"
+  }'
+```
+
+USA East (Ashburn):
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "us-east-customer-001",
+    "server_type": "cpx22",
+    "image": "ubuntu-24.04",
+    "datacenter": "hetzner-us-east",
+    "location": "ash",
+    "duration": "monthly"
+  }'
+```
+
+USA West (Hillsboro):
+
+```bash
+curl -X POST https://pay.hamooncloud.ir/api/v1/servers \
+  -H "Authorization: Bearer $HAMOON_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "us-west-customer-001",
+    "server_type": "cpx22",
+    "image": "ubuntu-24.04",
+    "datacenter": "hetzner-us-west",
+    "location": "hil",
+    "duration": "monthly"
+  }'
+```
+
+Before creating a regional server, call `GET /prices?location=sin`, `GET /prices?location=ash`, or `GET /prices?location=hil` to obtain server types currently available in that exact region. Availability can differ by location.
 
 ### `PATCH /servers/{id}/name`
 Changes the HamoonCloud display name for the server. The name may contain normal Unicode text and is limited to 64 characters. Send an empty name to clear the custom display name and return to the technical server name.
