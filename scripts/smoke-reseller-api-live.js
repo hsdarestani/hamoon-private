@@ -35,7 +35,7 @@ async function main() {
   }
 
   const headers = { Authorization: `Bearer ${apiKey}` };
-  for (const path of ['/api/v1/me', '/api/v1/wallet', '/api/v1/prices', '/api/v1/servers']) {
+  for (const path of ['/api/v1/me', '/api/v1/wallet', '/api/v1/prices', '/api/v1/locations', '/api/v1/servers']) {
     const out = await request(path, { headers });
     if (out.response.status !== 200 || !out.body?.ok) {
       throw new Error(`${path} failed: HTTP ${out.response.status} ${JSON.stringify(out.body)}`);
