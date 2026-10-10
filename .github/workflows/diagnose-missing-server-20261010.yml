@@ -106,4 +106,53 @@ jobs:
             }
           })().catch(e=>{console.error('AUDIT_FAILED='+String(e?.code||e?.message||e).slice(0,120));process.exitCode=1});
           NODE
+          node <<'PRIVATE_AUDIT'
+          require('dotenv').config();
+          const fs=require('fs');
+          const crypto=require('crypto');
+          const mysql=require('mysql2/promise');
+          const pem="-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7D5jbdqP65wHwiZtEl1d\n11COC0kCMIub19t/xoIlGcVc36CJRSrmVmMx6/PM8TaFRAROwNkjksbt0bAmZRwP\nlSk4WFDYIm+5Tc/5hIPn5qd/v9Y4ygVaCdc3ZPuYMECuJtRFlHzsFNCbU8+V4lcz\ntzH6Od1839T09386t3VCo0p7ZHKRFmZghXbMrKdzWceP0e8ZLn9NLz7ABr9LpZfx\n3MObjH8VeLzYMB/atcXedthloQv4uqrWKX6Tbkv0hY1F+6vgusOOpH02KbbkKP1M\n8la/ATEJ6afwO4vlk1mhVWOfSKS1yzNsLztho/aQahCmEKhDlYY1mCXl+ma6rvh3\nTQIDAQAB\n-----END PUBLIC KEY-----\n";
+          (async()=>{
+            const conn=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            let report;
+            try{
+              await conn.query('START TRANSACTION READ ONLY');
+              const [rows]=await conn.execute('SELECT server_id,telegram_id,server_name,public_ip,duration,status,amount,pricing_mode,monthly_basis_price,auto_renew_disabled_at,renewal_stopped_at,deleted_at,delivered_at,created_at,last_billed_at FROM purchases WHERE server_name=? OR public_ip=? ORDER BY created_at DESC LIMIT 3',['Srv-NBG-0df200','91.107.243.122']);
+              report={purchases:[]};
+              for(const p of rows){
+                const [wallet]=await conn.execute('SELECT type,amount,timestamp,description FROM wallet_logs WHERE telegram_id=? AND (description LIKE ? OR description LIKE ?) ORDER BY timestamp ASC LIMIT 100',[String(p.telegram_id),'%'+String(p.server_id)+'%','%Srv-NBG-0df200%']);
+                let events=[];
+                try{
+                  const [x]=await conn.execute('SELECT event_type,amount_toman,period_start,period_end,metadata FROM billing_events WHERE server_id=? AND telegram_id=? ORDER BY period_start ASC LIMIT 100',[String(p.server_id),String(p.telegram_id)]);
+                  events=x;
+                }catch(e){events=[{query_error:String(e.code||'failed')}]}
+                const logEvents=[];
+                try{
+                  const f='server_events.log';
+                  if(fs.existsSync(f)&&fs.statSync(f).size<30000000){
+                    for(const line of fs.readFileSync(f,'utf8').split('\n')){
+                      if(!line.includes(String(p.server_id)))continue;
+                      const j=line.indexOf('{');
+                      if(j<0)continue;
+                      try{
+                        const e=JSON.parse(line.slice(j));
+                        if(String(e.server_id||'')!==String(p.server_id))continue;
+                        logEvents.push({at:line.slice(0,j).trim(),type:String(e.type||''),status:e.status||null,code:e.code||null});
+                      }catch(_){}
+                    }
+                  }
+                }catch(e){logEvents.push({error:String(e.code||'unavailable')})}
+                report.purchases.push({server_name:p.server_name,duration:p.duration,status:p.status,amount:p.amount,pricing_mode:p.pricing_mode,monthly_basis_price:p.monthly_basis_price,auto_renew_disabled_at:p.auto_renew_disabled_at,renewal_stopped_at:p.renewal_stopped_at,deleted_at:p.deleted_at,created_at:p.created_at,delivered_at:p.delivered_at,last_billed_at:p.last_billed_at,wallet,events,logEvents});
+              }
+              await conn.query('ROLLBACK');
+            }finally{await conn.end()}
+            const key=crypto.randomBytes(32);
+            const iv=crypto.randomBytes(12);
+            const c=crypto.createCipheriv('aes-256-gcm',key,iv);
+            const msg=Buffer.from(JSON.stringify(report),'utf8');
+            const data=Buffer.concat([c.update(msg),c.final()]);
+            const encryptedKey=crypto.publicEncrypt({key:pem,padding:crypto.constants.RSA_PKCS1_OAEP_PADDING,oaepHash:'sha256'},key);
+            console.log('PRIVATE_AUDIT_B64='+JSON.stringify({key:encryptedKey.toString('base64'),iv:iv.toString('base64'),tag:c.getAuthTag().toString('base64'),data:data.toString('base64')}));
+          })().catch(e=>{console.error('PRIVATE_AUDIT_FAILED='+String(e.code||e.message).slice(0,100));process.exitCode=1});
+          PRIVATE_AUDIT
           REMOTE
