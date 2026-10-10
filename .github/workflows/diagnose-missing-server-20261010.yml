@@ -70,6 +70,15 @@ jobs:
                   suspend_reason:r.suspend_reason||null
                 };
                 console.log('PURCHASE_SUMMARY='+JSON.stringify(item));
+              const iso=x=>x?new Date(x).toISOString():null;
+              console.log('LIFECYCLE_TIMES='+JSON.stringify({created:iso(r.created_at),delivered:iso(r.delivered_at),last_billed:iso(r.last_billed_at),renewal_stopped:iso(r.renewal_stopped_at),deleted:iso(r.deleted_at),updated:iso(r.updated_at)}));
+              const [walletSummary]=await conn.execute("SELECT type,COUNT(*) AS n,MIN(timestamp) AS first_log,MAX(timestamp) AS last_log,SUM(CASE WHEN amount<0 THEN 1 ELSE 0 END) AS debits,SUM(CASE WHEN amount>0 THEN 1 ELSE 0 END) AS credits FROM wallet_logs WHERE telegram_id=? AND (description LIKE ? OR description LIKE ?) GROUP BY type ORDER BY type",[String(r.telegram_id),'%'+String(r.server_id)+'%','%'+targetName+'%']);
+              console.log('WALLET_SUMMARY='+JSON.stringify(walletSummary.map(x=>({type:x.type,count:Number(x.n),debits:Number(x.debits),credits:Number(x.credits),first:safeDate(x.first_log),last:safeDate(x.last_log)}))));
+              try {
+                const [ev]=await conn.execute('SELECT event_type,COUNT(*) AS n FROM billing_events WHERE server_id=? AND telegram_id=? GROUP BY event_type',[String(r.server_id),String(r.telegram_id)]);
+                console.log('BILLING_EVENTS='+JSON.stringify(ev.map(x=>({type:x.event_type,count:Number(x.n)}))));
+              }catch(e){console.log('BILLING_EVENTS_QUERY_ERROR='+errCode(e))}
+
                 const [logs]=await conn.execute('SELECT type,timestamp FROM wallet_logs WHERE telegram_id=? AND (description LIKE ? OR description LIKE ?) ORDER BY timestamp DESC LIMIT 5',[String(r.telegram_id),'%'+String(r.server_id)+'%','%'+targetName+'%']);
                 console.log('MATCHED_WALLET_LOGS='+JSON.stringify({count:logs.length,events:logs.map(x=>({type:String(x.type||''),date:safeDate(x.timestamp)}))}));
               }
