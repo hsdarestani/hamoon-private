@@ -1,0 +1,100 @@
+name: Read-only missing server audit
+on:
+  push:
+    branches: ['diagnostics/read-only-missing-server-20261010']
+    paths: ['.github/workflows/diagnose-missing-server-20261010.yml']
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    env:
+      SSH_HOST: ${{ secrets.HAMOON_SERVER_HOST }}
+      SSH_USER: ${{ secrets.HAMOON_SERVER_USER }}
+      SSH_PORT: ${{ secrets.HAMOON_SERVER_PORT }}
+      SSH_KEY: ${{ secrets.HAMOON_SERVER_SSH_KEY }}
+      SERVER_PATH: ${{ secrets.HAMOON_SERVER_PATH }}
+    steps:
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" && test -n "$SSH_USER" && test -n "$SSH_PORT" && test -n "$SSH_KEY" && test -n "$SERVER_PATH"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/k
+          chmod 600 ~/.ssh/k
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Inspect matching records without modifications
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH_B64="$(printf '%s' "$SERVER_PATH" | base64 -w0)"
+          ssh -i ~/.ssh/k -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "APP_PATH_B64='$APP_PATH_B64' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$(printf '%s' "$APP_PATH_B64" | base64 -d)"
+          node <<'NODE'
+          require('dotenv').config();
+          const mysql=require('mysql2/promise');
+          const dcs=require('./datacenters');
+          const cloud=require('./cloud-api');
+          const targetName='Srv-NBG-0df200';
+          const targetIp='91.107.243.122';
+          const safeDate=x=>x?new Date(x).toISOString().slice(0,10):null;
+          const errCode=e=>String(e?.response?.status||e?.status||e?.statusCode||e?.code||'unknown').slice(0,40);
+          (async()=>{
+            const conn=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db'});
+            let rows=[];
+            try{
+              await conn.query('START TRANSACTION READ ONLY');
+              const [main]=await conn.execute('SELECT server_id,telegram_id,datacenter,server_name,public_ip,duration,status,auto_renew,created_at,last_billed_at,delivered_at,deleted_at,updated_at,lifecycle_error_code,renewal_stopped_at,suspend_reason FROM purchases WHERE server_name = ? OR public_ip = ? OR server_name LIKE ? ORDER BY created_at DESC LIMIT 30',[targetName,targetIp,'%0df200%']);
+              rows=main;
+              const [t]=await conn.execute("SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='server_display_names'");
+              if(Number(t[0]?.c||0)){
+                const [alias]=await conn.execute('SELECT p.server_id,p.telegram_id,p.datacenter,p.server_name,p.public_ip,p.duration,p.status,p.auto_renew,p.created_at,p.last_billed_at,p.delivered_at,p.deleted_at,p.updated_at,p.lifecycle_error_code,p.renewal_stopped_at,p.suspend_reason FROM server_display_names n INNER JOIN purchases p ON n.telegram_id=p.telegram_id AND n.datacenter=p.datacenter AND n.server_id=p.server_id WHERE n.display_name=? LIMIT 10',[targetName]);
+                const seen=new Set(rows.map(r=>String(r.datacenter)+':'+String(r.server_id)));
+                for(const r of alias){const k=String(r.datacenter)+':'+String(r.server_id);if(!seen.has(k)){rows.push(r);seen.add(k)}}
+              }
+              console.log('AUDIT_MATCH_COUNT='+rows.length);
+              for(const r of rows){
+                const item={
+                  server_name_match:String(r.server_name||'')===targetName,
+                  ip_match:String(r.public_ip||'')===targetIp,
+                  datacenter:String(r.datacenter||''),status:String(r.status||''),
+                  duration:r.duration,auto_renew:Number(r.auto_renew??0),
+                  created_date:safeDate(r.created_at),last_billed_date:safeDate(r.last_billed_at),
+                  delivered:Boolean(r.delivered_at),deleted:Boolean(r.deleted_at),
+                  deleted_date:safeDate(r.deleted_at),updated_date:safeDate(r.updated_at),
+                  lifecycle_error_code:r.lifecycle_error_code||null,
+                  renewal_stopped:Boolean(r.renewal_stopped_at),
+                  suspend_reason:r.suspend_reason||null
+                };
+                console.log('PURCHASE_SUMMARY='+JSON.stringify(item));
+                const [logs]=await conn.execute('SELECT type,timestamp FROM wallet_logs WHERE telegram_id=? AND (description LIKE ? OR description LIKE ?) ORDER BY timestamp DESC LIMIT 5',[String(r.telegram_id),'%'+String(r.server_id)+'%','%'+targetName+'%']);
+                console.log('MATCHED_WALLET_LOGS='+JSON.stringify({count:logs.length,events:logs.map(x=>({type:String(x.type||''),date:safeDate(x.timestamp)}))}));
+              }
+              await conn.query('ROLLBACK');
+            }finally{await conn.end()}
+            for(const r of rows){
+              const dc=dcs[String(r.datacenter)]||dcs[String(r.datacenter||'').split('__')[0]];
+              if(!dc){console.log('PROVIDER_BY_DB=DATACENTER_CONFIG_MISSING');continue}
+              try {
+                const s=await cloud.getServer(dc,null,String(r.server_id));
+                const ip=s?.public_net?.ipv4?.ip||s?.public_ip||null;
+                console.log('PROVIDER_BY_DB='+JSON.stringify({found:true,status:s?.status||s?.state||null,name_match:String(s?.name||'')===targetName,ip_match:ip===targetIp}));
+              }catch(e){console.log('PROVIDER_BY_DB='+JSON.stringify({found:false,error:errCode(e)}))}
+            }
+            if(rows.length===0){
+              const hetzners=Object.entries(dcs).filter(([k,c])=>String(c?.provider||c?.apiType||'').toLowerCase()==='hetzner');
+              console.log('HETZNER_CONFIGS='+hetzners.length);
+              for(const [key,dc] of hetzners){
+                try{
+                  const list=await cloud.listServers(dc,null);
+                  const matching=(list||[]).filter(s=>s.name===targetName||(s?.public_net?.ipv4?.ip||s?.public_ip||null)===targetIp);
+                  console.log('PROVIDER_SEARCH='+JSON.stringify({datacenter:key,matched:matching.length,items:matching.map(s=>({name_match:s.name===targetName,ip_match:(s?.public_net?.ipv4?.ip||s?.public_ip||null)===targetIp,status:s.status||s.state||null}))}));
+                }catch(e){console.log('PROVIDER_SEARCH='+JSON.stringify({datacenter:key,error:errCode(e)}))}
+              }
+            }
+          })().catch(e=>{console.error('AUDIT_FAILED='+String(e?.code||e?.message||e).slice(0,120));process.exitCode=1});
+          NODE
+          REMOTE
