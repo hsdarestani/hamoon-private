@@ -27,7 +27,23 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/hamoon_server_key
           chmod 600 ~/.ssh/hamoon_server_key
-          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          echo '=== RUNNER_EGRESS ==='
+          if timeout 7 curl -fsS -o /dev/null https://api.telegram.org; then echo 'TELEGRAM_NET=OK'; else echo 'TELEGRAM_NET=FAILED'; fi
+          echo '=== SSH_ENDPOINT ==='
+          if [ -n "${SSH_HOST:-}" ] && [ -n "${SSH_PORT:-}" ]; then
+            if getent ahostsv4 "$SSH_HOST" >/dev/null; then echo 'SSH_DNS=OK'; else echo 'SSH_DNS=FAILED'; fi
+            for i in 1 2; do
+              if timeout 7 nc -z -w 5 "$SSH_HOST" "$SSH_PORT" </dev/null >/dev/null 2>&1; then echo "SSH_TCP_ATTEMPT_${i}=OPEN"; else echo "SSH_TCP_ATTEMPT_${i}=CLOSED_OR_TIMEOUT"; fi
+            done
+          else
+            echo 'SSH_CONFIG_MISSING'
+            exit 1
+          fi
+          if ! ssh-keyscan -T 5 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+            echo 'SSH_HANDSHAKE=FAILED'
+            exit 2
+          fi
+          echo 'SSH_HANDSHAKE=OK'
 
       - name: Inspect production
         shell: bash
