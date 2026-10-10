@@ -39,6 +39,13 @@ jobs:
             echo 'SSH_CONFIG_MISSING'
             exit 1
           fi
+          for p in 22 80 443; do
+            if timeout 6 nc -z -w 4 "$SSH_HOST" "$p" </dev/null >/dev/null 2>&1; then
+              echo "SERVER_TCP_${p}=OPEN"
+            else
+              echo "SERVER_TCP_${p}=CLOSED_OR_TIMEOUT"
+            fi
+          done
           if ! ssh-keyscan -T 5 -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
             echo 'SSH_HANDSHAKE=FAILED'
             exit 2
