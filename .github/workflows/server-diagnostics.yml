@@ -57,4 +57,39 @@ jobs:
           else
             echo PM2_NOT_FOUND
           fi
+          echo '=== BOT_PROCESS_SUMMARY ==='
+          pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const p=JSON.parse(s).map(x=>({name:x.name,pid:x.pid,status:x.pm2_env?.status,restarts:x.pm2_env?.restart_time,uptime_ms:x.pm2_env?.pm_uptime?Date.now()-x.pm2_env.pm_uptime:null,memory_mb:Math.round((x.monit?.memory||0)/1048576),cpu:x.monit?.cpu||0}));console.log(JSON.stringify(p))}catch(e){console.log('PM2_PARSE_FAILED')}})"
+          echo '=== SYSTEM_HEALTH ==='
+          uptime || true
+          df -h / | tail -1 || true
+          free -m | head -3 || true
+          echo '=== BOT_LAST_ERRORS_FILTERED ==='
+          { timeout 12 pm2 logs hamoonbot --nostream --lines 600 2>&1 || true; } | grep -E -i 'polling_error|EFATAL|409|ETIMEDOUT|ETELEGRAM|EAI_AGAIN|ENOMEM|out.of.memory|rate limit|429|TypeError|SyntaxError|Unhandled|ECONNRESET|FATAL|Cannot find module|BOT_START|ERR_|SQL|ER_' | tail -65 | cut -c 1-240 || true
+          echo '=== LIVE_TELEGRAM_DB ==='
+          timeout 25 node <<'NODE'
+          require('dotenv').config();
+          const https=require('https');
+          const mysql=require('mysql2/promise');
+          function call(method){
+            const token=process.env.TELEGRAM_BOT_TOKEN;
+            if(!token)return Promise.resolve({ok:false,issue:'BOT_TOKEN_MISSING'});
+            return new Promise(resolve=>{
+              const r=https.get('https://api.telegram.org/bot'+token+'/'+method,{timeout:7000},resp=>{
+                let s='';resp.on('data',d=>s+=d.toString().slice(0,4000-s.length));resp.on('end',()=>{
+                  try{const v=JSON.parse(s);resolve({http:resp.statusCode,ok:v.ok,code:v.error_code||null,description:v.ok?null:String(v.description||'').slice(0,110),webhook_url_set:method==='getWebhookInfo'?Boolean(v.result?.url):undefined,pending_updates:method==='getWebhookInfo'?v.result?.pending_update_count:undefined,last_error_date:method==='getWebhookInfo'?v.result?.last_error_date:undefined})}catch(e){resolve({http:resp.statusCode,issue:'BAD_RESPONSE'})}
+                });
+              });
+              r.setTimeout(7000,()=>r.destroy(new Error('TIMEOUT')));
+              r.on('error',e=>resolve({ok:false,issue:e.code||'NETWORK_ERROR'}));
+            });
+          }
+          (async()=>{
+            console.log('TELEGRAM_GET_ME='+JSON.stringify(await call('getMe')));
+            console.log('TELEGRAM_WEBHOOK='+JSON.stringify(await call('getWebhookInfo')));
+            try{
+              const c=await mysql.createConnection({host:process.env.DB_HOST||'127.0.0.1',user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME||'hamooncloud_db',connectTimeout:7000});
+              await c.query('SELECT 1');console.log('DB_STATUS=OK');await c.end();
+            }catch(e){console.log('DB_STATUS=FAILED:'+String(e.code||'unknown').slice(0,80))}
+          })().catch(e=>{console.log('HEALTH_CHECK_FAILED='+String(e.code||'unknown'))});
+          NODE
           REMOTE
